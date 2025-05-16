@@ -1,0 +1,23 @@
+# node_modules: 외부 라이브러리 폴더 (절대 Git에 올리면 안 됨)
+node_modules/
+
+# 환경 변수 파일
+.env
+
+# 로그 파일
+*.log
+
+# 운영체제 별 임시 파일
+.DS_Store
+
+# IDE 설정 (JetBrains 계열, VSCode 등)
+.idea/
+.vscode/
+
+# npm 캐시/잠금
+package-lock.json
+yarn.lock
+
+# 빌드 결과물
+dist/
+build/
