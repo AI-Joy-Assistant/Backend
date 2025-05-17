@@ -1,0 +1,25 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "AI Joy Assistant Backend API",
+    "version": "1.0.0",
+    "description": "백엔드 API Swagger 문서"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000"
+    }
+  ],
+  "paths": {
+    "/api/v1/login": {
+      "post": {
+        "summary": "User login",
+        "responses": {
+          "200": {
+            "description": "Successful login"
+          }
+        }
+      }
+    }
+  }
+}
