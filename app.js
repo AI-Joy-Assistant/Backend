@@ -1,5 +1,3 @@
-// app.js
-
 require("dotenv").config(); // .env 파일 로드
 
 const express = require("express");
@@ -24,7 +22,7 @@ app.use("/api-docs", swaggerUI.serve, swaggerUI.setup(swaggerDocument, { explore
 
 // 라우터 등록
 const authRouter = require("./src/auth/auth.router");
-authRouter(app); // 함수로 export한 경우에만 가능
+app.use('/auth', authRouter);
 
 // 에러 핸들러 (utils/errorHandler.js가 있을 경우)
 // const { errorHandler } = require("./utils/errorHandler");
