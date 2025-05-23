@@ -34,9 +34,10 @@ exports.refreshGoogleAccessToken = async (req, res) => {
 
 // [4] 로그아웃 처리
 exports.logout = async (req, res) => {
-    const result = await handleLogout(req.cookies.userEmail);
-    res.clearCookie('refreshToken');
-    res.clearCookie('userEmail');
+    const authHeader = req.headers.authorization;
+    console.log('[DEBUG] authorization:', authHeader);
+    const token = authHeader?.split(' ')[1];
+    const result = await handleLogout(token);
     return res.status(result.status).json({ message: result.message });
 };
 
