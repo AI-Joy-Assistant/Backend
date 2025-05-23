@@ -12,15 +12,15 @@
   ],
   "components": {
     "securitySchemes": {
-      "cookieAuth": {
-        "type": "apiKey",
-        "in": "cookie",
-        "name": "refreshToken"
-      },
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT"
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "refreshToken"
       }
     }
   },
@@ -74,6 +74,11 @@
         ],
         "summary": "로그아웃",
         "description": "refreshToken 쿠키 삭제. 서버에서 로그아웃 처리",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "로그아웃 완료"
@@ -114,7 +119,7 @@
       "get": {
         "tags": ["Auth"],
         "summary": "내 정보 조회 (실시간 Google API)",
-        "description": "accessToken을 Authorization 헤더로 전달하면, Google OAuth 사용자 정보를 실시간 조회합니다.",
+        "description": "Authorization 헤더에 JWT accessToken을 포함해 요청하면, Google OAuth 사용자 정보를 실시간 조회합니다.",
         "security": [
           {
             "bearerAuth": []
