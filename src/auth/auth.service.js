@@ -38,6 +38,8 @@ exports.handleGoogleCallback = async (code) => {
         });
 
         const { access_token, refresh_token, expires_in } = tokenRes.data;
+        console.log('[DEBUG] Google tokenRes:', tokenRes.data);
+
 
         // 2. 유저 정보 요청
         const userInfoRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {

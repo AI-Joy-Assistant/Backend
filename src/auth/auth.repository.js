@@ -1,44 +1,67 @@
-const Database = require('../../config/db.config');
-const db = new Database();
+const supabase = require('../../config/db.config'); // 기존 db.config.js는 이제 supabase 클라이언트!
 
+// 사용자 이메일로 조회
 exports.findUserByEmail = async (email) => {
-    const query = 'SELECT * FROM users WHERE email = $1 LIMIT 1';
-    const result = await db.query(query, [email]);
-    return result.rows[0] || null;
+    const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
+
+    if (error) throw error;
+    return data;
 };
 
+// 사용자 생성
 exports.createUser = async ({ email, name, login_provider }) => {
-    const query = `
-    INSERT INTO users (email, name, login_provider)
-    VALUES ($1, $2, $3)
-    RETURNING *`;
-    const result = await db.query(query, [email, name, login_provider]);
-    return result.rows[0];
+    const { data, error } = await supabase
+        .from('users')
+        .insert([{ email, name, login_provider }])
+        .single();
+
+    if (error) throw error;
+    return data;
 };
 
+// 사용자 상태 업데이트 (ONLINE / OFFLINE)
 exports.updateUserStatus = async (email, status) => {
-    await db.query(
-        'UPDATE users SET status = $1 WHERE email = $2',
-        [status, email]
-    );
+    const { error } = await supabase
+        .from('users')
+        .update({ status })
+        .eq('email', email);
+
+    if (error) throw error;
 };
 
-//  refresh token으로 사용자 조회
+// refresh token으로 사용자 조회
 exports.findByRefreshToken = async (refreshToken) => {
-    const query = 'SELECT * FROM users WHERE refresh_token = $1 LIMIT 1';
-    const result = await db.query(query, [refreshToken]);
-    return result.rows[0] || null;
+    const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('refresh_token', refreshToken)
+        .single();
+
+    if (error) throw error;
+    return data;
 };
 
-//  refresh token 저장
+// refresh token 저장
 exports.updateRefreshToken = async (userId, refreshToken) => {
-    const query = 'UPDATE users SET refresh_token = $1 WHERE id = $2';
-    await db.query(query, [refreshToken, userId]);
+    console.log('[DEBUG] updateRefreshToken:', { userId, refreshToken });
+    const { error } = await supabase
+        .from('users')
+        .update({ refresh_token: refreshToken })
+        .eq('id', userId);
+
+    if (error) throw error;
 };
 
-
-//  refresh token 제거 (로그아웃)
+// refresh token 제거 (로그아웃)
 exports.clearRefreshToken = async (userId) => {
-    const query = 'UPDATE users SET refresh_token = NULL WHERE id = $1';
-    await db.query(query, [userId]);
+    const { error } = await supabase
+        .from('users')
+        .update({ refresh_token: null })
+        .eq('id', userId);
+
+    if (error) throw error;
 };
