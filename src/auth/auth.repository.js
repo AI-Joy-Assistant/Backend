@@ -65,3 +65,4 @@ exports.clearRefreshToken = async (userId) => {
 
     if (error) throw error;
 };
+

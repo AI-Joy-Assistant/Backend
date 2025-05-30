@@ -192,3 +192,44 @@ exports.fetchUserInfoFromGoogle = async (token) => {
         };
     }
 };
+
+exports.saveOrUpdateUser = async (userInfo) => {
+    let user = await findUserByEmail(userInfo.email);
+    if (!user) {
+        try {
+            await createUser({
+                email: userInfo.email,
+                name: userInfo.name,
+                login_provider: 'google'
+            });
+            // 생성 후 반드시 다시 조회!
+            user = await findUserByEmail(userInfo.email);
+        } catch (err) {
+            console.error('신규 유저 생성 실패:', err);
+            return null;
+        }
+    } else {
+        await updateUserStatus(userInfo.email, 'ONLINE');
+    }
+    return user;
+};
+
+exports.generateAccessToken = (user) => {
+    return jwt.sign(
+        { id: user.id, email: user.email },
+        process.env.JWT_SECRET,
+        { expiresIn: '1h' }
+    );
+};
+
+exports.generateRefreshToken = (user) => {
+    return jwt.sign(
+        { id: user.id, email: user.email },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+    );
+};
+
+exports.saveRefreshToken = async (userId, refreshToken) => {
+    return await updateRefreshToken(userId, refreshToken);
+};

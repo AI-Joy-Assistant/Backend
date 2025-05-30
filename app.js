@@ -18,7 +18,12 @@ app.use(express.urlencoded({ extended: true }));
 app.use(methodOverride());
 app.use(cookieParser());
 app.use(cors({
-    origin: 'http://localhost:5173', // ✅ 프론트 주소 (예: Vite)
+    origin: true,
+    // [
+    //     'http://localhost:8081', // Expo 웹(현재 실행 중인 프론트엔드 주소)
+    //     'http://localhost:19006', // Expo 웹 기본 포트
+    //     'http://localhost:5173'   // 기존에 사용하던 포트(필요시)
+    //   ],// ✅ 프론트 주소 (예: Vite)
     credentials: true               // ✅ 쿠키 허용
 }));
 
