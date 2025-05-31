@@ -194,24 +194,30 @@ exports.fetchUserInfoFromGoogle = async (token) => {
 };
 
 exports.saveOrUpdateUser = async (userInfo) => {
-    let user = await findUserByEmail(userInfo.email);
-    if (!user) {
-        try {
-            await createUser({
-                email: userInfo.email,
-                name: userInfo.name,
-                login_provider: 'google'
-            });
-            // 생성 후 반드시 다시 조회!
-            user = await findUserByEmail(userInfo.email);
-        } catch (err) {
-            console.error('신규 유저 생성 실패:', err);
-            return null;
+    try {
+        let user = await findUserByEmail(userInfo.email);
+        if (!user) {
+            try {
+                const newUser = await createUser({
+                    email: userInfo.email,
+                    name: userInfo.name,
+                    login_provider: 'google'
+                });
+                if (!newUser) {
+                    throw new Error('사용자 생성 실패');
+                }
+                user = newUser;
+            } catch (err) {
+                console.error('신규 유저 생성 실패:', err);
+                throw new Error('사용자 생성 중 오류가 발생했습니다.');
+            }
         }
-    } else {
         await updateUserStatus(userInfo.email, 'ONLINE');
+        return user;
+    } catch (err) {
+        console.error('사용자 저장/업데이트 실패:', err);
+        throw err;
     }
-    return user;
 };
 
 exports.generateAccessToken = (user) => {

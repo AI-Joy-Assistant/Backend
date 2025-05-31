@@ -14,13 +14,21 @@ exports.findUserByEmail = async (email) => {
 
 // 사용자 생성
 exports.createUser = async ({ email, name, login_provider }) => {
-    const { data, error } = await supabase
-        .from('users')
-        .insert([{ email, name, login_provider }])
-        .single();
+    try {
+        const { data, error } = await supabase
+            .from('users')
+            .insert([{ email, name, login_provider }])
+            .single();
 
-    if (error) throw error;
-    return data;
+        if (error) {
+            console.error('Supabase createUser error:', error);
+            throw error;
+        }
+        return data;
+    } catch (err) {
+        console.error('신규 유저 생성 실패(원본 에러):', err);
+        throw err;
+    }
 };
 
 // 사용자 상태 업데이트 (ONLINE / OFFLINE)
