@@ -1,0 +1,1 @@
+# AI Joy Assistant Backend - Python FastAPI 버전 
