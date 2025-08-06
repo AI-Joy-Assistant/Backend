@@ -409,23 +409,4 @@ class AuthService:
         except jwt.InvalidTokenError:
             raise Exception("유효하지 않은 토큰입니다.")
         except Exception as e:
-            raise Exception(f"사용자 정보 조회 실패: {str(e)}")
-
-    @staticmethod
-    async def update_user_info(user_id: str, user_data: dict) -> Dict[str, Any]:
-        """사용자 정보 수정"""
-        try:
-            updated_user = await AuthRepository.update_user(user_id, user_data)
-            return updated_user
-        except Exception as e:
-            print(f"❌ update_user_info 오류: {str(e)}")
-            raise Exception(f"사용자 정보 수정에 실패했습니다: {str(e)}")
-
-    @staticmethod
-    async def delete_user(user_id: str) -> None:
-        """사용자 계정 삭제"""
-        try:
-            await AuthRepository.delete_user(user_id)
-        except Exception as e:
-            print(f"❌ delete_user 오류: {str(e)}")
-            raise Exception(f"사용자 계정 삭제에 실패했습니다: {str(e)}") 
+            raise Exception(f"사용자 정보 조회 실패: {str(e)}") 
