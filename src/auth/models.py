@@ -9,7 +9,12 @@ class UserBase(BaseModel):
     name: Optional[str] = None
 
 class UserCreate(UserBase):
-    pass
+    password: Optional[str] = None
+    google_id: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -38,8 +43,15 @@ class LoginResponse(BaseModel):
     user: dict
 
 class TokenResponse(BaseModel):
-    accessToken: str
-    expiresIn: int
+    access_token: str
+    token_type: str
+    expires_in: int
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 class UserProfileResponse(BaseModel):
     id: uuid.UUID

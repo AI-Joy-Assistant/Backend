@@ -1,220 +1,234 @@
-from fastapi import APIRouter, Request, Response, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
+from fastapi.responses import RedirectResponse, HTMLResponse
 from typing import Optional
+import json
+from .models import UserCreate, UserLogin, UserResponse, TokenResponse
 from .service import AuthService
-from .models import LoginResponse, TokenResponse, UserProfileResponse, MessageResponse
+from .repository import AuthRepository
+from config.database import get_supabase_client
 
-router = APIRouter(prefix="/auth", tags=["Auth"])
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-def get_auth_token(request: Request) -> Optional[str]:
-    """Authorization 헤더에서 토큰 추출"""
-    auth_header = request.headers.get("authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        return auth_header.split(" ")[1]
-    return None
-
-@router.get("/google", summary="구글 로그인 요청")
-async def google_login():
-    """Google OAuth 로그인 URL로 리디렉션"""
-    url = AuthService.get_google_auth_url()
-    return RedirectResponse(url=url)
-
-@router.get("/google/callback", summary="구글 로그인 콜백")
-async def google_callback(code: str, request: Request, response: Response):
-    """구글 로그인 콜백 처리"""
+@router.post("/register", response_model=UserResponse)
+async def register(user_data: UserCreate):
+    """사용자 회원가입"""
     try:
-        refresh_token, result = await AuthService.handle_google_callback(code)
+        user = await AuthService.register_user(user_data)
+        return user
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/login", response_model=TokenResponse)
+async def login(user_data: UserLogin):
+    """사용자 로그인"""
+    try:
+        token = await AuthService.login_user(user_data)
+        return token
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+@router.get("/google")
+async def google_auth():
+    """Google OAuth 인증 시작"""
+    from config.settings import settings
+    
+    # Google OAuth URL 생성 (리프레시 토큰을 받기 위해 prompt=consent 추가)
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth?"
+        f"client_id={settings.GOOGLE_CLIENT_ID}&"
+        f"redirect_uri={settings.GOOGLE_REDIRECT_URI}&"
+        f"response_type=code&"
+        f"scope=openid%20email%20profile&"
+        f"access_type=offline&"
+        f"prompt=consent"
+    )
+    
+    return RedirectResponse(url=auth_url)
+
+@router.get("/google/callback")
+async def google_auth_callback(code: str, request: Request):
+    """Google OAuth 콜백 처리"""
+    try:
+        from config.settings import settings
+        import httpx
         
-        # 세션에 사용자 정보 저장 (id 포함)
-        request.session["user"] = result["user"]
-        print(f"💾 세션에 사용자 정보 저장: {result['user']['email']} (ID: {result['user']['id']})")
+        print("🔍 Google OAuth 콜백 시작...")
+        print(f"📝 받은 코드: {code[:20]}...")
         
-        # 리프레시 토큰을 쿠키에 저장
-        if refresh_token:
-            response.set_cookie(
-                key="refreshToken",
-                value=refresh_token,
-                httponly=True,
-                secure=False,  # 개발환경에서는 False, 프로덕션에서는 True
-                samesite="strict",
-                max_age=7 * 24 * 60 * 60  # 7일
+        # 액세스 토큰 교환
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        }
+        
+        print("🔄 Google 액세스 토큰 교환 중...")
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(token_url, data=token_data)
+            token_response.raise_for_status()
+            tokens = token_response.json()
+            print("✅ Google 액세스 토큰 교환 성공")
+            print(f"📊 받은 토큰 정보: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
+        
+        # 사용자 정보 가져오기
+        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        
+        print("🔄 Google 사용자 정보 가져오는 중...")
+        async with httpx.AsyncClient() as client:
+            user_response = await client.get(user_info_url, headers=headers)
+            user_response.raise_for_status()
+            user_info = user_response.json()
+            print(f"✅ Google 사용자 정보: {user_info.get('email')}, {user_info.get('name')}")
+        
+        # Supabase에 사용자 정보 저장 또는 업데이트
+        print("🔄 Supabase 사용자 처리 중...")
+        
+        # Google 사용자 정보로 회원가입/로그인 처리
+        user_data = UserCreate(
+            email=user_info["email"],
+            password="",  # Google OAuth는 비밀번호가 없음
+            name=user_info.get("name", "")
+        )
+        
+        print(f"📝 처리할 사용자 데이터: {user_data.email}, {user_data.name}")
+        
+        try:
+            # 기존 사용자인지 확인하고 로그인
+            print("🔍 기존 사용자 확인 중...")
+            token = await AuthService.login_google_user(user_info)
+            print("✅ 기존 사용자 로그인 성공")
+            
+            # 기존 사용자의 경우 토큰과 프로필 정보 업데이트
+            print(f"🔄 기존 사용자 정보 업데이트 중...")
+            print(f"📝 업데이트할 토큰: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
+            
+            await AuthRepository.update_google_user_info(
+                email=user_info["email"],
+                access_token=tokens.get("access_token"),
+                refresh_token=tokens.get("refresh_token"),
+                profile_image=user_info.get("picture"),
+                name=user_info.get("name", "")
             )
+            print("✅ 기존 사용자 정보 업데이트 완료")
+            
+        except Exception as e:
+            print(f"⚠️ 기존 사용자 로그인 실패: {str(e)}")
+            # 새 사용자라면 회원가입
+            print("🆕 새 사용자 회원가입 중...")
+            try:
+                # Google 사용자 정보를 포함하여 새 사용자 생성
+                google_user_data = {
+                    "email": user_info["email"],
+                    "name": user_info.get("name", ""),
+                    "profile_image": user_info.get("picture"),
+                    "access_token": tokens.get("access_token"),
+                    "refresh_token": tokens.get("refresh_token"),
+                    "status": True
+                }
+                
+                print(f"📝 새 사용자 생성 데이터: {google_user_data}")
+                print(f"📊 토큰 정보: access_token={bool(google_user_data.get('access_token'))}, refresh_token={bool(google_user_data.get('refresh_token'))}")
+                
+                user = await AuthRepository.create_google_user(google_user_data)
+                print("✅ 새 사용자 회원가입 성공")
+                token = await AuthService.login_google_user(user_info)
+                print("✅ 새 사용자 로그인 성공")
+            except Exception as register_error:
+                print(f"❌ 새 사용자 회원가입 실패: {str(register_error)}")
+                raise register_error
         
-        # 성공 시 HTML 페이지 반환 (자동으로 창 닫기)
-        success_html = f"""
+        # 세션에 사용자 정보 저장
+        print("💾 세션에 사용자 정보 저장 중...")
+        request.session["user"] = {
+            "id": user_info["id"],
+            "email": user_info["email"],
+            "name": user_info.get("name", ""),
+            "access_token": token.access_token
+        }
+        print("✅ 세션 저장 완료")
+        
+        # HTML 응답으로 브라우저 창 닫기 및 데이터 전달
+        html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <title>로그인 성공</title>
-            <meta charset="utf-8">
-            <style>
-                body {{ 
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-                    display: flex; 
-                    justify-content: center; 
-                    align-items: center; 
-                    height: 100vh; 
-                    margin: 0; 
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }}
-                .container {{ 
-                    text-align: center; 
-                    padding: 40px;
-                    background: rgba(255,255,255,0.1);
-                    border-radius: 20px;
-                    backdrop-filter: blur(10px);
-                }}
-                .success-icon {{ font-size: 60px; margin-bottom: 20px; }}
-                .message {{ font-size: 24px; margin-bottom: 10px; }}
-                .sub-message {{ font-size: 16px; opacity: 0.8; }}
-            </style>
         </head>
         <body>
-            <div class="container">
-                <div class="success-icon">🎉</div>
-                <div class="message">로그인 성공!</div>
-                <div class="sub-message">{result['message']}</div>
-                <div class="sub-message">잠시 후 앱으로 돌아갑니다...</div>
-            </div>
             <script>
-                // 토큰을 부모 창으로 전달
+                // 부모 창에 메시지 전달
                 if (window.opener) {{
                     window.opener.postMessage({{
                         type: 'GOOGLE_LOGIN_SUCCESS',
-                        accessToken: '{result['accessToken']}',
-                        user: {result['user']},
-                        message: '{result['message']}'
+                        token: '{token.access_token}',
+                        user: {json.dumps(user_info)}
                     }}, '*');
-                }}
-                
-                // 3초 후 창 닫기 시도
-                setTimeout(() => {{
                     window.close();
-                    // 창이 닫히지 않으면 사용자에게 안내
-                    setTimeout(() => {{
-                        document.body.innerHTML = `
-                            <div class="container">
-                                <div class="success-icon">✅</div>
-                                <div class="message">로그인 완료</div>
-                                <div class="sub-message">이 창을 닫고 앱으로 돌아가세요</div>
-                            </div>
-                        `;
-                    }}, 1000);
-                }}, 2000);
+                }} else {{
+                    // 새 창에서 열린 경우 리다이렉트
+                    window.location.href = 'http://localhost:8081?token={token.access_token}';
+                }}
             </script>
+            <h1>로그인 성공!</h1>
+            <p>창이 자동으로 닫힙니다...</p>
         </body>
         </html>
         """
         
-        return HTMLResponse(content=success_html, status_code=200)
+        print("✅ HTML 응답 생성 완료")
+        return HTMLResponse(content=html_content)
         
     except Exception as e:
-        # 에러 시에도 HTML 페이지 반환
-        error_html = f"""
+        print(f"❌ Google OAuth 콜백 오류: {str(e)}")
+        # 에러 발생 시 HTML 응답
+        html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <title>로그인 실패</title>
-            <meta charset="utf-8">
-            <style>
-                body {{ 
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-                    display: flex; 
-                    justify-content: center; 
-                    align-items: center; 
-                    height: 100vh; 
-                    margin: 0; 
-                    background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
-                    color: white;
-                }}
-                .container {{ 
-                    text-align: center; 
-                    padding: 40px;
-                    background: rgba(255,255,255,0.1);
-                    border-radius: 20px;
-                    backdrop-filter: blur(10px);
-                }}
-                .error-icon {{ font-size: 60px; margin-bottom: 20px; }}
-                .message {{ font-size: 24px; margin-bottom: 10px; }}
-                .sub-message {{ font-size: 16px; opacity: 0.8; }}
-            </style>
         </head>
         <body>
-            <div class="container">
-                <div class="error-icon">❌</div>
-                <div class="message">로그인 실패</div>
-                <div class="sub-message">다시 시도해 주세요</div>
-            </div>
             <script>
-                setTimeout(() => window.close(), 3000);
+                if (window.opener) {{
+                    window.opener.postMessage({{
+                        type: 'GOOGLE_LOGIN_ERROR',
+                        error: '{str(e)}'
+                    }}, '*');
+                    window.close();
+                }} else {{
+                    window.location.href = 'http://localhost:8081?error={str(e)}';
+                }}
             </script>
+            <h1>로그인 실패</h1>
+            <p>오류: {str(e)}</p>
         </body>
         </html>
         """
-        return HTMLResponse(content=error_html, status_code=500)
-
-@router.post("/token", summary="액세스 토큰 재발급", response_model=TokenResponse)
-async def refresh_google_access_token(request: Request):
-    """리프레시 토큰으로 액세스 토큰 재발급"""
-    refresh_token = request.cookies.get("refreshToken")
-    
-    result = await AuthService.get_new_access_token_from_google(refresh_token)
-    
-    return JSONResponse(
-        status_code=result["status"],
-        content=result["body"]
-    )
+        
+        return HTMLResponse(content=html_content)
 
 @router.get("/token")
-async def get_auth_token(request: Request):
-    """세션 기반으로 JWT 토큰 반환"""
-    try:
-        # 세션에서 사용자 정보 확인
-        session_user = request.session.get("user")
-        if not session_user:
-            raise HTTPException(status_code=401, detail="로그인이 필요합니다")
-        
-        print(f"🔑 토큰 요청 - 세션 사용자: {session_user.get('email')}")
-        
-        # JWT 토큰 생성
-        jwt_token = AuthService.create_jwt_access_token(session_user)
-        
-        response_data = {
-            "accessToken": jwt_token,
-            "expiresIn": 3600,
-            "user": {
-                "email": session_user.get("email"),
-                "name": session_user.get("name"),
-                "picture": session_user.get("picture")
-            }
-        }
-        
-        print(f"✅ JWT 토큰 발급 완료: {session_user.get('email')}")
-        return response_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ 토큰 발급 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail="토큰 발급 중 오류가 발생했습니다")
-
-@router.post("/logout", summary="로그아웃", response_model=MessageResponse)
-async def logout(token: Optional[str] = Depends(get_auth_token)):
-    """로그아웃 처리"""
-    result = await AuthService.handle_logout(token)
+async def get_token(request: Request):
+    """세션에서 토큰 가져오기"""
+    user = request.session.get("user")
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     
-    return JSONResponse(
-        status_code=result["status"],
-        content={"message": result["message"]}
-    )
+    return {"accessToken": user.get("access_token")}
 
-@router.get("/me", summary="내 정보 조회", response_model=UserProfileResponse)
-async def get_google_profile(token: Optional[str] = Depends(get_auth_token)):
-    """JWT 토큰으로 사용자 정보 조회"""
-    result = await AuthService.fetch_user_info_from_google(token)
-    
-    return JSONResponse(
-        status_code=result["status"],
-        content=result["body"]
-    ) 
+@router.get("/me", response_model=UserResponse)
+async def get_current_user(current_user: dict = Depends(AuthService.get_current_user)):
+    """현재 로그인한 사용자 정보 조회"""
+    return current_user
+
+@router.post("/logout")
+async def logout(request: Request):
+    """사용자 로그아웃"""
+    # 세션에서 사용자 정보 삭제
+    if "user" in request.session:
+        del request.session["user"]
+    return {"message": "로그아웃되었습니다."} 
