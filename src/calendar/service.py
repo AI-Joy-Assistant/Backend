@@ -111,15 +111,40 @@ class GoogleCalendarService:
         """구글 캘린더에 새 이벤트를 생성합니다."""
         url = f"{self.base_url}/calendars/{calendar_id}/events"
         
+        # 문자열을 datetime 객체로 변환
+        try:
+            # ISO 8601 형식 파싱 (Z 또는 +09:00 포함)
+            start_time_str = event_data.start_time
+            end_time_str = event_data.end_time
+            
+            # Z를 +00:00으로 변환
+            if start_time_str.endswith('Z'):
+                start_time_str = start_time_str[:-1] + '+00:00'
+            if end_time_str.endswith('Z'):
+                end_time_str = end_time_str[:-1] + '+00:00'
+            
+            # +09:00 형식이 없으면 추가
+            if '+' not in start_time_str and 'T' in start_time_str:
+                start_time_str += '+09:00'
+            if '+' not in end_time_str and 'T' in end_time_str:
+                end_time_str += '+09:00'
+            
+            start_time = datetime.fromisoformat(start_time_str)
+            end_time = datetime.fromisoformat(end_time_str)
+            
+        except ValueError as e:
+            logger.error(f"날짜 파싱 실패: start_time={event_data.start_time}, end_time={event_data.end_time}, error={str(e)}")
+            raise Exception(f"잘못된 날짜 형식: {str(e)}")
+        
         event_body = {
             "summary": event_data.summary,
             "description": event_data.description,
             "start": {
-                "dateTime": event_data.start_time.isoformat(),
+                "dateTime": start_time.isoformat(),
                 "timeZone": "Asia/Seoul",
             },
             "end": {
-                "dateTime": event_data.end_time.isoformat(),
+                "dateTime": end_time.isoformat(),
                 "timeZone": "Asia/Seoul",
             },
         }
