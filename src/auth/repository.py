@@ -75,4 +75,28 @@ class AuthRepository:
         try:
             supabase.table('user').update({'refresh_token': None, 'updated_at': 'NOW()'}).eq('id', user_id).execute()
         except Exception as e:
-            raise Exception(f"리프레시 토큰 삭제 오류: {str(e)}") 
+            raise Exception(f"리프레시 토큰 삭제 오류: {str(e)}")
+
+    @staticmethod
+    async def find_user_by_google_id(google_id: str) -> Optional[Dict[str, Any]]:
+        """Google ID로 사용자 찾기"""
+        try:
+            response = supabase.table('user').select('*').eq('google_id', google_id).maybe_single().execute()
+            if response is None:
+                return None
+            return response.data
+        except Exception as e:
+            raise Exception(f"Google ID로 사용자 조회 오류: {str(e)}")
+
+    @staticmethod
+    async def create_google_user(user_data: Dict[str, str]) -> Dict[str, Any]:
+        """Google OAuth 사용자 생성"""
+        try:
+            response = supabase.table('user').insert(user_data).execute()
+            if response is None:
+                raise Exception("Google 사용자 생성 실패: response is None")
+            if response.data:
+                return response.data[0]
+            raise Exception("Google 사용자 생성 실패: response.data is empty")
+        except Exception as e:
+            raise Exception(f"Google 사용자 생성 오류: {str(e)}") 
