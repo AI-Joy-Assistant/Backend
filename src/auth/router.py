@@ -102,16 +102,22 @@ async def google_auth_callback(code: str, request: Request):
             token = await AuthService.login_google_user(user_info)
             print("✅ 기존 사용자 로그인 성공")
             
-            # 기존 사용자의 경우 토큰과 프로필 정보 업데이트
+            # 기존 사용자의 경우 토큰과 프로필 이미지만 업데이트 (닉네임은 유지)
             print(f"🔄 기존 사용자 정보 업데이트 중...")
             print(f"📝 업데이트할 토큰: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
+            print(f"📸 프로필 이미지: {user_info.get('picture')}")
+            
+            # 프로필 이미지가 있으면 항상 업데이트
+            profile_image = user_info.get("picture")
+            if profile_image:
+                print(f"✅ 프로필 이미지 업데이트: {profile_image}")
             
             await AuthRepository.update_google_user_info(
                 email=user_info["email"],
                 access_token=tokens.get("access_token"),
                 refresh_token=tokens.get("refresh_token"),
-                profile_image=user_info.get("picture"),
-                name=user_info.get("name", "")
+                profile_image=profile_image,
+                name=None  # 기존 사용자의 경우 닉네임은 변경하지 않음
             )
             print("✅ 기존 사용자 정보 업데이트 완료")
             
@@ -231,4 +237,32 @@ async def logout(request: Request):
     # 세션에서 사용자 정보 삭제
     if "user" in request.session:
         del request.session["user"]
-    return {"message": "로그아웃되었습니다."} 
+    return {"message": "로그아웃되었습니다."}
+
+@router.put("/me")
+async def update_user_info(
+    request: Request,
+    user_data: dict,
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """사용자 정보 수정"""
+    try:
+        updated_user = await AuthService.update_user_info(current_user["id"], user_data)
+        return updated_user
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/me")
+async def delete_user(
+    request: Request,
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """사용자 계정 삭제"""
+    try:
+        await AuthService.delete_user(current_user["id"])
+        # 세션에서 사용자 정보 삭제
+        if "user" in request.session:
+            del request.session["user"]
+        return {"message": "계정이 성공적으로 삭제되었습니다."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) 
