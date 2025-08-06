@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from typing import Optional
+import json
 from .models import UserCreate, UserLogin, UserResponse, TokenResponse
 from .service import AuthService
 from .repository import AuthRepository
@@ -12,11 +13,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def register(user_data: UserCreate):
     """사용자 회원가입"""
     try:
-        supabase = get_supabase_client()
-        auth_repo = AuthRepository(supabase)
-        auth_service = AuthService(auth_repo)
-        
-        user = await auth_service.register_user(user_data)
+        user = await AuthService.register_user(user_data)
         return user
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -25,11 +22,7 @@ async def register(user_data: UserCreate):
 async def login(user_data: UserLogin):
     """사용자 로그인"""
     try:
-        supabase = get_supabase_client()
-        auth_repo = AuthRepository(supabase)
-        auth_service = AuthService(auth_repo)
-        
-        token = await auth_service.login_user(user_data)
+        token = await AuthService.login_user(user_data)
         return token
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
@@ -39,14 +32,15 @@ async def google_auth():
     """Google OAuth 인증 시작"""
     from config.settings import settings
     
-    # Google OAuth URL 생성
+    # Google OAuth URL 생성 (리프레시 토큰을 받기 위해 prompt=consent 추가)
     auth_url = (
         f"https://accounts.google.com/o/oauth2/v2/auth?"
         f"client_id={settings.GOOGLE_CLIENT_ID}&"
         f"redirect_uri={settings.GOOGLE_REDIRECT_URI}&"
         f"response_type=code&"
         f"scope=openid%20email%20profile&"
-        f"access_type=offline"
+        f"access_type=offline&"
+        f"prompt=consent"
     )
     
     return RedirectResponse(url=auth_url)
@@ -58,6 +52,9 @@ async def google_auth_callback(code: str, request: Request):
         from config.settings import settings
         import httpx
         
+        print("🔍 Google OAuth 콜백 시작...")
+        print(f"📝 받은 코드: {code[:20]}...")
+        
         # 액세스 토큰 교환
         token_url = "https://oauth2.googleapis.com/token"
         token_data = {
@@ -68,53 +65,160 @@ async def google_auth_callback(code: str, request: Request):
             "redirect_uri": settings.GOOGLE_REDIRECT_URI,
         }
         
+        print("🔄 Google 액세스 토큰 교환 중...")
         async with httpx.AsyncClient() as client:
             token_response = await client.post(token_url, data=token_data)
             token_response.raise_for_status()
             tokens = token_response.json()
+            print("✅ Google 액세스 토큰 교환 성공")
+            print(f"📊 받은 토큰 정보: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
         
         # 사용자 정보 가져오기
         user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
         headers = {"Authorization": f"Bearer {tokens['access_token']}"}
         
+        print("🔄 Google 사용자 정보 가져오는 중...")
         async with httpx.AsyncClient() as client:
             user_response = await client.get(user_info_url, headers=headers)
             user_response.raise_for_status()
             user_info = user_response.json()
+            print(f"✅ Google 사용자 정보: {user_info.get('email')}, {user_info.get('name')}")
         
         # Supabase에 사용자 정보 저장 또는 업데이트
-        supabase = get_supabase_client()
-        auth_repo = AuthRepository(supabase)
-        auth_service = AuthService(auth_repo)
+        print("🔄 Supabase 사용자 처리 중...")
         
         # Google 사용자 정보로 회원가입/로그인 처리
         user_data = UserCreate(
             email=user_info["email"],
             password="",  # Google OAuth는 비밀번호가 없음
-            name=user_info.get("name", ""),
-            google_id=user_info["id"]
+            name=user_info.get("name", "")
         )
+        
+        print(f"📝 처리할 사용자 데이터: {user_data.email}, {user_data.name}")
         
         try:
             # 기존 사용자인지 확인하고 로그인
-            login_data = UserLogin(email=user_info["email"], password="")
-            token = await auth_service.login_google_user(user_info)
-        except:
+            print("🔍 기존 사용자 확인 중...")
+            token = await AuthService.login_google_user(user_info)
+            print("✅ 기존 사용자 로그인 성공")
+            
+            # 기존 사용자의 경우 토큰과 프로필 정보 업데이트
+            print(f"🔄 기존 사용자 정보 업데이트 중...")
+            print(f"📝 업데이트할 토큰: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
+            
+            await AuthRepository.update_google_user_info(
+                email=user_info["email"],
+                access_token=tokens.get("access_token"),
+                refresh_token=tokens.get("refresh_token"),
+                profile_image=user_info.get("picture"),
+                name=user_info.get("name", "")
+            )
+            print("✅ 기존 사용자 정보 업데이트 완료")
+            
+        except Exception as e:
+            print(f"⚠️ 기존 사용자 로그인 실패: {str(e)}")
             # 새 사용자라면 회원가입
-            user = await auth_service.register_google_user(user_data)
-            token = await auth_service.login_google_user(user_info)
+            print("🆕 새 사용자 회원가입 중...")
+            try:
+                # Google 사용자 정보를 포함하여 새 사용자 생성
+                google_user_data = {
+                    "email": user_info["email"],
+                    "name": user_info.get("name", ""),
+                    "profile_image": user_info.get("picture"),
+                    "access_token": tokens.get("access_token"),
+                    "refresh_token": tokens.get("refresh_token"),
+                    "status": True
+                }
+                
+                print(f"📝 새 사용자 생성 데이터: {google_user_data}")
+                print(f"📊 토큰 정보: access_token={bool(google_user_data.get('access_token'))}, refresh_token={bool(google_user_data.get('refresh_token'))}")
+                
+                user = await AuthRepository.create_google_user(google_user_data)
+                print("✅ 새 사용자 회원가입 성공")
+                token = await AuthService.login_google_user(user_info)
+                print("✅ 새 사용자 로그인 성공")
+            except Exception as register_error:
+                print(f"❌ 새 사용자 회원가입 실패: {str(register_error)}")
+                raise register_error
         
-        # 프론트엔드로 리다이렉트 (토큰 포함)
-        frontend_url = "http://localhost:8081"  # Expo 웹 개발 서버
-        redirect_url = f"{frontend_url}?token={token.access_token}"
+        # 세션에 사용자 정보 저장
+        print("💾 세션에 사용자 정보 저장 중...")
+        request.session["user"] = {
+            "id": user_info["id"],
+            "email": user_info["email"],
+            "name": user_info.get("name", ""),
+            "access_token": token.access_token
+        }
+        print("✅ 세션 저장 완료")
         
-        return RedirectResponse(url=redirect_url)
+        # HTML 응답으로 브라우저 창 닫기 및 데이터 전달
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>로그인 성공</title>
+        </head>
+        <body>
+            <script>
+                // 부모 창에 메시지 전달
+                if (window.opener) {{
+                    window.opener.postMessage({{
+                        type: 'GOOGLE_LOGIN_SUCCESS',
+                        token: '{token.access_token}',
+                        user: {json.dumps(user_info)}
+                    }}, '*');
+                    window.close();
+                }} else {{
+                    // 새 창에서 열린 경우 리다이렉트
+                    window.location.href = 'http://localhost:8081?token={token.access_token}';
+                }}
+            </script>
+            <h1>로그인 성공!</h1>
+            <p>창이 자동으로 닫힙니다...</p>
+        </body>
+        </html>
+        """
+        
+        print("✅ HTML 응답 생성 완료")
+        return HTMLResponse(content=html_content)
         
     except Exception as e:
-        # 에러 발생 시 프론트엔드로 에러와 함께 리다이렉트
-        frontend_url = "http://localhost:8081"
-        error_url = f"{frontend_url}?error={str(e)}"
-        return RedirectResponse(url=error_url)
+        print(f"❌ Google OAuth 콜백 오류: {str(e)}")
+        # 에러 발생 시 HTML 응답
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>로그인 실패</title>
+        </head>
+        <body>
+            <script>
+                if (window.opener) {{
+                    window.opener.postMessage({{
+                        type: 'GOOGLE_LOGIN_ERROR',
+                        error: '{str(e)}'
+                    }}, '*');
+                    window.close();
+                }} else {{
+                    window.location.href = 'http://localhost:8081?error={str(e)}';
+                }}
+            </script>
+            <h1>로그인 실패</h1>
+            <p>오류: {str(e)}</p>
+        </body>
+        </html>
+        """
+        
+        return HTMLResponse(content=html_content)
+
+@router.get("/token")
+async def get_token(request: Request):
+    """세션에서 토큰 가져오기"""
+    user = request.session.get("user")
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    
+    return {"accessToken": user.get("access_token")}
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(current_user: dict = Depends(AuthService.get_current_user)):
@@ -122,7 +226,9 @@ async def get_current_user(current_user: dict = Depends(AuthService.get_current_
     return current_user
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     """사용자 로그아웃"""
-    # JWT 토큰은 클라이언트에서 삭제
+    # 세션에서 사용자 정보 삭제
+    if "user" in request.session:
+        del request.session["user"]
     return {"message": "로그아웃되었습니다."} 
