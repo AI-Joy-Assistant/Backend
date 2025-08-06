@@ -22,3 +22,5 @@ yarn.lock
 dist/
 build/
 .env.backup
+__pycache__/
+*.pyc
