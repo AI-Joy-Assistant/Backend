@@ -51,6 +51,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    profile_image: Optional[str] = None
     created_at: Optional[datetime] = None
 
 class UserProfileResponse(BaseModel):
