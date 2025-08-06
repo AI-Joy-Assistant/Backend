@@ -7,24 +7,37 @@ class AuthRepository:
     async def find_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         """이메일로 사용자 찾기"""
         try:
+            print(f"🔍 이메일로 사용자 조회: {email}")
             response = supabase.table('user').select('*').eq('email', email).maybe_single().execute()
             if response is None:
+                print(f"❌ 이메일로 사용자를 찾을 수 없음: {email}")
                 return None
+            print(f"✅ 이메일로 사용자 조회 성공: {response.data.get('email')}")
             return response.data
         except Exception as e:
+            print(f"❌ 이메일로 사용자 조회 오류: {str(e)}")
             raise Exception(f"사용자 조회 오류: {str(e)}")
 
     @staticmethod
     async def create_user(user_data: Dict[str, str]) -> Dict[str, Any]:
         """새 사용자 생성"""
         try:
+            print(f"🆕 사용자 생성 시작: {user_data.get('email')}")
+            print(f"📝 저장할 데이터: {user_data}")
+            
             response = supabase.table('user').insert(user_data).execute()
+            print(f"📊 Supabase 응답: {response}")
+            
             if response is None:
+                print("❌ Supabase 응답이 None")
                 raise Exception("사용자 생성 실패: response is None")
             if response.data:
+                print(f"✅ 사용자 생성 성공: {response.data[0].get('id')}")
                 return response.data[0]
+            print("❌ Supabase 응답 데이터가 비어있음")
             raise Exception("사용자 생성 실패: response.data is empty")
         except Exception as e:
+            print(f"❌ 사용자 생성 오류: {str(e)}")
             raise Exception(f"사용자 생성 오류: {str(e)}")
 
     @staticmethod
@@ -78,25 +91,58 @@ class AuthRepository:
             raise Exception(f"리프레시 토큰 삭제 오류: {str(e)}")
 
     @staticmethod
-    async def find_user_by_google_id(google_id: str) -> Optional[Dict[str, Any]]:
-        """Google ID로 사용자 찾기"""
-        try:
-            response = supabase.table('user').select('*').eq('google_id', google_id).maybe_single().execute()
-            if response is None:
-                return None
-            return response.data
-        except Exception as e:
-            raise Exception(f"Google ID로 사용자 조회 오류: {str(e)}")
-
-    @staticmethod
     async def create_google_user(user_data: Dict[str, str]) -> Dict[str, Any]:
-        """Google OAuth 사용자 생성"""
+        """Google OAuth 사용자 생성 (email 기반)"""
         try:
+            print(f"🆕 Google 사용자 생성 시작: {user_data.get('email')}")
+            print(f"📝 저장할 데이터: {user_data}")
+            
             response = supabase.table('user').insert(user_data).execute()
+            print(f"📊 Supabase 응답: {response}")
+            
             if response is None:
+                print("❌ Supabase 응답이 None")
                 raise Exception("Google 사용자 생성 실패: response is None")
             if response.data:
+                print(f"✅ Google 사용자 생성 성공: {response.data[0].get('id')}")
                 return response.data[0]
+            print("❌ Supabase 응답 데이터가 비어있음")
             raise Exception("Google 사용자 생성 실패: response.data is empty")
         except Exception as e:
-            raise Exception(f"Google 사용자 생성 오류: {str(e)}") 
+            print(f"❌ Google 사용자 생성 오류: {str(e)}")
+            raise Exception(f"Google 사용자 생성 오류: {str(e)}")
+
+    @staticmethod
+    async def update_google_user_info(
+        email: str, 
+        access_token: Optional[str] = None, 
+        refresh_token: Optional[str] = None,
+        profile_image: Optional[str] = None,
+        name: Optional[str] = None
+    ) -> None:
+        """Google 사용자 정보 업데이트"""
+        try:
+            print(f"🔄 Google 사용자 정보 업데이트: {email}")
+            
+            update_data = {'updated_at': 'NOW()'}
+            if access_token is not None:
+                update_data['access_token'] = access_token
+                print(f"✅ access_token 추가됨: {len(access_token)}자")
+            if refresh_token is not None:
+                update_data['refresh_token'] = refresh_token
+                print(f"✅ refresh_token 추가됨: {len(refresh_token)}자")
+            if profile_image is not None:
+                update_data['profile_image'] = profile_image
+                print(f"✅ profile_image 추가됨: {profile_image[:50]}...")
+            if name is not None:
+                update_data['name'] = name
+                print(f"✅ name 추가됨: {name}")
+            
+            print(f"📝 업데이트할 데이터: {update_data}")
+            
+            response = supabase.table('user').update(update_data).eq('email', email).execute()
+            print(f"✅ Google 사용자 정보 업데이트 성공")
+            
+        except Exception as e:
+            print(f"❌ Google 사용자 정보 업데이트 오류: {str(e)}")
+            raise Exception(f"Google 사용자 정보 업데이트 오류: {str(e)}") 

@@ -43,7 +43,6 @@ async def root():
 
 @app.get("/debug")
 async def debug():
-    from config.database import is_dev_mode
     from config.settings import settings
     import os
     
@@ -52,7 +51,6 @@ async def debug():
     
     return {
         "env_file_exists": env_file_exists,
-        "is_dev_mode": is_dev_mode,
         "settings_status": {
             "jwt_secret_set": bool(settings.JWT_SECRET and len(settings.JWT_SECRET) > 10),
             "google_client_id_set": bool(settings.GOOGLE_CLIENT_ID and not settings.GOOGLE_CLIENT_ID.startswith("your")),

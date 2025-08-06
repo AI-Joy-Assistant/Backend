@@ -150,8 +150,6 @@ class AuthService:
             
             # 실제 오류를 사용자에게 표시
             raise Exception(f"Google OAuth 설정 오류: {str(e)}")
-            
-            # Mock 응답 제거 - 실제 오류를 확인하기 위해
 
     @staticmethod
     async def get_new_access_token_from_google(refresh_token: str) -> Dict[str, Any]:
@@ -327,9 +325,13 @@ class AuthService:
     async def register_google_user(user_data: UserCreate) -> UserResponse:
         """Google OAuth 사용자 회원가입"""
         try:
-            # Google ID로 기존 사용자 확인
-            existing_user = await AuthRepository.find_user_by_google_id(user_data.google_id)
+            print(f"🔍 Google 회원가입 시작: {user_data.email}")
+            
+            # 이메일로 기존 사용자 확인
+            print(f"🔍 이메일로 기존 사용자 확인: {user_data.email}")
+            existing_user = await AuthRepository.find_user_by_email(user_data.email)
             if existing_user:
+                print(f"✅ 기존 사용자 발견: {existing_user['email']}")
                 return UserResponse(
                     id=existing_user["id"],
                     email=existing_user["email"],
@@ -338,11 +340,15 @@ class AuthService:
                 )
             
             # 새 사용자 생성
-            user = await AuthRepository.create_google_user({
+            print(f"🆕 새 Google 사용자 생성: {user_data.email}")
+            user_data_dict = {
                 "email": user_data.email,
-                "name": user_data.name,
-                "google_id": user_data.google_id
-            })
+                "name": user_data.name
+            }
+            print(f"📝 저장할 데이터: {user_data_dict}")
+            
+            user = await AuthRepository.create_google_user(user_data_dict)
+            print(f"✅ 새 Google 사용자 생성 성공: {user['id']}")
             
             return UserResponse(
                 id=user["id"],
@@ -351,19 +357,28 @@ class AuthService:
                 created_at=user["created_at"]
             )
         except Exception as e:
+            print(f"❌ Google 회원가입 실패: {str(e)}")
             raise Exception(f"Google 회원가입 실패: {str(e)}")
 
     @staticmethod
     async def login_google_user(user_info: Dict[str, Any]) -> TokenResponse:
         """Google OAuth 사용자 로그인"""
         try:
-            # Google ID로 사용자 확인
-            user = await AuthRepository.find_user_by_google_id(user_info["id"])
+            print(f"🔍 Google 로그인 시작: {user_info.get('email')}")
+            
+            # 이메일로 사용자 확인
+            email = user_info["email"]
+            print(f"🔍 이메일로 사용자 확인: {email}")
+            user = await AuthRepository.find_user_by_email(email)
             if not user:
+                print(f"❌ 이메일로 사용자를 찾을 수 없음: {email}")
                 raise Exception("Google 계정으로 가입된 사용자가 아닙니다.")
+            
+            print(f"✅ Google 사용자 확인 성공: {user['email']}")
             
             # JWT 토큰 생성
             access_token = AuthService.create_jwt_access_token(user)
+            print(f"✅ JWT 토큰 생성 성공")
             
             return TokenResponse(
                 access_token=access_token,
@@ -371,6 +386,7 @@ class AuthService:
                 expires_in=3600
             )
         except Exception as e:
+            print(f"❌ Google 로그인 실패: {str(e)}")
             raise Exception(f"Google 로그인 실패: {str(e)}")
 
     @staticmethod

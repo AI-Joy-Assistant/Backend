@@ -36,75 +36,20 @@ async def get_calendar_events(
     time_min: Optional[datetime] = Query(None, description="시작 시간"),
     time_max: Optional[datetime] = Query(None, description="종료 시간"),
 ):
-    """구글 캘린더에서 이벤트를 가져옵니다. 액세스 토큰이 없으면 Mock 데이터를 반환합니다."""
+    """구글 캘린더에서 이벤트를 가져옵니다."""
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Google 액세스 토큰이 필요합니다.")
+    
     try:
-        if access_token:
-            # 실제 Google Calendar API 호출
-            service = GoogleCalendarService()
-            events = await service.get_calendar_events(
-                access_token=access_token,
-                calendar_id=calendar_id,
-                time_min=time_min,
-                time_max=time_max,
-            )
-            return {"events": events}
-        else:
-            # Mock 데이터 반환 (프론트엔드 호환)
-            mock_events = [
-                {
-                    "id": "1",
-                    "summary": "JOYNER 프로젝트 관련 미팅",
-                    "description": "프로젝트 진행 상황 논의",
-                    "start": {
-                        "dateTime": "2025-08-06T19:00:00+09:00",
-                    },
-                    "end": {
-                        "dateTime": "2025-08-06T20:00:00+09:00",
-                    },
-                    "attendees": [
-                        {"email": "lee@example.com", "displayName": "이○○"},
-                        {"email": "jo1@example.com", "displayName": "조○○"},
-                        {"email": "jo2@example.com", "displayName": "조○○"},
-                    ],
-                    "location": "강남역 토즈컨퍼런스센터",
-                    "htmlLink": "https://calendar.google.com/event?eid=...",
-                },
-                {
-                    "id": "2",
-                    "summary": "팀 빌딩 활동",
-                    "description": "팀원들과의 친목 도모",
-                    "start": {
-                        "dateTime": "2025-08-16T18:00:00+09:00",
-                    },
-                    "end": {
-                        "dateTime": "2025-08-16T21:00:00+09:00",
-                    },
-                    "attendees": [
-                        {"email": "team1@example.com", "displayName": "김○○"},
-                        {"email": "team2@example.com", "displayName": "박○○"},
-                    ],
-                    "location": "홍대입구 맛집",
-                    "htmlLink": "https://calendar.google.com/event?eid=...",
-                },
-                {
-                    "id": "3",
-                    "summary": "코드 리뷰",
-                    "description": "프론트엔드 코드 리뷰",
-                    "start": {
-                        "dateTime": "2025-08-19T14:00:00+09:00",
-                    },
-                    "end": {
-                        "dateTime": "2025-08-19T15:00:00+09:00",
-                    },
-                    "attendees": [
-                        {"email": "dev1@example.com", "displayName": "최○○"},
-                        {"email": "dev2@example.com", "displayName": "정○○"},
-                    ],
-                    "location": "온라인 (Zoom)",
-                    "htmlLink": "https://calendar.google.com/event?eid=...",
-                },
-            ]
-            return {"events": mock_events}
+        # 실제 Google Calendar API 호출
+        service = GoogleCalendarService()
+        events = await service.get_calendar_events(
+            access_token=access_token,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        return {"events": events}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
 
