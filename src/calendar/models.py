@@ -15,8 +15,8 @@ class CalendarEvent(BaseModel):
 class CreateEventRequest(BaseModel):
     summary: str
     description: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
+    start_time: str  # ISO 8601 형식의 문자열
+    end_time: str    # ISO 8601 형식의 문자열
     attendees: Optional[List[str]] = None
     location: Optional[str] = None
 
