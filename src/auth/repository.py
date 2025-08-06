@@ -13,6 +13,7 @@ class AuthRepository:
                 print(f"❌ 이메일로 사용자를 찾을 수 없음: {email}")
                 return None
             print(f"✅ 이메일로 사용자 조회 성공: {response.data.get('email')}")
+            print(f"📸 프로필 이미지: {response.data.get('profile_image')}")
             return response.data
         except Exception as e:
             print(f"❌ 이메일로 사용자 조회 오류: {str(e)}")
@@ -137,6 +138,8 @@ class AuthRepository:
             if name is not None:
                 update_data['name'] = name
                 print(f"✅ name 추가됨: {name}")
+            else:
+                print(f"ℹ️ name은 업데이트하지 않음 (기존 닉네임 유지)")
             
             print(f"📝 업데이트할 데이터: {update_data}")
             
@@ -145,4 +148,38 @@ class AuthRepository:
             
         except Exception as e:
             print(f"❌ Google 사용자 정보 업데이트 오류: {str(e)}")
-            raise Exception(f"Google 사용자 정보 업데이트 오류: {str(e)}") 
+            raise Exception(f"Google 사용자 정보 업데이트 오류: {str(e)}")
+
+    @staticmethod
+    async def update_user(user_id: str, user_data: dict) -> Dict[str, Any]:
+        """사용자 정보 수정"""
+        try:
+            print(f"🔄 사용자 정보 수정 시작: {user_id}")
+            print(f"📝 수정할 데이터: {user_data}")
+            
+            response = supabase.table('user').update(user_data).eq('id', user_id).execute()
+            
+            if response is None or not response.data:
+                raise Exception("사용자 정보 수정 실패: response is None or empty")
+            
+            print(f"✅ 사용자 정보 수정 성공: {user_id}")
+            return response.data[0]
+        except Exception as e:
+            print(f"❌ 사용자 정보 수정 오류: {str(e)}")
+            raise Exception(f"사용자 정보 수정 오류: {str(e)}")
+
+    @staticmethod
+    async def delete_user(user_id: str) -> None:
+        """사용자 계정 삭제"""
+        try:
+            print(f"🗑️ 사용자 계정 삭제 시작: {user_id}")
+            
+            response = supabase.table('user').delete().eq('id', user_id).execute()
+            
+            if response is None:
+                raise Exception("사용자 계정 삭제 실패: response is None")
+            
+            print(f"✅ 사용자 계정 삭제 성공: {user_id}")
+        except Exception as e:
+            print(f"❌ 사용자 계정 삭제 오류: {str(e)}")
+            raise Exception(f"사용자 계정 삭제 오류: {str(e)}") 
