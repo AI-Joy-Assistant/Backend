@@ -5,6 +5,7 @@ from config.settings import settings
 from src.auth.router import router as auth_router
 from src.chat.router import router as chat_router
 from src.friends.router import router as friends_router
+from src.calendar.router import router as calendar_router
 
 # FastAPI 애플리케이션 생성
 app = FastAPI(
@@ -34,6 +35,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(friends_router)
+app.include_router(calendar_router)
 
 @app.get("/")
 async def root():

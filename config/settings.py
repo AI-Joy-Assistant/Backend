@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     )
     
     # 서버 설정
-    PORT: int = 3000
+    PORT: int = 8000
     HOST: str = "0.0.0.0"
     
     # JWT 설정
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Google OAuth 설정
     GOOGLE_CLIENT_ID: str = "PLEASE_SET_GOOGLE_CLIENT_ID_IN_ENV_FILE"
     GOOGLE_CLIENT_SECRET: str = "PLEASE_SET_GOOGLE_CLIENT_SECRET_IN_ENV_FILE"
-    GOOGLE_REDIRECT_URI: str = "http://localhost:3000/auth/google/callback"
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/google/callback"
     
     # Supabase 설정
     SUPABASE_URL: str = "PLEASE_SET_SUPABASE_URL_IN_ENV_FILE"
