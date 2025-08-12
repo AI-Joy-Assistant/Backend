@@ -394,19 +394,39 @@ class AuthService:
         """JWT 토큰으로 현재 사용자 정보 조회"""
         try:
             auth_header = request.headers.get("authorization")
+            print(f"🔍 Authorization 헤더: {auth_header}")
+            
             if not auth_header or not auth_header.startswith("Bearer "):
+                print("❌ Authorization 헤더가 없거나 Bearer 형식이 아님")
                 raise Exception("Authorization 헤더가 없습니다.")
             
             token = auth_header.split(" ")[1]
-            payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            print(f"🔍 추출된 토큰: {token[:20]}...")
+            
+            try:
+                payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+                print(f"✅ JWT 토큰 디코딩 성공: {payload}")
+            except jwt.InvalidTokenError as e:
+                print(f"❌ JWT 토큰 디코딩 실패: {str(e)}")
+                raise Exception("유효하지 않은 토큰입니다.")
+            except Exception as e:
+                print(f"❌ JWT 토큰 처리 중 예상치 못한 오류: {str(e)}")
+                raise Exception(f"토큰 처리 오류: {str(e)}")
+            
             email = payload.get("email")
+            print(f"🔍 토큰에서 추출된 이메일: {email}")
+            
+            if not email:
+                print("❌ 토큰에 이메일 정보가 없음")
+                raise Exception("토큰에 이메일 정보가 없습니다.")
             
             user = await AuthRepository.find_user_by_email(email)
             if not user:
+                print(f"❌ 이메일로 사용자를 찾을 수 없음: {email}")
                 raise Exception("사용자를 찾을 수 없습니다.")
             
+            print(f"✅ 사용자 정보 조회 성공: {user.get('email')}")
             return user
-        except jwt.InvalidTokenError:
-            raise Exception("유효하지 않은 토큰입니다.")
         except Exception as e:
-            raise Exception(f"사용자 정보 조회 실패: {str(e)}") 
+            print(f"❌ get_current_user 오류: {str(e)}")
+            raise e 
