@@ -409,4 +409,44 @@ class AuthService:
         except jwt.InvalidTokenError:
             raise Exception("유효하지 않은 토큰입니다.")
         except Exception as e:
-            raise Exception(f"사용자 정보 조회 실패: {str(e)}") 
+            raise Exception(f"사용자 정보 조회 실패: {str(e)}")
+
+    @staticmethod
+    async def update_user_info(user_id: str, user_data: Dict[str, Any]) -> Dict[str, Any]:
+        """사용자 정보 수정"""
+        try:
+            print(f"🔄 사용자 정보 수정 시작: {user_id}")
+            print(f"📝 수정할 데이터: {user_data}")
+            
+            # 업데이트할 데이터 준비
+            update_data = {'updated_at': 'NOW()'}
+            
+            # name 필드가 있으면 추가
+            if 'name' in user_data and user_data['name']:
+                update_data['name'] = user_data['name']
+                print(f"✅ 닉네임 업데이트: {user_data['name']}")
+            
+            # 다른 필드들도 필요시 추가 가능
+            if 'email' in user_data and user_data['email']:
+                update_data['email'] = user_data['email']
+                print(f"✅ 이메일 업데이트: {user_data['email']}")
+            
+            # Supabase에서 사용자 정보 업데이트
+            updated_user = await AuthRepository.update_user(user_id, update_data)
+            print(f"✅ 사용자 정보 수정 성공: {user_id}")
+            
+            return updated_user
+        except Exception as e:
+            print(f"❌ 사용자 정보 수정 실패: {str(e)}")
+            raise Exception(f"사용자 정보 수정 실패: {str(e)}")
+
+    @staticmethod
+    async def delete_user(user_id: str) -> None:
+        """사용자 계정 삭제"""
+        try:
+            print(f"🗑️ 사용자 계정 삭제 시작: {user_id}")
+            await AuthRepository.delete_user(user_id)
+            print(f"✅ 사용자 계정 삭제 성공: {user_id}")
+        except Exception as e:
+            print(f"❌ 사용자 계정 삭제 실패: {str(e)}")
+            raise Exception(f"사용자 계정 삭제 실패: {str(e)}") 

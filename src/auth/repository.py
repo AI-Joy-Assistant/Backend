@@ -20,6 +20,21 @@ class AuthRepository:
             raise Exception(f"사용자 조회 오류: {str(e)}")
 
     @staticmethod
+    async def find_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+        """ID로 사용자 찾기"""
+        try:
+            print(f"🔍 ID로 사용자 조회: {user_id}")
+            response = supabase.table('user').select('*').eq('id', user_id).maybe_single().execute()
+            if response is None:
+                print(f"❌ ID로 사용자를 찾을 수 없음: {user_id}")
+                return None
+            print(f"✅ ID로 사용자 조회 성공: {response.data.get('email')}")
+            return response.data
+        except Exception as e:
+            print(f"❌ ID로 사용자 조회 오류: {str(e)}")
+            raise Exception(f"사용자 조회 오류: {str(e)}")
+
+    @staticmethod
     async def create_user(user_data: Dict[str, str]) -> Dict[str, Any]:
         """새 사용자 생성"""
         try:
