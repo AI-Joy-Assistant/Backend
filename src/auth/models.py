@@ -64,4 +64,7 @@ class UserProfileResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
 class MessageResponse(BaseModel):
-    message: str 
+    message: str
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str 

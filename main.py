@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
 from config.settings import settings
 from src.auth.router import router as auth_router
 from src.chat.router import router as chat_router
@@ -14,12 +13,6 @@ app = FastAPI(
     description="백엔드 API - Python FastAPI 버전",
     docs_url="/api-docs",
     redoc_url="/redoc"
-)
-
-# 세션 미들웨어 설정 (CORS보다 먼저 설정)
-app.add_middleware(
-    SessionMiddleware, 
-    secret_key="your-secret-key-for-session"  # 실제로는 환경변수로 관리
 )
 
 # CORS 미들웨어 설정

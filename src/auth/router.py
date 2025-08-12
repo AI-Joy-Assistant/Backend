@@ -147,17 +147,7 @@ async def google_auth_callback(code: str, request: Request):
                 print(f"❌ 새 사용자 회원가입 실패: {str(register_error)}")
                 raise register_error
         
-        # 세션에 사용자 정보 저장
-        print("💾 세션에 사용자 정보 저장 중...")
-        request.session["user"] = {
-            "id": user_info["id"],
-            "email": user_info["email"],
-            "name": user_info.get("name", ""),
-            "access_token": token.access_token
-        }
-        print("✅ 세션 저장 완료")
-        
-        # HTML 응답으로 브라우저 창 닫기 및 데이터 전달
+        # HTML 응답으로 브라우저 창 닫기 및 JWT 토큰 전달
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -166,7 +156,7 @@ async def google_auth_callback(code: str, request: Request):
         </head>
         <body>
             <script>
-                // 부모 창에 메시지 전달
+                // 부모 창에 JWT 토큰 전달
                 if (window.opener) {{
                     window.opener.postMessage({{
                         type: 'GOOGLE_LOGIN_SUCCESS',
@@ -217,15 +207,6 @@ async def google_auth_callback(code: str, request: Request):
         
         return HTMLResponse(content=html_content)
 
-@router.get("/token")
-async def get_token(request: Request):
-    """세션에서 토큰 가져오기"""
-    user = request.session.get("user")
-    if not user:
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
-    
-    return {"accessToken": user.get("access_token")}
-
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(current_user: dict = Depends(AuthService.get_current_user)):
     """현재 로그인한 사용자 정보 조회"""
@@ -234,10 +215,44 @@ async def get_current_user(current_user: dict = Depends(AuthService.get_current_
 @router.post("/logout")
 async def logout(request: Request):
     """사용자 로그아웃"""
-    # 세션에서 사용자 정보 삭제
-    if "user" in request.session:
-        del request.session["user"]
-    return {"message": "로그아웃되었습니다."}
+    try:
+        # Authorization 헤더에서 JWT 토큰 추출
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            result = await AuthService.handle_logout(token)
+            if result["status"] == 200:
+                return {"message": "로그아웃되었습니다."}
+            else:
+                raise HTTPException(status_code=result["status"], detail=result["message"])
+        else:
+            return {"message": "로그아웃되었습니다."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/refresh")
+async def refresh_token(request: Request):
+    """JWT 토큰 갱신"""
+    try:
+        from .models import RefreshTokenRequest
+        
+        # 요청 본문에서 리프레시 토큰 추출
+        body = await request.json()
+        refresh_token = body.get("refresh_token")
+        
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="리프레시 토큰이 필요합니다.")
+        
+        # 리프레시 토큰으로 새 액세스 토큰 발급
+        result = await AuthService.get_new_access_token_from_google(refresh_token)
+        
+        if result["status"] == 200:
+            return result["body"]
+        else:
+            raise HTTPException(status_code=result["status"], detail=result["body"]["message"])
+            
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.put("/me")
 async def update_user_info(
@@ -260,9 +275,6 @@ async def delete_user(
     """사용자 계정 삭제"""
     try:
         await AuthService.delete_user(current_user["id"])
-        # 세션에서 사용자 정보 삭제
-        if "user" in request.session:
-            del request.session["user"]
         return {"message": "계정이 성공적으로 삭제되었습니다."}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) 

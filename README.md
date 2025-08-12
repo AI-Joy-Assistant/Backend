@@ -1,169 +1,180 @@
-# AI Joy Assistant Backend API
+# AI Joy Assistant Backend
 
-FastAPI 기반의 백엔드 API 서버입니다.
+AI Joy Assistant의 백엔드 API 서버입니다.
 
-## 🚀 빠른 시작
+## 주요 변경사항
+
+### JWT 인증으로 통일 (2024년 12월)
+
+- **기존**: 세션 기반 인증과 JWT 인증이 혼용되어 사용됨
+- **변경**: 모든 인증을 JWT 기반으로 통일
+- **제거된 기능**: 
+  - 세션 미들웨어 (`SessionMiddleware`)
+  - 세션 기반 토큰 엔드포인트 (`/auth/token`)
+  - 세션에 사용자 정보 저장
+- **추가된 기능**:
+  - JWT 토큰 갱신 엔드포인트 (`/auth/refresh`)
+  - 공통 JWT 인증 미들웨어
+
+## 기술 스택
+
+- **Framework**: FastAPI (Python)
+- **인증**: JWT (JSON Web Token)
+- **데이터베이스**: Supabase (PostgreSQL)
+- **OAuth**: Google OAuth2
+
+## 환경 설정
+
+### 필수 환경변수
+
+`.env` 파일에 다음 변수들을 설정해야 합니다:
+
+```env
+# JWT 설정
+JWT_SECRET=your-secret-key-here
+JWT_ALGORITHM=HS256
+JWT_EXPIRE_HOURS=1
+
+# Google OAuth 설정
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
+
+# Supabase 설정
+SUPABASE_URL=your-supabase-url
+SUPABASE_SERVICE_KEY=your-supabase-service-key
+```
+
+## 설치 및 실행
 
 ### 1. 의존성 설치
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 2. 환경변수 설정
-```bash
-# .env 파일 생성
-cp env.example .env
-```
 
-`.env` 파일을 편집하여 필요한 설정값들을 입력하세요.
+`.env` 파일을 생성하고 위의 환경변수들을 설정합니다.
 
 ### 3. 서버 실행
-```bash
-python main.py
-```
-
-서버가 `http://localhost:8000`에서 실행됩니다.
-
-## 📚 API 문서
-
-- Swagger UI: `http://localhost:8000/api-docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## 🔧 Google Calendar API 연동
-
-### 1. Google Cloud Console 설정
-
-1. [Google Cloud Console](https://console.cloud.google.com/)에 접속
-2. 새 프로젝트 생성 또는 기존 프로젝트 선택
-3. **API 및 서비스** > **사용자 인증 정보**로 이동
-4. **사용자 인증 정보 만들기** > **OAuth 2.0 클라이언트 ID** 선택
-5. 애플리케이션 유형: **웹 애플리케이션** 선택
-6. 승인된 리디렉션 URI에 `http://localhost:8000/auth/google/callback` 추가
-7. **Google Calendar API** 활성화
-
-### 2. 환경변수 설정
-
-`.env` 파일에 Google OAuth 정보를 추가:
-
-```env
-GOOGLE_CLIENT_ID=your-google-client-id-here
-GOOGLE_CLIENT_SECRET=your-google-client-secret-here
-GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
-```
-
-### 3. API 엔드포인트
-
-#### 캘린더 이벤트 조회
-```http
-GET /calendar/events
-```
-
-**파라미터:**
-- `access_token` (필수): Google 액세스 토큰
-- `calendar_id` (선택): 캘린더 ID (기본값: "primary")
-- `time_min` (선택): 시작 시간
-- `time_max` (선택): 종료 시간
-
-#### Google OAuth 인증 URL 생성
-```http
-GET /calendar/auth-url
-```
-
-#### Google OAuth 인증 처리
-```http
-POST /calendar/auth
-Content-Type: application/json
-
-{
-  "code": "authorization_code_from_google",
-  "redirect_uri": "http://localhost:8000/auth/google/callback"
-}
-```
-
-#### 캘린더 이벤트 생성
-```http
-POST /calendar/events?access_token=your_access_token
-Content-Type: application/json
-
-{
-  "summary": "일정 제목",
-  "description": "일정 설명",
-  "start_time": "2025-08-06T19:00:00+09:00",
-  "end_time": "2025-08-06T20:00:00+09:00",
-  "location": "장소",
-  "attendees": ["user@example.com"]
-}
-```
-
-#### 캘린더 이벤트 삭제
-```http
-DELETE /calendar/events/{event_id}?access_token=your_access_token
-```
-
-### 4. 테스트
-
-API가 정상적으로 작동하는지 확인:
-
-```http
-GET /calendar/test
-```
-
-## 🔐 인증
-
-현재 Google OAuth 2.0을 통한 인증을 지원합니다.
-
-### 인증 플로우
-
-1. **인증 URL 요청**: `/calendar/auth-url`
-2. **사용자 리디렉션**: Google 로그인 페이지로 이동
-3. **인증 코드 수신**: Google에서 인증 코드 반환
-4. **액세스 토큰 교환**: `/calendar/auth`로 인증 코드를 액세스 토큰으로 교환
-5. **API 호출**: 액세스 토큰으로 Google Calendar API 호출
-
-## 📁 프로젝트 구조
-
-```
-backend/
-├── main.py                 # FastAPI 애플리케이션 진입점
-├── requirements.txt        # Python 의존성
-├── env.example            # 환경변수 예시
-├── config/
-│   ├── settings.py        # 설정 관리
-│   └── database.py        # 데이터베이스 설정
-└── src/
-    ├── auth/              # 인증 관련
-    ├── calendar/          # Google Calendar API
-    ├── chat/              # 채팅 기능
-    └── friends/           # 친구 기능
-```
-
-## 🛠️ 개발
-
-### 디버그 모드
 
 ```bash
 python main.py
 ```
 
-### 로그 확인
+또는
 
-서버 로그에서 Google Calendar API 호출 상태를 확인할 수 있습니다:
+```bash
+uvicorn main:app --host 0.0.0.0 --port 3000 --reload
+```
 
-- `🔍`: API 호출 시작
-- `✅`: 성공
-- `❌`: 오류
+## API 엔드포인트
 
-## 🚨 주의사항
+### 인증 (Authentication)
 
-1. **환경변수 보안**: `.env` 파일을 Git에 커밋하지 마세요
-2. **Google OAuth**: 실제 배포 시 승인된 리디렉션 URI를 업데이트하세요
-3. **토큰 관리**: 액세스 토큰은 일정 시간 후 만료되므로 리프레시 토큰을 사용하세요
+- `POST /auth/register` - 사용자 회원가입
+- `POST /auth/login` - 사용자 로그인
+- `GET /auth/google` - Google OAuth 인증 시작
+- `GET /auth/google/callback` - Google OAuth 콜백 처리
+- `POST /auth/refresh` - JWT 토큰 갱신
+- `GET /auth/me` - 현재 사용자 정보 조회
+- `PUT /auth/me` - 사용자 정보 수정
+- `DELETE /auth/me` - 사용자 계정 삭제
+- `POST /auth/logout` - 로그아웃
 
-## 📞 지원
+### 채팅 (Chat)
 
-문제가 발생하면 다음을 확인하세요:
+- `GET /chat/rooms` - 채팅방 목록 조회
+- `GET /chat/messages/{other_user_id}` - 채팅 메시지 조회
+- `POST /chat/send` - 메시지 전송
+- `GET /chat/friends` - 친구 목록 조회
 
-1. 환경변수가 올바르게 설정되었는지
-2. Google Cloud Console에서 API가 활성화되었는지
-3. 리디렉션 URI가 올바른지
-4. 서버 로그에서 오류 메시지 확인 
+### 친구 (Friends)
+
+- `GET /friends/requests` - 친구 요청 목록 조회
+- `POST /friends/requests/{request_id}/accept` - 친구 요청 수락
+- `POST /friends/requests/{request_id}/reject` - 친구 요청 거절
+- `GET /friends/list` - 친구 목록 조회
+- `DELETE /friends/{friend_id}` - 친구 삭제
+- `POST /friends/add` - 친구 추가
+
+### 캘린더 (Calendar)
+
+- `GET /calendar/auth-url` - Google OAuth 인증 URL
+- `POST /calendar/auth` - Google OAuth 인증
+- `GET /calendar/events` - 캘린더 이벤트 조회
+- `POST /calendar/events` - 캘린더 이벤트 생성
+- `DELETE /calendar/events/{event_id}` - 캘린더 이벤트 삭제
+
+## JWT 인증 사용법
+
+### 1. 로그인 후 JWT 토큰 받기
+
+```bash
+# Google OAuth 로그인
+GET /auth/google
+
+# 또는 일반 로그인
+POST /auth/login
+{
+  "email": "user@example.com",
+  "password": "password"
+}
+```
+
+### 2. API 요청 시 JWT 토큰 사용
+
+```bash
+GET /auth/me
+Authorization: Bearer <your-jwt-token>
+```
+
+### 3. 토큰 갱신
+
+```bash
+POST /auth/refresh
+{
+  "refresh_token": "<your-refresh-token>"
+}
+```
+
+## 개발 가이드
+
+### 새로운 라우터 추가 시
+
+1. JWT 인증이 필요한 경우 `get_current_user_id` 의존성 사용:
+
+```python
+from src.auth.router import get_current_user_id
+
+@router.get("/example")
+async def example_endpoint(current_user_id: str = Depends(get_current_user_id)):
+    # 사용자 ID를 사용한 로직
+    pass
+```
+
+2. JWT 인증이 필요 없는 경우 (예: 공개 API):
+
+```python
+@router.get("/public")
+async def public_endpoint():
+    # 공개 로직
+    pass
+```
+
+## 문제 해결
+
+### JWT 토큰 관련 오류
+
+- **401 Unauthorized**: JWT 토큰이 없거나 만료됨
+- **403 Forbidden**: JWT 토큰이 유효하지 않음
+
+### Google OAuth 관련 오류
+
+- **400 Bad Request**: OAuth 설정이 잘못됨
+- **401 Unauthorized**: Google OAuth 인증 실패
+
+## 라이센스
+
+이 프로젝트는 MIT 라이센스 하에 배포됩니다. 
