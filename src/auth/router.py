@@ -265,4 +265,29 @@ async def delete_user(
             del request.session["user"]
         return {"message": "계정이 성공적으로 삭제되었습니다."}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) 
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/profile-image/{user_id}")
+async def get_profile_image(user_id: str):
+    """사용자 프로필 이미지 프록시"""
+    try:
+        user = await AuthRepository.find_user_by_id(user_id)
+        if not user or not user.get('profile_image'):
+            raise HTTPException(status_code=404, detail="프로필 이미지를 찾을 수 없습니다.")
+        
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(user['profile_image'])
+            response.raise_for_status()
+            
+            from fastapi.responses import Response
+            return Response(
+                content=response.content,
+                media_type=response.headers.get('content-type', 'image/png'),
+                headers={
+                    'Cache-Control': 'public, max-age=3600',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"이미지 로드 실패: {str(e)}") 
