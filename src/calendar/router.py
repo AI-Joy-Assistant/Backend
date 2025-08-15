@@ -317,6 +317,81 @@ async def subscribe_to_calendar_webhook(
         logger.error(f"[WEBHOOK] 구독 실패: {str(e)}")
         raise HTTPException(status_code=400, detail=f"웹훅 구독 실패: {str(e)}")
 
+@router.post("/renew-subscription")
+async def renew_calendar_webhook(
+    current_user: dict = Depends(AuthService.get_current_user),
+    calendar_id: str = Query("primary", description="캘린더 ID")
+):
+    """
+    Google Calendar 웹훅 구독 갱신
+    """
+    try:
+        # Google 액세스 토큰 보장
+        google_access_token = await _ensure_access_token(current_user)
+        
+        # 기존 구독 해제
+        try:
+            await unsubscribe_from_calendar_webhook(current_user, calendar_id, google_access_token)
+        except Exception as e:
+            logger.warning(f"[WEBHOOK] 기존 구독 해제 실패 (무시): {str(e)}")
+        
+        # 새 구독 생성
+        webhook_url = f"{settings.BASE_URL}/calendar/webhook"
+        
+        subscription_data = {
+            "id": f"webhook_{current_user['email']}_{calendar_id}",
+            "type": "web_hook",
+            "address": webhook_url,
+            "params": {
+                "ttl": "2592000"  # 30일
+            }
+        }
+        
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/watch"
+        headers = {
+            "Authorization": f"Bearer {google_access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=subscription_data, headers=headers)
+            response.raise_for_status()
+            
+        result = response.json()
+        logger.info(f"[WEBHOOK] 구독 갱신 성공: {result.get('id')}")
+        
+        return {
+            "status": "success",
+            "subscription_id": result.get("id"),
+            "expiration": result.get("expiration"),
+            "message": "웹훅 구독이 성공적으로 갱신되었습니다."
+        }
+        
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 구독 갱신 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 구독 갱신 실패: {str(e)}")
+
+async def unsubscribe_from_calendar_webhook(current_user: dict, calendar_id: str, access_token: str):
+    """
+    Google Calendar 웹훅 구독 해제 (내부 함수)
+    """
+    subscription_id = f"webhook_{current_user['email']}_{calendar_id}"
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/stop"
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {"id": subscription_id}
+    
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(url, json=data, headers=headers)
+        if response.status_code == 200:
+            logger.info(f"[WEBHOOK] 구독 해제 성공: {subscription_id}")
+        else:
+            logger.warning(f"[WEBHOOK] 구독 해제 실패: {response.status_code}")
+
 @router.get("/test")
 async def test_calendar_api():
     return {
