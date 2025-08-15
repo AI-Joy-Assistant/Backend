@@ -4,7 +4,7 @@ from typing import Optional
 import json
 import datetime as dt
 from urllib.parse import urlencode
-
+import jwt
 from .models import UserCreate, UserLogin, UserResponse, TokenResponse
 from .service import AuthService
 from .repository import AuthRepository
@@ -330,3 +330,44 @@ async def get_profile_image(user_id: str):
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"이미지 로드 실패: {str(e)}")
+
+@router.post("/refresh")
+async def refresh_access_token(request: Request):
+    """
+    만료된 앱 JWT를 새로 발급.
+    - Authorization: Bearer <expired_jwt> 를 보내면,
+      payload(email)만 읽어 DB의 refresh_token으로 Google 재발급 → 새 앱 JWT 반환
+    """
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization 헤더가 없습니다.")
+
+    expired_token = auth_header.split(" ")[1]
+
+    try:
+        # ▲ 변경: 만료 무시하고 payload 추출
+        payload = jwt.decode(
+            expired_token,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_exp": False}  # ▲ 변경
+        )
+        email = payload.get("email")
+        if not email:
+            raise HTTPException(status_code=400, detail="토큰에 이메일이 없습니다.")
+
+        # DB에서 사용자/리프레시 토큰 조회
+        user = await AuthRepository.find_user_by_email(email)
+        if not user or not user.get("refresh_token"):
+            raise HTTPException(status_code=401, detail="리프레시 토큰이 없습니다.")
+
+        # 구글에서 새 access_token 받으면서 앱 JWT 재발급
+        result = await AuthService.get_new_access_token_from_google(user["refresh_token"])
+        if result["status"] != 200:
+            raise HTTPException(status_code=result["status"], detail=result["body"])
+        return result["body"]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"토큰 재발급 실패: {str(e)}")
