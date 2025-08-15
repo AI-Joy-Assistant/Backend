@@ -46,13 +46,17 @@ async def _ensure_access_token(current_user: dict) -> str:
 
     expiry_dt = _to_dt(expiry)
 
-    # 만료 임박 여부(60초 버퍼)
-    needs_refresh = True
+    # 만료 임박 여부(60초 버퍼) - 타임존 일치시키기
+    needs_refresh = False
     if access_token and expiry_dt:
-        needs_refresh = (expiry_dt - dt.datetime.utcnow()).total_seconds() < 60
+        # expiry_dt가 타임존 정보가 있으므로 utcnow()도 타임존 정보를 추가
+        now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        needs_refresh = (expiry_dt - now_utc).total_seconds() < 60
     elif access_token and not expiry_dt:
-        # 만료 정보를 저장하지 않는 구조라면 일단 사용해 보고 실패 시 상위에서 400 처리
+        # 만료 정보가 없으면 일단 사용해보고, 실패 시 갱신
         needs_refresh = False
+    else:
+        needs_refresh = True
 
     if not needs_refresh and access_token:
         return access_token
@@ -74,7 +78,9 @@ async def _ensure_access_token(current_user: dict) -> str:
         tok = r.json()
 
     new_access = tok["access_token"]
-    new_expiry = (dt.datetime.utcnow() + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
+    # 타임존 정보를 포함한 만료 시간 계산
+    now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+    new_expiry = (now_utc + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
 
     # DB 업데이트
     await AuthRepository.update_google_user_info(
