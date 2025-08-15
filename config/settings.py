@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # 서버 설정
     PORT: int = 8000
     HOST: str = "0.0.0.0"
+    BASE_URL: str = "http://localhost:3000"  # 웹훅 URL용
     
     # JWT 설정
     JWT_SECRET: str = "PLEASE_SET_JWT_SECRET_IN_ENV_FILE"

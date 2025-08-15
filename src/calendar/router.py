@@ -1,8 +1,9 @@
 # src/calendar/router.py
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from typing import Optional
 import datetime as dt
 import httpx
+import logging
 
 from .models import CalendarEvent, CreateEventRequest, GoogleAuthRequest, GoogleAuthResponse
 from .service import GoogleCalendarService
@@ -10,6 +11,9 @@ from .service import GoogleCalendarService
 from config.settings import settings
 from src.auth.service import AuthService
 from src.auth.repository import AuthRepository
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -230,6 +234,88 @@ async def delete_calendar_event(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
+
+# ---------------------------
+# Google Calendar Webhook (실시간 동기화)
+# ---------------------------
+@router.post("/webhook")
+async def google_calendar_webhook(request: Request):
+    """
+    Google Calendar 웹훅 처리
+    - 캘린더 변경사항을 실시간으로 감지
+    - 클라이언트에게 실시간 알림 전송
+    """
+    try:
+        # 웹훅 데이터 파싱
+        webhook_data = await request.json()
+        
+        # Google Calendar 웹훅 검증
+        if "state" in webhook_data:
+            # 구독 확인 요청
+            return {"status": "ok", "challenge": webhook_data.get("state")}
+        
+        # 실제 캘린더 변경사항 처리
+        if "events" in webhook_data:
+            events = webhook_data["events"]
+            logger.info(f"[WEBHOOK] 캘린더 변경 감지: {len(events)}개 이벤트")
+            
+            # 여기서 클라이언트에게 실시간 알림을 보낼 수 있음
+            # 예: WebSocket, Server-Sent Events, 또는 푸시 알림
+            
+            return {"status": "success", "processed_events": len(events)}
+        
+        return {"status": "received", "data": webhook_data}
+        
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 웹훅 처리 오류: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 처리 실패: {str(e)}")
+
+@router.post("/subscribe")
+async def subscribe_to_calendar_webhook(
+    current_user: dict = Depends(AuthService.get_current_user),
+    calendar_id: str = Query("primary", description="캘린더 ID")
+):
+    """
+    Google Calendar 웹훅 구독 설정
+    """
+    try:
+        # Google 액세스 토큰 보장
+        google_access_token = await _ensure_access_token(current_user)
+        
+        # Google Calendar API로 웹훅 구독 요청
+        webhook_url = f"{settings.BASE_URL}/calendar/webhook"
+        
+        subscription_data = {
+            "id": f"webhook_{current_user['email']}_{calendar_id}",
+            "type": "web_hook",
+            "address": webhook_url,
+            "params": {
+                "ttl": "2592000"  # 30일
+            }
+        }
+        
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/watch"
+        headers = {
+            "Authorization": f"Bearer {google_access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=subscription_data, headers=headers)
+            response.raise_for_status()
+            
+        result = response.json()
+        logger.info(f"[WEBHOOK] 구독 성공: {result.get('id')}")
+        
+        return {
+            "status": "success",
+            "subscription_id": result.get("id"),
+            "expiration": result.get("expiration")
+        }
+        
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 구독 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 구독 실패: {str(e)}")
 
 @router.get("/test")
 async def test_calendar_api():
