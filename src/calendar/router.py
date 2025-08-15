@@ -76,14 +76,13 @@ async def _ensure_access_token(current_user: dict) -> str:
     new_access = tok["access_token"]
     new_expiry = (dt.datetime.utcnow() + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
 
-    # DB 업데이트 (컬럼명에 맞게 조정; expiry 저장 컬럼이 없다면 token_expiry 인자 제거 가능)
+    # DB 업데이트
     await AuthRepository.update_google_user_info(
         email=current_user["email"],
         access_token=new_access,
         refresh_token=refresh_token,  # 보통 refresh는 응답에 다시 안 옴 -> 기존 값 유지
         profile_image=None,
-        name=None,
-        token_expiry=new_expiry  # 없는 시그니처면 이 인자 삭제
+        name=None
     )
     return new_access
 
@@ -120,17 +119,47 @@ async def authenticate_google(request: GoogleAuthRequest):
         raise HTTPException(status_code=400, detail=f"Google 인증 실패: {str(e)}")
 
 # ---------------------------
-# Events (쿼리 파라미터로 access_token 받기)
+# Events (JWT 인증으로 자동 토큰 갱신)
 # ---------------------------
 @router.get("/events")
 async def get_calendar_events(
+    current_user: dict = Depends(AuthService.get_current_user),
+    calendar_id: str = Query("primary", description="캘린더 ID"),
+    time_min: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-15T00:00:00+09:00"),
+    time_max: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-16T00:00:00+09:00"),
+):
+    """
+    앱 JWT로 인증 후 Google Calendar 이벤트 조회 (자동 토큰 갱신)
+    """
+    try:
+        # Google 액세스 토큰 보장 (만료 시 자동 갱신)
+        google_access_token = await _ensure_access_token(current_user)
+        
+        service = GoogleCalendarService()
+        events = await service.get_calendar_events(
+            access_token=google_access_token,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        return {"events": events}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
+
+# ---------------------------
+# Events (기존 방식 - 쿼리 파라미터로 access_token 받기)
+# ---------------------------
+@router.get("/events/legacy")
+async def get_calendar_events_legacy(
     access_token: str = Query(..., description="Google OAuth access token"),
     calendar_id: str = Query("primary", description="캘린더 ID"),
     time_min: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-15T00:00:00+09:00"),
     time_max: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-16T00:00:00+09:00"),
 ):
     """
-    Google OAuth access_token으로 Google Calendar 이벤트 조회
+    Google OAuth access_token으로 Google Calendar 이벤트 조회 (기존 방식)
     """
     try:
         service = GoogleCalendarService()
@@ -147,42 +176,52 @@ async def get_calendar_events(
 @router.post("/events", response_model=CalendarEvent)
 async def create_calendar_event(
     event_data: CreateEventRequest,
-    access_token: str = Query(..., description="Google OAuth access token"),
+    current_user: dict = Depends(AuthService.get_current_user),
     calendar_id: str = Query("primary", description="캘린더 ID"),
 ):
     """
-    Google OAuth access_token으로 Google Calendar 이벤트 생성
+    앱 JWT로 인증 후 Google Calendar 이벤트 생성 (자동 토큰 갱신)
     """
     try:
+        # Google 액세스 토큰 보장 (만료 시 자동 갱신)
+        google_access_token = await _ensure_access_token(current_user)
+        
         service = GoogleCalendarService()
         event = await service.create_calendar_event(
-            access_token=access_token,
+            access_token=google_access_token,
             event_data=event_data,
             calendar_id=calendar_id,
         )
         return event
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 생성 실패: {str(e)}")
 
 @router.delete("/events/{event_id}")
 async def delete_calendar_event(
     event_id: str,
-    access_token: str = Query(..., description="Google OAuth access token"),
+    current_user: dict = Depends(AuthService.get_current_user),
     calendar_id: str = Query("primary", description="캘린더 ID"),
 ):
     """
-    Google OAuth access_token으로 Google Calendar 이벤트 삭제
+    앱 JWT로 인증 후 Google Calendar 이벤트 삭제 (자동 토큰 갱신)
     """
     try:
+        # Google 액세스 토큰 보장 (만료 시 자동 갱신)
+        google_access_token = await _ensure_access_token(current_user)
+        
         service = GoogleCalendarService()
         success = await service.delete_calendar_event(
-            access_token=access_token,
+            access_token=google_access_token,
             event_id=event_id,
             calendar_id=calendar_id,
         )
         if success:
             return {"message": "이벤트가 성공적으로 삭제되었습니다."}
         raise HTTPException(status_code=400, detail="이벤트 삭제에 실패했습니다.")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
 
