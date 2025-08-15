@@ -29,10 +29,14 @@ class Settings(BaseSettings):
     
     # CORS 설정
     CORS_ORIGINS: list[str] = [
-        "http://localhost:5173",  # Vite 개발 서버
-        "http://localhost:8081",  # Expo 웹 개발 서버
-        "http://localhost:3000",  # 로컬 테스트용
-        "http://localhost:19006"  # Expo 웹 대체 포트
+         "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:19006",
+    "http://127.0.0.1:19006",# Expo 웹 대체 포트
     ]
     CORS_CREDENTIALS: bool = True
 

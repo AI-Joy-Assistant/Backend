@@ -1,11 +1,15 @@
-from fastapi import APIRouter, HTTPException, Depends, Request, Response
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 from typing import Optional
 import json
+import datetime as dt
+from urllib.parse import urlencode
+
 from .models import UserCreate, UserLogin, UserResponse, TokenResponse
 from .service import AuthService
 from .repository import AuthRepository
-from config.database import get_supabase_client
+from config.database import get_supabase_client  # (사용 안 해도 유지)
+from config.settings import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,33 +33,40 @@ async def login(user_data: UserLogin):
 
 @router.get("/google")
 async def google_auth():
-    """Google OAuth 인증 시작"""
-    from config.settings import settings
-    
-    # Google OAuth URL 생성 (리프레시 토큰을 받기 위해 prompt=consent 추가)
-    auth_url = (
-        f"https://accounts.google.com/o/oauth2/v2/auth?"
-        f"client_id={settings.GOOGLE_CLIENT_ID}&"
-        f"redirect_uri={settings.GOOGLE_REDIRECT_URI}&"
-        f"response_type=code&"
-        f"scope=openid%20email%20profile&"
-        f"access_type=offline&"
-        f"prompt=consent"
-    )
-    
+    """
+    Google OAuth 인증 시작
+    - 캘린더 접근을 위해 calendar scope 포함
+    - refresh_token 확보를 위해 access_type=offline + prompt=consent 사용
+    """
+    scopes = [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/calendar",
+    ]
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": " ".join(scopes),            # 공백으로 합친 뒤 urlencode 처리
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+    }
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
     return RedirectResponse(url=auth_url)
+
 
 @router.get("/google/callback")
 async def google_auth_callback(code: str, request: Request):
     """Google OAuth 콜백 처리"""
     try:
-        from config.settings import settings
         import httpx
-        
+
         print("🔍 Google OAuth 콜백 시작...")
         print(f"📝 받은 코드: {code[:20]}...")
-        
-        # 액세스 토큰 교환
+
+        # 1) 액세스 토큰 교환
         token_url = "https://oauth2.googleapis.com/token"
         token_data = {
             "client_id": settings.GOOGLE_CLIENT_ID,
@@ -64,100 +75,117 @@ async def google_auth_callback(code: str, request: Request):
             "grant_type": "authorization_code",
             "redirect_uri": settings.GOOGLE_REDIRECT_URI,
         }
-        
+
         print("🔄 Google 액세스 토큰 교환 중...")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             token_response = await client.post(token_url, data=token_data)
             token_response.raise_for_status()
             tokens = token_response.json()
             print("✅ Google 액세스 토큰 교환 성공")
             print(f"📊 받은 토큰 정보: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
-        
-        # 사용자 정보 가져오기
+
+        # 만료 시각 계산(선택)
+        expires_in = tokens.get("expires_in", 3600)
+        token_expiry = (dt.datetime.utcnow() + dt.timedelta(seconds=expires_in)).isoformat()
+
+        # 2) 사용자 정보 가져오기
         user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
         headers = {"Authorization": f"Bearer {tokens['access_token']}"}
-        
+
         print("🔄 Google 사용자 정보 가져오는 중...")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             user_response = await client.get(user_info_url, headers=headers)
             user_response.raise_for_status()
             user_info = user_response.json()
             print(f"✅ Google 사용자 정보: {user_info.get('email')}, {user_info.get('name')}")
-        
-        # Supabase에 사용자 정보 저장 또는 업데이트
+
+        # 3) Supabase에 사용자 저장/업데이트
         print("🔄 Supabase 사용자 처리 중...")
-        
-        # Google 사용자 정보로 회원가입/로그인 처리
+
         user_data = UserCreate(
             email=user_info["email"],
-            password="",  # Google OAuth는 비밀번호가 없음
+            password="",  # Google OAuth는 비밀번호 없음
             name=user_info.get("name", "")
         )
-        
+
         print(f"📝 처리할 사용자 데이터: {user_data.email}, {user_data.name}")
-        
+
         try:
-            # 기존 사용자인지 확인하고 로그인
+            # (a) 기존 사용자 로그인
             print("🔍 기존 사용자 확인 중...")
             token = await AuthService.login_google_user(user_info)
             print("✅ 기존 사용자 로그인 성공")
-            
-            # 기존 사용자의 경우 토큰과 프로필 이미지만 업데이트 (닉네임은 유지)
-            print(f"🔄 기존 사용자 정보 업데이트 중...")
-            print(f"📝 업데이트할 토큰: access_token={bool(tokens.get('access_token'))}, refresh_token={bool(tokens.get('refresh_token'))}")
-            print(f"📸 프로필 이미지: {user_info.get('picture')}")
-            
-            # 프로필 이미지가 있으면 항상 업데이트
+
+            # 기존 사용자는 토큰/프로필만 업데이트 (닉네임 유지)
+            print("🔄 기존 사용자 정보 업데이트 중...")
             profile_image = user_info.get("picture")
-            if profile_image:
-                print(f"✅ 프로필 이미지 업데이트: {profile_image}")
-            
-            await AuthRepository.update_google_user_info(
-                email=user_info["email"],
-                access_token=tokens.get("access_token"),
-                refresh_token=tokens.get("refresh_token"),
-                profile_image=profile_image,
-                name=None  # 기존 사용자의 경우 닉네임은 변경하지 않음
-            )
-            print("✅ 기존 사용자 정보 업데이트 완료")
-            
-        except Exception as e:
-            print(f"⚠️ 기존 사용자 로그인 실패: {str(e)}")
-            # 새 사용자라면 회원가입
-            print("🆕 새 사용자 회원가입 중...")
+
+            # update_google_user_info가 token_expiry를 받을 수도/안 받을 수도 있으므로 안전 처리
             try:
-                # Google 사용자 정보를 포함하여 새 사용자 생성
-                google_user_data = {
-                    "email": user_info["email"],
-                    "name": user_info.get("name", ""),
-                    "profile_image": user_info.get("picture"),
-                    "access_token": tokens.get("access_token"),
-                    "refresh_token": tokens.get("refresh_token"),
-                    "status": True
-                }
-                
-                print(f"📝 새 사용자 생성 데이터: {google_user_data}")
-                print(f"📊 토큰 정보: access_token={bool(google_user_data.get('access_token'))}, refresh_token={bool(google_user_data.get('refresh_token'))}")
-                
-                user = await AuthRepository.create_google_user(google_user_data)
+                await AuthRepository.update_google_user_info(
+                    email=user_info["email"],
+                    access_token=tokens.get("access_token"),
+                    refresh_token=tokens.get("refresh_token"),
+                    profile_image=profile_image,
+                    name=None,  # 닉네임 변경 없음
+                    token_expiry=token_expiry,
+                )
+            except TypeError:
+                # 구버전 시그니처 호환
+                await AuthRepository.update_google_user_info(
+                    email=user_info["email"],
+                    access_token=tokens.get("access_token"),
+                    refresh_token=tokens.get("refresh_token"),
+                    profile_image=profile_image,
+                    name=None,
+                )
+
+            print("✅ 기존 사용자 정보 업데이트 완료")
+
+        except Exception as e:
+            # (b) 신규 사용자 회원가입
+            print(f"⚠️ 기존 사용자 로그인 실패: {str(e)}")
+            print("🆕 새 사용자 회원가입 중...")
+
+            google_user_data = {
+                "email": user_info["email"],
+                "name": user_info.get("name", ""),
+                "profile_image": user_info.get("picture"),
+                "access_token": tokens.get("access_token"),
+                "refresh_token": tokens.get("refresh_token"),
+                "status": True,
+                "token_expiry": token_expiry,
+            }
+
+            print(f"📝 새 사용자 생성 데이터: {google_user_data}")
+            print(f"📊 토큰 정보: access_token={bool(google_user_data.get('access_token'))}, refresh_token={bool(google_user_data.get('refresh_token'))}")
+
+            try:
+                # create_google_user가 token_expiry를 안 받을 수도 있으므로 안전 처리
+                try:
+                    user = await AuthRepository.create_google_user(google_user_data)
+                except TypeError:
+                    google_user_data_fallback = {k: v for k, v in google_user_data.items() if k != "token_expiry"}
+                    user = await AuthRepository.create_google_user(google_user_data_fallback)
+
                 print("✅ 새 사용자 회원가입 성공")
                 token = await AuthService.login_google_user(user_info)
                 print("✅ 새 사용자 로그인 성공")
             except Exception as register_error:
                 print(f"❌ 새 사용자 회원가입 실패: {str(register_error)}")
                 raise register_error
-        
-        # 세션에 사용자 정보 저장
+
+        # 4) 세션에 앱 토큰 저장 (앱 JWT)
         print("💾 세션에 사용자 정보 저장 중...")
         request.session["user"] = {
             "id": user_info["id"],
             "email": user_info["email"],
             "name": user_info.get("name", ""),
-            "access_token": token.access_token
+            "access_token": token.access_token,  # 앱에서 쓰는 JWT
         }
         print("✅ 세션 저장 완료")
-        
-        # HTML 응답으로 브라우저 창 닫기 및 데이터 전달
+
+        # 5) HTML 응답으로 창 닫기 + 부모 창에 토큰 전달
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -166,7 +194,6 @@ async def google_auth_callback(code: str, request: Request):
         </head>
         <body>
             <script>
-                // 부모 창에 메시지 전달
                 if (window.opener) {{
                     window.opener.postMessage({{
                         type: 'GOOGLE_LOGIN_SUCCESS',
@@ -175,7 +202,6 @@ async def google_auth_callback(code: str, request: Request):
                     }}, '*');
                     window.close();
                 }} else {{
-                    // 새 창에서 열린 경우 리다이렉트
                     window.location.href = 'http://localhost:8081?token={token.access_token}';
                 }}
             </script>
@@ -184,13 +210,12 @@ async def google_auth_callback(code: str, request: Request):
         </body>
         </html>
         """
-        
+
         print("✅ HTML 응답 생성 완료")
         return HTMLResponse(content=html_content)
-        
+
     except Exception as e:
         print(f"❌ Google OAuth 콜백 오류: {str(e)}")
-        # 에러 발생 시 HTML 응답
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -214,17 +239,33 @@ async def google_auth_callback(code: str, request: Request):
         </body>
         </html>
         """
-        
         return HTMLResponse(content=html_content)
 
 @router.get("/token")
 async def get_token(request: Request):
-    """세션에서 토큰 가져오기"""
+    """세션에서 앱 토큰(JWT) 가져오기"""
+    user = request.session.get("user")
+    if not user:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    return {"accessToken": user.get("access_token")}
+
+@router.get("/google-token")
+async def get_google_token(request: Request):
+    """세션에서 Google OAuth access_token 가져오기"""
     user = request.session.get("user")
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     
-    return {"accessToken": user.get("access_token")}
+    # 데이터베이스에서 Google OAuth access_token 가져오기
+    try:
+        from .repository import AuthRepository
+        user_data = await AuthRepository.find_user_by_email(user.get("email"))
+        if user_data and user_data.get("access_token"):
+            return {"access_token": user_data.get("access_token")}
+        else:
+            raise HTTPException(status_code=404, detail="Google OAuth 토큰을 찾을 수 없습니다.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"토큰 조회 실패: {str(e)}")
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(current_user: dict = Depends(AuthService.get_current_user)):
@@ -234,7 +275,6 @@ async def get_current_user(current_user: dict = Depends(AuthService.get_current_
 @router.post("/logout")
 async def logout(request: Request):
     """사용자 로그아웃"""
-    # 세션에서 사용자 정보 삭제
     if "user" in request.session:
         del request.session["user"]
     return {"message": "로그아웃되었습니다."}
@@ -260,7 +300,6 @@ async def delete_user(
     """사용자 계정 삭제"""
     try:
         await AuthService.delete_user(current_user["id"])
-        # 세션에서 사용자 정보 삭제
         if "user" in request.session:
             del request.session["user"]
         return {"message": "계정이 성공적으로 삭제되었습니다."}
@@ -274,12 +313,12 @@ async def get_profile_image(user_id: str):
         user = await AuthRepository.find_user_by_id(user_id)
         if not user or not user.get('profile_image'):
             raise HTTPException(status_code=404, detail="프로필 이미지를 찾을 수 없습니다.")
-        
+
         import httpx
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(user['profile_image'])
             response.raise_for_status()
-            
+
             from fastapi.responses import Response
             return Response(
                 content=response.content,
@@ -290,4 +329,4 @@ async def get_profile_image(user_id: str):
                 }
             )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"이미지 로드 실패: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"이미지 로드 실패: {str(e)}")
