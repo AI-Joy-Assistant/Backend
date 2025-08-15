@@ -3,7 +3,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from typing import Dict, Any, Optional, Tuple
 import jwt
-from fastapi import Request
+from jwt import ExpiredSignatureError, InvalidTokenError
+from fastapi import Request, HTTPException
 from config.settings import settings
 from .repository import AuthRepository
 from .models import LoginResponse, TokenResponse, UserProfileResponse, UserCreate, UserLogin, UserResponse
@@ -393,23 +394,31 @@ class AuthService:
     async def get_current_user(request: Request) -> Dict[str, Any]:
         """JWT 토큰으로 현재 사용자 정보 조회"""
         try:
-            auth_header = request.headers.get("authorization")
+            auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
             if not auth_header or not auth_header.startswith("Bearer "):
-                raise Exception("Authorization 헤더가 없습니다.")
-            
+                # ▲ 변경: 401을 명확히 반환
+                raise HTTPException(status_code=401, detail="Authorization 헤더가 없습니다.")
+
             token = auth_header.split(" ")[1]
             payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
             email = payload.get("email")
             
             user = await AuthRepository.find_user_by_email(email)
             if not user:
-                raise Exception("사용자를 찾을 수 없습니다.")
-            
+                raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
             return user
-        except jwt.InvalidTokenError:
-            raise Exception("유효하지 않은 토큰입니다.")
+        except ExpiredSignatureError:
+            # ▲ 변경: 만료는 401 + 식별 가능한 코드
+            raise HTTPException(status_code=401, detail="token_expired")
+        except InvalidTokenError:
+            # ▲ 변경: 잘못된 토큰
+            raise HTTPException(status_code=401, detail="invalid_token")
+        except HTTPException:
+            raise
         except Exception as e:
-            raise Exception(f"사용자 정보 조회 실패: {str(e)}")
+            # ▲ 변경: 기타 예외도 500으로 고정
+            raise HTTPException(status_code=500, detail=f"사용자 정보 조회 실패: {str(e)}")
 
     @staticmethod
     async def update_user_info(user_id: str, user_data: Dict[str, Any]) -> Dict[str, Any]:

@@ -87,13 +87,24 @@ async def _ensure_access_token(current_user: dict) -> str:
     new_expiry = (now_utc + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
 
     # DB 업데이트
-    await AuthRepository.update_google_user_info(
-        email=current_user["email"],
-        access_token=new_access,
-        refresh_token=refresh_token,  # 보통 refresh는 응답에 다시 안 옴 -> 기존 값 유지
-        profile_image=None,
-        name=None
-    )
+    try:
+        await AuthRepository.update_google_user_info(
+            email=current_user["email"],
+            access_token=new_access,
+            refresh_token=refresh_token,
+            profile_image=None,
+            name=None,
+            token_expiry=new_expiry,  # 지원 시
+        )
+    except TypeError:
+    # 구버전 시그니처 호환
+        await AuthRepository.update_google_user_info(
+            email=current_user["email"],
+            access_token=new_access,
+            refresh_token=refresh_token,
+            profile_image=None,
+            name=None,
+        )
     return new_access
 
 # ---------------------------
@@ -246,25 +257,32 @@ async def google_calendar_webhook(request: Request):
     - 클라이언트에게 실시간 알림 전송
     """
     try:
+        headers = request.headers
+        resource_state = headers.get("X-Goog-Resource-State")
+        channel_id     = headers.get("X-Goog-Channel-Id")
+        resource_id    = headers.get("X-Goog-Resource-Id")
+        logger.info(f"[WEBHOOK] state={resource_state}, channel={channel_id}, resource={resource_id}")
+
         # 웹훅 데이터 파싱
-        webhook_data = await request.json()
+        # webhook_data = await request.json()
+        #
+        # # Google Calendar 웹훅 검증
+        # if "state" in webhook_data:
+        #     # 구독 확인 요청
+        #     return {"status": "ok", "challenge": webhook_data.get("state")}
+        #
+        # # 실제 캘린더 변경사항 처리
+        # if "events" in webhook_data:
+        #     events = webhook_data["events"]
+        #     logger.info(f"[WEBHOOK] 캘린더 변경 감지: {len(events)}개 이벤트")
+        #
+        #     # 여기서 클라이언트에게 실시간 알림을 보낼 수 있음
+        #     # 예: WebSocket, Server-Sent Events, 또는 푸시 알림
+        #
+        #     return {"status": "success", "processed_events": len(events)}
         
-        # Google Calendar 웹훅 검증
-        if "state" in webhook_data:
-            # 구독 확인 요청
-            return {"status": "ok", "challenge": webhook_data.get("state")}
-        
-        # 실제 캘린더 변경사항 처리
-        if "events" in webhook_data:
-            events = webhook_data["events"]
-            logger.info(f"[WEBHOOK] 캘린더 변경 감지: {len(events)}개 이벤트")
-            
-            # 여기서 클라이언트에게 실시간 알림을 보낼 수 있음
-            # 예: WebSocket, Server-Sent Events, 또는 푸시 알림
-            
-            return {"status": "success", "processed_events": len(events)}
-        
-        return {"status": "received", "data": webhook_data}
+        return {"status": "received"}
+
         
     except Exception as e:
         logger.error(f"[WEBHOOK] 웹훅 처리 오류: {str(e)}")
