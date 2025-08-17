@@ -342,19 +342,19 @@ class ChatService:
                 return None
             
             # 시간 계산
+            logger.info(f"시간 파싱 시작: time_str='{schedule_info.get('time')}', context='{original_text}'")
             start_time, end_time = ChatService._parse_time(schedule_info.get("time"), start_date, context_text=original_text)
+            logger.info(f"시간 파싱 결과: start_time={start_time}, end_time={end_time}")
             
             # 일정 제목 생성 (친구가 있으면 친구와 함께, 없으면 활동만)
             summary = activity
             if friend_name:
                 summary = f"{friend_name}와 {activity}"
             
-            # 일정 설명 생성 (설명, 친구, 장소)
+            # 일정 설명 생성 (설명, 친구)
             description = "AI Assistant가 추가한 일정"
             if friend_name:
                 description += f"\n친구: {friend_name}"
-            if location:
-                description += f"\n장소: {location}"
             
             # 캘린더에 일정 추가
             event_data = {
@@ -446,30 +446,70 @@ class ChatService:
         def has_am(text: str) -> bool:
             return any(w in text for w in am_words)
 
-        # 1) hh:mm
+        def parse_hour(hh: int, context: str) -> int:
+            """시간을 24시간 형식으로 변환"""
+            if has_pm(context) and 1 <= hh <= 11:
+                hh += 12
+            if has_am(context) and hh == 12:
+                hh = 0
+            return hh
+
+        # 1) 시간 범위 파싱: "오후 7시부터 9시까지" 또는 "7시-9시" 등
+        logger.info(f"시간 범위 파싱 시도: ctx='{ctx}'")
+        
+        # "오후 7시부터 9시까지" 형식
+        m = re.search(r"오후\s*(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1)) + 12
+            end_hh = int(m.group(2)) + 12
+            logger.info(f"오후 시간 범위 매칭: start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+        
+        # "오전 7시부터 9시까지" 형식
+        m = re.search(r"오전\s*(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1))
+            end_hh = int(m.group(2))
+            logger.info(f"오전 시간 범위 매칭: start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+        
+        # "7시부터 9시까지" 형식 (AM/PM 없음)
+        m = re.search(r"(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1))
+            end_hh = int(m.group(2))
+            # 12시 이하는 오후로 가정
+            if start_hh <= 12:
+                start_hh += 12
+            if end_hh <= 12:
+                end_hh += 12
+            logger.info(f"시간 범위 매칭 (AM/PM 없음): start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+
+        # 2) 단일 시간 파싱: hh:mm
         m = re.search(r"(\d{1,2}):(\d{2})", t)
         if m:
             hh, mm = int(m.group(1)), int(m.group(2))
-            if has_pm(ctx) and 1 <= hh <= 11:
-                hh += 12
-            if has_am(ctx) and hh == 12:
-                hh = 0
+            hh = parse_hour(hh, ctx)
             start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
-            return start, start + timedelta(hours=1)
+            return start, start
 
-        # 2) N시(분 포함)
+        # 3) 단일 시간 파싱: N시(분 포함)
         m = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", t)
         if m:
             hh = int(m.group(1))
             mm = int(m.group(2)) if m.group(2) else 0
-            if has_pm(ctx) and 1 <= hh <= 11:
-                hh += 12
-            if has_am(ctx) and hh == 12:
-                hh = 0
+            hh = parse_hour(hh, ctx)
             start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
-            return start, start + timedelta(hours=1)
+            return start, start
 
-        # 3) 수식어만 있을 때 기본값
+        # 4) 수식어만 있을 때 기본값
         if "새벽" in ctx:
             hh = 2
         elif ("아침" in ctx) or ("오전" in ctx):
@@ -481,4 +521,4 @@ class ChatService:
         else:
             hh = 14
         start = date.replace(hour=hh, minute=0, second=0, microsecond=0, tzinfo=KST)
-        return start, start + timedelta(hours=1)
+        return start, start
