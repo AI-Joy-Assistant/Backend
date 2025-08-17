@@ -21,6 +21,5 @@ yarn.lock
 # 빌드 결과물
 dist/
 build/
-.env.backup
 __pycache__/
 *.pyc
