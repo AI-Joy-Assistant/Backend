@@ -2,6 +2,8 @@ import openai
 from typing import Dict, Any, List
 from config.settings import settings
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -10,12 +12,34 @@ class OpenAIService:
         self.client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
     
+    def _get_current_time_info(self) -> str:
+        """현재 시간 정보를 문자열로 반환"""
+        KST = ZoneInfo("Asia/Seoul")
+        now = datetime.now(KST)
+        
+        # 요일을 한글로 변환
+        weekday_map = {
+            0: "월요일",
+            1: "화요일", 
+            2: "수요일",
+            3: "목요일",
+            4: "금요일",
+            5: "토요일",
+            6: "일요일"
+        }
+        
+        weekday_kr = weekday_map[now.weekday()]
+        return now.strftime(f"%Y년 %m월 %d일 {weekday_kr} %H시 %M분 (한국 시간)")
+    
     async def generate_response(self, user_message: str, conversation_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
         """ChatGPT API를 사용하여 응답 생성"""
         try:
-            # 시스템 프롬프트 설정
-            system_prompt = """당신은 AI Joy Assistant의 일정 조율 도우미입니다. 
+            current_time = self._get_current_time_info()
+            
+            system_prompt = f"""당신은 AI Joy Assistant의 일정 조율 도우미입니다. 
 사용자와 친구들의 일정을 조율하고 약속을 잡는 것을 도와주세요.
+
+현재 시간: {current_time}
 
 주요 기능:
 1. 친구와의 일정 조율
@@ -23,22 +47,21 @@ class OpenAIService:
 3. 일정 충돌 확인
 4. 친근하고 도움이 되는 대화
 
+시간 관련 질문에 답할 때는 현재 시간을 참고하여 정확한 답변을 제공하세요.
+요일 계산이 필요한 경우 현재 요일을 기준으로 정확히 계산하세요.
 항상 친근하고 도움이 되는 톤으로 응답하세요."""
 
-            # 대화 히스토리 구성
             messages = [{"role": "system", "content": system_prompt}]
             
             if conversation_history:
-                for msg in conversation_history[-10:]:  # 최근 10개 메시지만 포함
+                for msg in conversation_history[-10:]:
                     if msg.get("type") == "user":
                         messages.append({"role": "user", "content": msg["message"]})
                     elif msg.get("type") == "assistant":
                         messages.append({"role": "assistant", "content": msg["message"]})
             
-            # 현재 사용자 메시지 추가
             messages.append({"role": "user", "content": user_message})
             
-            # ChatGPT API 호출
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -71,20 +94,25 @@ class OpenAIService:
     async def extract_schedule_info(self, message: str) -> Dict[str, Any]:
         """메시지에서 일정 관련 정보 추출"""
         try:
-            system_prompt = """다음 메시지에서 일정 관련 정보를 추출해주세요.
+            current_time = self._get_current_time_info()
+            
+            system_prompt = f"""다음 메시지에서 일정 관련 정보를 추출해주세요.
+현재 시간: {current_time}
+
 JSON 형태로 다음 정보를 반환하세요:
-{
+{{
     "friend_name": "친구 이름",
     "date": "날짜 (오늘, 내일, 모레, 특정 날짜)",
     "time": "시간 (점심, 저녁, 특정 시간)",
     "activity": "활동 내용",
     "location": "장소 (있다면)",
     "has_schedule_request": true/false
-}
+}}
 
 예시:
-- "아구만이랑 내일 점심 약속 잡아줘" → {"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "has_schedule_request": true}
-- "안녕하세요" → {"has_schedule_request": false}"""
+- "아구만이랑 내일 점심 약속 잡아줘" → {{"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "has_schedule_request": true}}
+- "내일 오후 3시에 카페에서 공부" → {{"date": "내일", "time": "오후 3시", "activity": "공부", "location": "카페", "has_schedule_request": true}}
+- "안녕하세요" → {{"has_schedule_request": false}}"""
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -96,13 +124,11 @@ JSON 형태로 다음 정보를 반환하세요:
                 temperature=0.1
             )
             
-            # JSON 응답 파싱 시도
             try:
                 import json
                 result = json.loads(response.choices[0].message.content)
                 return result
             except json.JSONDecodeError:
-                # JSON 파싱 실패 시 기본 정보만 반환
                 return {
                     "has_schedule_request": False,
                     "message": response.choices[0].message.content
