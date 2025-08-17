@@ -5,6 +5,7 @@ import jwt
 from config.settings import settings
 from .service import ChatService
 from .models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse
+from .repository import ChatRepository
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -94,13 +95,41 @@ async def start_ai_conversation(
     message: str,
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """사용자가 AI에게 일정 조율을 요청합니다."""
+    """사용자가 AI에게 일정 조율을 요청합니다. (ChatGPT API 사용)"""
     result = await ChatService.start_ai_conversation(current_user_id, message)
     
     if result["status"] == 200:
         return result["data"]
     else:
         raise HTTPException(status_code=result["status"], detail=result["error"])
+
+@router.post("/chat", summary="ChatGPT와 대화")
+async def chat_with_gpt(
+    request: dict,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """ChatGPT와 자유로운 대화를 합니다."""
+    message = request.get("message", "")
+    if not message:
+        raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
+    
+    result = await ChatService.start_ai_conversation(current_user_id, message)
+    
+    if result["status"] == 200:
+        return result["data"]
+    else:
+        raise HTTPException(status_code=result["status"], detail=result["error"])
+
+@router.get("/history", summary="채팅 기록 조회")
+async def get_chat_history(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """사용자의 채팅 기록을 조회합니다."""
+    try:
+        chat_logs = await ChatRepository.get_recent_chat_logs(current_user_id, limit=50)
+        return chat_logs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅 기록 조회 실패: {str(e)}")
 
 @router.get("/friend/{friend_id}", summary="특정 친구와의 대화 내용 조회")
 async def get_friend_messages(

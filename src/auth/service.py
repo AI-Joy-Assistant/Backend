@@ -459,3 +459,13 @@ class AuthService:
         except Exception as e:
             print(f"❌ 사용자 계정 삭제 실패: {str(e)}")
             raise Exception(f"사용자 계정 삭제 실패: {str(e)}") 
+
+    @staticmethod
+    async def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+        """사용자 ID로 사용자 정보 조회"""
+        try:
+            user = await AuthRepository.find_user_by_id(user_id)
+            return user
+        except Exception as e:
+            print(f"사용자 조회 실패: {str(e)}")
+            return None 
