@@ -2,8 +2,9 @@ import httpx
 import json
 import logging
 from typing import List, Optional, Dict, Any, Union
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # py>=3.9
+
 from config.settings import settings
 from .models import CalendarEvent, CreateEventRequest
 
@@ -23,14 +24,11 @@ def _to_rfc3339(value: Union[str, datetime, None]) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, str):
-        # 예: "2025-08-16T00:00:00+09:00" or "2025-08-16T00:00:00Z"
         return value
-    # datetime 객체
     dt = value
     if dt.tzinfo is None:
-        # 로컬 naive인 경우 KST로 간주 (서비스의 기본 동작을 KST로 맞춤)
         dt = dt.replace(tzinfo=KST)
-    return dt.isoformat()  # offset 포함
+    return dt.isoformat()
 
 class GoogleCalendarService:
     def __init__(self):
@@ -63,24 +61,24 @@ class GoogleCalendarService:
             raise
 
     async def get_calendar_events(
-        self,
-        access_token: str,
-        calendar_id: str = "primary",
-        time_min: Optional[Union[str, datetime]] = None,
-        time_max: Optional[Union[str, datetime]] = None
+            self,
+            access_token: str,
+            calendar_id: str = "primary",
+            time_min: Optional[Union[str, datetime]] = None,
+            time_max: Optional[Union[str, datetime]] = None
     ) -> List[CalendarEvent]:
         """
         구글 캘린더에서 이벤트를 가져옵니다.
         - time_min/time_max는 RFC3339 문자열(권장) 또는 datetime
         - 문자열이면 있는 그대로 전달 (+09:00 또는 Z 유지)
         - datetime이면 Asia/Seoul 기준 tz-aware 로 변환
+        - Google의 timeMax는 '배타' 이므로, 일 조회는 다음날 00:00(+09:00), 월 조회는 다음달 1일 00:00(+09:00)를 주는 게 안전
         """
-        # 기본 기간: 오늘 00:00~+30일 (KST)
         if time_min is None:
             today_start_kst = datetime.now(tz=KST).replace(hour=0, minute=0, second=0, microsecond=0)
             time_min = today_start_kst
         if time_max is None:
-            time_max = (datetime.now(tz=KST) + timedelta(days=30)).replace(hour=23, minute=59, second=59, microsecond=0)
+            time_max = (datetime.now(tz=KST) + timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
 
         time_min_str = _to_rfc3339(time_min)
         time_max_str = _to_rfc3339(time_max)
@@ -89,9 +87,10 @@ class GoogleCalendarService:
         params = {
             "timeMin": time_min_str,
             "timeMax": time_max_str,
-            "singleEvents": "true",  # 문자열로 주는 게 안전
+            "singleEvents": "true",
             "orderBy": "startTime",
-            "maxResults": "100",
+            "maxResults": "2500",
+            "timeZone": "Asia/Seoul",   # ★ 경계 판정 타임존 고정
         }
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -106,7 +105,6 @@ class GoogleCalendarService:
                 r.raise_for_status()
             data = r.json()
 
-            # 항상 배열로 정규화
             items = data.get("items", [])
             events: List[CalendarEvent] = []
             for item in items:
@@ -139,23 +137,20 @@ class GoogleCalendarService:
             raise
 
     async def create_calendar_event(
-        self,
-        access_token: str,
-        event_data: CreateEventRequest,
-        calendar_id: str = "primary"
+            self,
+            access_token: str,
+            event_data: CreateEventRequest,
+            calendar_id: str = "primary"
     ) -> CalendarEvent:
         url = f"{self.base_url}/calendars/{calendar_id}/events"
 
-        # 문자열을 datetime으로 변환하되, 오프셋이 없으면 KST 부여
         try:
             start_time_str = event_data.start_time
             end_time_str = event_data.end_time
 
             def parse_iso(s: str) -> datetime:
-                # Z를 +00:00으로
                 if s.endswith("Z"):
                     s = s[:-1] + "+00:00"
-                # 오프셋이 없으면 KST 부여
                 if "T" in s and "+" not in s and "Z" not in s:
                     s += "+09:00"
                 return datetime.fromisoformat(s)
@@ -238,7 +233,6 @@ class GoogleCalendarService:
             raise
 
     def get_authorization_url(self, state: Optional[str] = None) -> str:
-        # 참고: 실제 로그인은 src/auth/router.py의 /auth/google 사용
         scopes = [
             "openid", "email", "profile",
             "https://www.googleapis.com/auth/calendar",
@@ -254,7 +248,6 @@ class GoogleCalendarService:
         }
         if state:
             params["state"] = state
-        # 안전한 urlencode
         from urllib.parse import urlencode
         qs = urlencode(params)
         auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{qs}"
