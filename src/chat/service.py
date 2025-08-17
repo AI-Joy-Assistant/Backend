@@ -1,4 +1,6 @@
 from typing import List, Dict, Any
+from zoneinfo import ZoneInfo
+
 from .repository import ChatRepository
 from .models import ChatRoom, ChatMessage, ChatRoomListResponse, ChatMessagesResponse
 from .openai_service import OpenAIService
@@ -186,16 +188,22 @@ class ChatService:
             # 일정 추가 시도
             calendar_event = None
             if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
-                logger.info(f"일정 추가 시도: {schedule_info}")
-                calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info)
+                calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info,original_text=message)
+
                 if calendar_event:
-                    logger.info(f"일정 추가 성공: {calendar_event}")
-                    ai_response += f"\n\n✅ 일정이 성공적으로 추가되었습니다!\n📅 {calendar_event.get('summary', '새 일정')}\n🕐 {calendar_event.get('start_time', '')}"
-                else:
-                    logger.error(f"일정 추가 실패: calendar_event is None")
-            else:
-                logger.info(f"일정 추가 조건 불충족: has_schedule_request={schedule_info.get('has_schedule_request')}, date={schedule_info.get('date')}, time={schedule_info.get('time')}")
-            
+                    start_str = (
+                            calendar_event.get("start_time_kst")
+                            or calendar_event.get("start_time")
+                            or schedule_info.get("time")  # 마지막 안전망
+                            or ""
+                    )
+                    # ✅ LLM 원문에 덧붙이지 말고, 아예 성공 카드로 교체
+                    ai_response = (
+                        "✅ 일정이 성공적으로 추가되었습니다!\n"
+                        f"📅 {calendar_event.get('summary', '새 일정')}\n"
+                        f"🕐 {calendar_event.get('start_time_kst', '')}\n"
+                        f"📍 {calendar_event.get('location', '')}"
+                    )
             # 사용자 메시지 저장
             await ChatRepository.create_chat_log(
                 user_id=user_id,
@@ -316,7 +324,7 @@ class ChatService:
             return None
     
     @staticmethod
-    async def _add_schedule_to_calendar(user_id: str, schedule_info: Dict[str, Any]) -> Dict[str, Any]:
+    async def _add_schedule_to_calendar(user_id: str, schedule_info: dict, original_text: str = "") -> dict | None:
         """일정 정보를 캘린더에 추가"""
         try:
             from src.calendar.service import CalendarService
@@ -329,12 +337,12 @@ class ChatService:
             friend_name = schedule_info.get("friend_name", "")
             
             # 날짜 계산
-            start_date = ChatService._parse_date(date_str)
+            start_date = ChatService._parse_date(schedule_info.get("date"))
             if not start_date:
                 return None
             
             # 시간 계산
-            start_time, end_time = ChatService._parse_time(time_str, start_date)
+            start_time, end_time = ChatService._parse_time(schedule_info.get("time"), start_date, context_text=original_text)
             
             # 일정 제목 생성 (친구가 있으면 친구와 함께, 없으면 활동만)
             summary = activity
@@ -365,6 +373,7 @@ class ChatService:
                     "summary": summary,
                     "start_time": start_time.strftime("%Y-%m-%d %H:%M"),
                     "end_time": end_time.strftime("%Y-%m-%d %H:%M"),
+                    "start_time_kst": start_time.strftime("%Y-%m-%d %H:%M"),
                     "location": location,
                     "google_event_id": calendar_result.get("data", {}).get("id")
                 }
@@ -381,82 +390,95 @@ class ChatService:
         """날짜 문자열을 datetime으로 파싱"""
         from zoneinfo import ZoneInfo
         KST = ZoneInfo("Asia/Seoul")
-        today = datetime.now(KST)
-        
-        if "오늘" in date_str:
-            return today
-        elif "내일" in date_str:
-            return today + timedelta(days=1)
-        elif "모레" in date_str:
-            return today + timedelta(days=2)
-        elif "다음주" in date_str:
-            return today + timedelta(days=7)
-        elif "이번주" in date_str:
-            # 이번 주 토요일
-            days_until_saturday = (5 - today.weekday()) % 7
-            return today + timedelta(days=days_until_saturday)
-        else:
-            # 특정 날짜 형식 (예: "8월 15일", "15일")
-            try:
-                if "월" in date_str and "일" in date_str:
-                    # "8월 15일" 형식
-                    month_match = re.search(r'(\d+)월', date_str)
-                    day_match = re.search(r'(\d+)일', date_str)
-                    if month_match and day_match:
-                        month = int(month_match.group(1))
-                        day = int(day_match.group(1))
-                        year = today.year
-                        return datetime(year, month, day, tzinfo=KST)
-                elif "일" in date_str:
-                    # "15일" 형식
-                    day_match = re.search(r'(\d+)일', date_str)
-                    if day_match:
-                        day = int(day_match.group(1))
-                        year = today.year
-                        month = today.month
-                        return datetime(year, month, day, tzinfo=KST)
-            except:
-                pass
-            
-            # 기본값: 내일
-            return today + timedelta(days=1)
+        today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+        s = date_str.strip()
+
+        # 상대 날짜
+        if "오늘" in s: return today
+        if "내일" in s: return today + timedelta(days=1)
+        if "모레" in s: return today + timedelta(days=2)
+        if "다음주" in s: return today + timedelta(days=7)
+        if "이번주" in s:
+            # 이번 주 토요일(또는 요구사항에 맞게 특정 요일)
+            days_until_sat = (5 - today.weekday()) % 7
+            return today + timedelta(days=days_until_sat)
+
+        # 특정 날짜: "M월 D일" 또는 "D일"
+        m_md = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', s)
+        if m_md:
+            month, day = int(m_md.group(1)), int(m_md.group(2))
+            year = today.year
+            candidate = datetime(year, month, day, tzinfo=KST)
+            # 과거면 내년으로 롤오버
+            if candidate < today: candidate = datetime(year + 1, month, day, tzinfo=KST)
+            return candidate
+
+        m_d = re.search(r'(\d{1,2})\s*일', s)
+        if m_d:
+            day = int(m_d.group(1))
+            year, month = today.year, today.month
+            candidate = datetime(year, month, day, tzinfo=KST)
+            # 과거면 다음달로 롤오버
+            if candidate < today:
+                if month == 12:
+                    candidate = datetime(year + 1, 1, day, tzinfo=KST)
+                else:
+                    candidate = datetime(year, month + 1, day, tzinfo=KST)
+            return candidate
+
+        # 미지정: 합리적 디폴트(내일)
+        return today + timedelta(days=1)
     
     @staticmethod
-    def _parse_time(time_str: str, date: datetime) -> tuple[datetime, datetime]:
+    def _parse_time(time_str: str, date: datetime, context_text: str = "") -> tuple[datetime, datetime]:
         """시간 문자열을 시작/종료 시간으로 파싱"""
-        from zoneinfo import ZoneInfo
         KST = ZoneInfo("Asia/Seoul")
-        
-        if "점심" in time_str:
-            start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "저녁" in time_str:
-            start_time = date.replace(hour=18, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "아침" in time_str or "오전" in time_str:
-            start_time = date.replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "오후" in time_str:
-            start_time = date.replace(hour=14, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
+        t = (time_str or "").strip()
+        ctx = f"{t} {context_text or ''}"
+
+        # PM/AM 인디케이터 집합
+        pm_words = ["오후", "저녁", "밤", "낮", "점심"]
+        am_words = ["오전", "아침", "새벽"]
+
+        def has_pm(text: str) -> bool:
+            return any(w in text for w in pm_words)
+
+        def has_am(text: str) -> bool:
+            return any(w in text for w in am_words)
+
+        # 1) hh:mm
+        m = re.search(r"(\d{1,2}):(\d{2})", t)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if has_pm(ctx) and 1 <= hh <= 11:
+                hh += 12
+            if has_am(ctx) and hh == 12:
+                hh = 0
+            start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
+            return start, start + timedelta(hours=1)
+
+        # 2) N시(분 포함)
+        m = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", t)
+        if m:
+            hh = int(m.group(1))
+            mm = int(m.group(2)) if m.group(2) else 0
+            if has_pm(ctx) and 1 <= hh <= 11:
+                hh += 12
+            if has_am(ctx) and hh == 12:
+                hh = 0
+            start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
+            return start, start + timedelta(hours=1)
+
+        # 3) 수식어만 있을 때 기본값
+        if "새벽" in ctx:
+            hh = 2
+        elif ("아침" in ctx) or ("오전" in ctx):
+            hh = 9
+        elif "점심" in ctx:
+            hh = 12
+        elif any(w in ctx for w in ["저녁", "오후", "밤", "낮"]):
+            hh = 18
         else:
-            # 특정 시간 형식 (예: "3시", "15:30")
-            try:
-                if "시" in time_str:
-                    hour_match = re.search(r'(\d+)시', time_str)
-                    if hour_match:
-                        hour = int(hour_match.group(1))
-                        start_time = date.replace(hour=hour, minute=0, second=0, microsecond=0, tzinfo=KST)
-                        end_time = start_time + timedelta(hours=1)
-                    else:
-                        start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
-                        end_time = start_time + timedelta(hours=1)
-                else:
-                    # 기본값: 오후 2시
-                    start_time = date.replace(hour=14, minute=0, second=0, microsecond=0, tzinfo=KST)
-                    end_time = start_time + timedelta(hours=1)
-            except:
-                start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
-                end_time = start_time + timedelta(hours=1)
-        
-        return start_time, end_time 
+            hh = 14
+        start = date.replace(hour=hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+        return start, start + timedelta(hours=1)
