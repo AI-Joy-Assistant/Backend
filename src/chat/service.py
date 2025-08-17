@@ -426,37 +426,61 @@ class ChatService:
         """시간 문자열을 시작/종료 시간으로 파싱"""
         from zoneinfo import ZoneInfo
         KST = ZoneInfo("Asia/Seoul")
-        
-        if "점심" in time_str:
-            start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "저녁" in time_str:
-            start_time = date.replace(hour=18, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "아침" in time_str or "오전" in time_str:
-            start_time = date.replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        elif "오후" in time_str:
-            start_time = date.replace(hour=14, minute=0, second=0, microsecond=0, tzinfo=KST)
-            end_time = start_time + timedelta(hours=1)
-        else:
-            # 특정 시간 형식 (예: "3시", "15:30")
-            try:
-                if "시" in time_str:
-                    hour_match = re.search(r'(\d+)시', time_str)
-                    if hour_match:
-                        hour = int(hour_match.group(1))
-                        start_time = date.replace(hour=hour, minute=0, second=0, microsecond=0, tzinfo=KST)
-                        end_time = start_time + timedelta(hours=1)
-                    else:
-                        start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
-                        end_time = start_time + timedelta(hours=1)
+        text = (time_str or "").strip()
+
+        def parse_single(phrase: str, default_meridiem: str | None = None) -> datetime:
+            p = phrase.strip()
+            meridiem = None
+            if "오후" in p:
+                meridiem = "pm"
+            elif "오전" in p:
+                meridiem = "am"
+            elif default_meridiem:
+                meridiem = default_meridiem
+
+            # HH:MM 또는 HH시 MM분
+            m = re.search(r"(\d{1,2})(?::(\d{1,2}))?", p)
+            if not m:
+                # 숫자가 없다면 의미 있는 디폴트로 처리
+                if "점심" in p:
+                    h, mm = 12, 0
+                elif "저녁" in p:
+                    h, mm = 18, 0
+                elif "아침" in p:
+                    h, mm = 9, 0
+                elif meridiem == "pm":
+                    h, mm = 14, 0
+                elif meridiem == "am":
+                    h, mm = 9, 0
                 else:
-                    # 기본값: 오후 2시
-                    start_time = date.replace(hour=14, minute=0, second=0, microsecond=0, tzinfo=KST)
-                    end_time = start_time + timedelta(hours=1)
-            except:
-                start_time = date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=KST)
+                    h, mm = 14, 0
+            else:
+                h = int(m.group(1))
+                mm = int(m.group(2) or 0)
+                # 24시간 표기면 그대로, 12시간 표기면 오전/오후 적용
+                if h <= 12 and meridiem:
+                    if meridiem == "pm" and h < 12:
+                        h += 12
+                    if meridiem == "am" and h == 12:
+                        h = 0
+
+            return date.replace(hour=h, minute=mm, second=0, microsecond=0, tzinfo=KST)
+
+        # 시간 범위: "...부터 ...까지", "...-...", "...~..."
+        range_match = re.split(r"부터|[-~]|~|까지", text)
+        if len([s for s in range_match if s.strip()]) >= 2:
+            # 분리 시퀀스에서 앞 2개를 사용
+            parts = [s for s in range_match if s.strip()]
+            start_phrase, end_phrase = parts[0], parts[1]
+            # 시작의 오전/오후 기준을 종료에도 상속
+            start_meridiem = "pm" if "오후" in start_phrase else ("am" if "오전" in start_phrase else None)
+            start_time = parse_single(start_phrase)
+            end_time = parse_single(end_phrase, default_meridiem=start_meridiem)
+            # 종료가 시작보다 같거나 빠르면 1시간 보정
+            if end_time <= start_time:
                 end_time = start_time + timedelta(hours=1)
-        
-        return start_time, end_time 
+        else:
+            start_time = parse_single(text)
+            end_time = start_time + timedelta(hours=1)
+
+        return start_time, end_time
