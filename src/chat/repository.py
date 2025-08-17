@@ -140,4 +140,19 @@ class ChatRepository:
             
             return response.data if response.data else []
         except Exception as e:
-            raise Exception(f"친구 메시지 조회 오류: {str(e)}") 
+            raise Exception(f"친구 메시지 조회 오류: {str(e)}")
+    
+    @staticmethod
+    async def get_recent_chat_logs(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """사용자의 최근 AI 채팅 로그 조회 (대화 히스토리용)"""
+        try:
+            response = supabase.table('chat_log').select('*').eq(
+                'user_id', user_id
+            ).order('created_at', desc=True).limit(limit).execute()
+            
+            # 시간순으로 정렬 (오래된 것부터)
+            if response.data:
+                return sorted(response.data, key=lambda x: x['created_at'])
+            return []
+        except Exception as e:
+            raise Exception(f"최근 채팅 로그 조회 오류: {str(e)}") 
