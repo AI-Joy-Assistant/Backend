@@ -313,7 +313,7 @@ class ChatService:
             
         except Exception as e:
             logger.error(f"친구 ID 검색 실패: {str(e)}")
-            return None 
+            return None
     
     @staticmethod
     async def _add_schedule_to_calendar(user_id: str, schedule_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -336,13 +336,15 @@ class ChatService:
             # 시간 계산
             start_time, end_time = ChatService._parse_time(time_str, start_date)
             
-            # 일정 제목 생성
-            summary = f"{activity}"
+            # 일정 제목 생성 (친구가 있으면 친구와 함께, 없으면 활동만)
+            summary = activity
             if friend_name:
                 summary = f"{friend_name}와 {activity}"
             
-            # 일정 설명 생성
-            description = f"AI Assistant가 추가한 일정\n친구: {friend_name if friend_name else '없음'}\n활동: {activity}"
+            # 일정 설명 생성 (설명, 친구, 장소)
+            description = "AI Assistant가 추가한 일정"
+            if friend_name:
+                description += f"\n친구: {friend_name}"
             if location:
                 description += f"\n장소: {location}"
             
