@@ -147,6 +147,7 @@ class AuthRepository:
             if refresh_token is not None:
                 update_data['refresh_token'] = refresh_token
                 print(f"✅ refresh_token 추가됨: {len(refresh_token)}자")
+
             if profile_image is not None:
                 update_data['profile_image'] = profile_image
                 print(f"✅ profile_image 추가됨: {profile_image[:50]}...")

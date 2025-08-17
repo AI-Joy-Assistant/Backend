@@ -29,6 +29,7 @@ app.add_middleware(
     allow_credentials=settings.CORS_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # 라우터 등록
