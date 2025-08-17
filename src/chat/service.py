@@ -1,8 +1,16 @@
 from typing import List, Dict, Any
+from zoneinfo import ZoneInfo
+
 from .repository import ChatRepository
 from .models import ChatRoom, ChatMessage, ChatRoomListResponse, ChatMessagesResponse
+from .openai_service import OpenAIService
 from collections import defaultdict
 import uuid
+import logging
+from datetime import datetime, timedelta
+import re
+
+logger = logging.getLogger(__name__)
 
 class ChatService:
     
@@ -149,52 +157,89 @@ class ChatService:
     
     @staticmethod
     async def start_ai_conversation(user_id: str, message: str) -> Dict[str, Any]:
-        """AI와 일정 조율 대화 시작"""
+        """AI와 일정 조율 대화 시작 (ChatGPT API 사용)"""
         try:
-            # 간단한 AI 응답 로직 (실제로는 더 복잡한 AI 처리)
-            ai_response = await ChatService._process_ai_request(user_id, message)
+            # OpenAI 서비스 초기화
+            openai_service = OpenAIService()
             
-            # 친구 정보 추출 (AI가 친구를 찾은 경우)
-            session_info = ai_response.get("session_info")
-            friend_name = session_info.get("friend_name") if session_info else None
+            # 이전 대화 히스토리 가져오기
+            conversation_history = await ChatService._get_conversation_history(user_id)
             
-            # 친구 ID 찾기 (실제로는 friend_list에서 찾아야 함, 여기서는 간단히 처리)
+            # ChatGPT API로 응답 생성
+            ai_result = await openai_service.generate_response(message, conversation_history)
+            
+            if ai_result["status"] == "error":
+                return {
+                    "status": 500,
+                    "error": ai_result["message"]
+                }
+            
+            ai_response = ai_result["message"]
+            
+            # 일정 정보 추출
+            schedule_info = await openai_service.extract_schedule_info(message)
+            friend_name = schedule_info.get("friend_name") if schedule_info.get("has_schedule_request") else None
+            
+            # 친구 ID 찾기
             friend_id = None
             if friend_name:
-                # TODO: friend_list 테이블에서 friend_name으로 friend_id 찾기
-                pass
+                friend_id = await ChatService._find_friend_id_by_name(user_id, friend_name)
             
+            # 일정 추가 시도
+            calendar_event = None
+            if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
+                calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info,original_text=message)
+
+                if calendar_event:
+                    start_str = (
+                            calendar_event.get("start_time_kst")
+                            or calendar_event.get("start_time")
+                            or schedule_info.get("time")  # 마지막 안전망
+                            or ""
+                    )
+                    # ✅ LLM 원문에 덧붙이지 말고, 아예 성공 카드로 교체
+                    ai_response = (
+                        "✅ 일정이 성공적으로 추가되었습니다!\n"
+                        f"📅 {calendar_event.get('summary', '새 일정')}\n"
+                        f"🕐 {calendar_event.get('start_time_kst', '')}\n"
+                        f"📍 {calendar_event.get('location', '')}"
+                    )
             # 사용자 메시지 저장
-            user_log = await ChatRepository.create_chat_log(
+            await ChatRepository.create_chat_log(
                 user_id=user_id,
                 request_text=message,
                 response_text=None,
                 friend_id=friend_id,
-                message_type="user_request"
+                message_type="user_message"
             )
             
             # AI 응답 저장
-            ai_log = await ChatRepository.create_chat_log(
+            await ChatRepository.create_chat_log(
                 user_id=user_id,
                 request_text=None,
-                response_text=ai_response["message"],
+                response_text=ai_response,
                 friend_id=friend_id,
                 message_type="ai_response"
             )
+            
+            logger.info(f"AI 대화 완료 - 사용자: {user_id}, 토큰 사용량: {ai_result.get('usage', {})}")
             
             return {
                 "status": 200,
                 "data": {
                     "user_message": message,
-                    "ai_response": ai_response["message"],
-                    "session_info": ai_response.get("session_info")
+                    "ai_response": ai_response,
+                    "schedule_info": schedule_info,
+                    "calendar_event": calendar_event,
+                    "usage": ai_result.get("usage")
                 }
             }
             
         except Exception as e:
+            logger.error(f"AI 대화 시작 실패: {str(e)}")
             return {
                 "status": 500,
-                "error": f"AI 대화 시작 실패: {str(e)}"
+                "error": f"일시적인 오류가 발생했습니다: {str(e)}"
             }
     
     @staticmethod
@@ -234,33 +279,246 @@ class ChatService:
             }
     
     @staticmethod
-    async def _process_ai_request(user_id: str, message: str) -> Dict[str, Any]:
-        """AI 요청 처리 (간단한 버전)"""
-        import re
-        
-        # 간단한 패턴 매칭으로 친구 이름과 일정 추출
-        # 예: "아구만이랑 내일 점심 약속 잡아줘"
-        friend_pattern = r"(\w+)(?:이?랑|과|와)"
-        schedule_pattern = r"(내일|모레|오늘|다음주|이번주)?\s*(\w+)\s*(약속|미팅|만남)"
-        
-        friend_match = re.search(friend_pattern, message)
-        schedule_match = re.search(schedule_pattern, message)
-        
-        if friend_match and schedule_match:
-            friend_name = friend_match.group(1)
-            when = schedule_match.group(1) or "언제든"
-            what = schedule_match.group(2)
+    async def _get_conversation_history(user_id: str) -> List[Dict[str, str]]:
+        """사용자의 최근 대화 히스토리 가져오기"""
+        try:
+            # 최근 20개의 대화 로그 가져오기
+            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=20)
             
-            return {
-                "message": f"네! {friend_name}님과 {when} {what} 일정을 조율해드리겠습니다. 잠시만 기다려 주세요...",
-                "session_info": {
-                    "friend_name": friend_name,
-                    "when": when,
-                    "what": what
-                }
+            conversation_history = []
+            for log in recent_logs:
+                if log.get("request_text"):
+                    conversation_history.append({
+                        "type": "user",
+                        "message": log["request_text"]
+                    })
+                if log.get("response_text"):
+                    conversation_history.append({
+                        "type": "assistant",
+                        "message": log["response_text"]
+                    })
+            
+            return conversation_history
+            
+        except Exception as e:
+            logger.error(f"대화 히스토리 조회 실패: {str(e)}")
+            return []
+    
+    @staticmethod
+    async def _find_friend_id_by_name(user_id: str, friend_name: str) -> str:
+        """친구 이름으로 친구 ID 찾기"""
+        try:
+            # 사용자의 친구 목록에서 이름으로 검색
+            friends_data = await ChatRepository.get_friends_list(user_id)
+            
+            for friend in friends_data:
+                # TODO: 실제로는 friend_list 테이블에서 friend_name 컬럼을 조회해야 함
+                # 현재는 간단히 friend_id를 반환
+                if friend.get("friend_id"):
+                    return friend["friend_id"]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"친구 ID 검색 실패: {str(e)}")
+            return None
+    
+    @staticmethod
+    async def _add_schedule_to_calendar(user_id: str, schedule_info: dict, original_text: str = "") -> dict | None:
+        """일정 정보를 캘린더에 추가"""
+        try:
+            from src.calendar.service import CalendarService
+            
+            # 날짜 파싱
+            date_str = schedule_info.get("date", "")
+            time_str = schedule_info.get("time", "")
+            activity = schedule_info.get("activity", "일정")
+            location = schedule_info.get("location", "")
+            friend_name = schedule_info.get("friend_name", "")
+            
+            # 날짜 계산
+            start_date = ChatService._parse_date(schedule_info.get("date"))
+            if not start_date:
+                return None
+            
+            # 시간 계산
+            logger.info(f"시간 파싱 시작: time_str='{schedule_info.get('time')}', context='{original_text}'")
+            start_time, end_time = ChatService._parse_time(schedule_info.get("time"), start_date, context_text=original_text)
+            logger.info(f"시간 파싱 결과: start_time={start_time}, end_time={end_time}")
+            
+            # 일정 제목 생성 (친구가 있으면 친구와 함께, 없으면 활동만)
+            summary = activity
+            if friend_name:
+                summary = f"{friend_name}와 {activity}"
+            
+            # 일정 설명 생성 (설명, 친구)
+            description = "AI Assistant가 추가한 일정"
+            if friend_name:
+                description += f"\n친구: {friend_name}"
+            
+            # 캘린더에 일정 추가
+            event_data = {
+                "summary": summary,
+                "description": description,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "location": location
             }
+            
+            calendar_result = await CalendarService.create_event(user_id, event_data)
+            
+            if calendar_result.get("status") == 200:
+                logger.info(f"일정 추가 성공: {user_id} - {summary}")
+                return {
+                    "summary": summary,
+                    "start_time": start_time.strftime("%Y-%m-%d %H:%M"),
+                    "end_time": end_time.strftime("%Y-%m-%d %H:%M"),
+                    "start_time_kst": start_time.strftime("%Y-%m-%d %H:%M"),
+                    "location": location,
+                    "google_event_id": calendar_result.get("data", {}).get("id")
+                }
+            else:
+                logger.error(f"일정 추가 실패: {calendar_result.get('error')}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"일정 추가 중 오류: {str(e)}")
+            return None
+    
+    @staticmethod
+    def _parse_date(date_str: str) -> datetime:
+        """날짜 문자열을 datetime으로 파싱"""
+        from zoneinfo import ZoneInfo
+        KST = ZoneInfo("Asia/Seoul")
+        today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+        s = date_str.strip()
+
+        # 상대 날짜
+        if "오늘" in s: return today
+        if "내일" in s: return today + timedelta(days=1)
+        if "모레" in s: return today + timedelta(days=2)
+        if "다음주" in s: return today + timedelta(days=7)
+        if "이번주" in s:
+            # 이번 주 토요일(또는 요구사항에 맞게 특정 요일)
+            days_until_sat = (5 - today.weekday()) % 7
+            return today + timedelta(days=days_until_sat)
+
+        # 특정 날짜: "M월 D일" 또는 "D일"
+        m_md = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', s)
+        if m_md:
+            month, day = int(m_md.group(1)), int(m_md.group(2))
+            year = today.year
+            candidate = datetime(year, month, day, tzinfo=KST)
+            # 과거면 내년으로 롤오버
+            if candidate < today: candidate = datetime(year + 1, month, day, tzinfo=KST)
+            return candidate
+
+        m_d = re.search(r'(\d{1,2})\s*일', s)
+        if m_d:
+            day = int(m_d.group(1))
+            year, month = today.year, today.month
+            candidate = datetime(year, month, day, tzinfo=KST)
+            # 과거면 다음달로 롤오버
+            if candidate < today:
+                if month == 12:
+                    candidate = datetime(year + 1, 1, day, tzinfo=KST)
+                else:
+                    candidate = datetime(year, month + 1, day, tzinfo=KST)
+            return candidate
+
+        # 미지정: 합리적 디폴트(내일)
+        return today + timedelta(days=1)
+    
+    @staticmethod
+    def _parse_time(time_str: str, date: datetime, context_text: str = "") -> tuple[datetime, datetime]:
+        """시간 문자열을 시작/종료 시간으로 파싱"""
+        KST = ZoneInfo("Asia/Seoul")
+        t = (time_str or "").strip()
+        ctx = f"{t} {context_text or ''}"
+
+        # PM/AM 인디케이터 집합
+        pm_words = ["오후", "저녁", "밤", "낮", "점심"]
+        am_words = ["오전", "아침", "새벽"]
+
+        def has_pm(text: str) -> bool:
+            return any(w in text for w in pm_words)
+
+        def has_am(text: str) -> bool:
+            return any(w in text for w in am_words)
+
+        def parse_hour(hh: int, context: str) -> int:
+            """시간을 24시간 형식으로 변환"""
+            if has_pm(context) and 1 <= hh <= 11:
+                hh += 12
+            if has_am(context) and hh == 12:
+                hh = 0
+            return hh
+
+        # 1) 시간 범위 파싱: "오후 7시부터 9시까지" 또는 "7시-9시" 등
+        logger.info(f"시간 범위 파싱 시도: ctx='{ctx}'")
+        
+        # "오후 7시부터 9시까지" 형식
+        m = re.search(r"오후\s*(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1)) + 12
+            end_hh = int(m.group(2)) + 12
+            logger.info(f"오후 시간 범위 매칭: start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+        
+        # "오전 7시부터 9시까지" 형식
+        m = re.search(r"오전\s*(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1))
+            end_hh = int(m.group(2))
+            logger.info(f"오전 시간 범위 매칭: start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+        
+        # "7시부터 9시까지" 형식 (AM/PM 없음)
+        m = re.search(r"(\d{1,2})\s*시\s*부터\s*(\d{1,2})\s*시", ctx)
+        if m:
+            start_hh = int(m.group(1))
+            end_hh = int(m.group(2))
+            # 12시 이하는 오후로 가정
+            if start_hh <= 12:
+                start_hh += 12
+            if end_hh <= 12:
+                end_hh += 12
+            logger.info(f"시간 범위 매칭 (AM/PM 없음): start_hh={start_hh}, end_hh={end_hh}")
+            start = date.replace(hour=start_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            end = date.replace(hour=end_hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return start, end
+
+        # 2) 단일 시간 파싱: hh:mm
+        m = re.search(r"(\d{1,2}):(\d{2})", t)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            hh = parse_hour(hh, ctx)
+            start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
+            return start, start
+
+        # 3) 단일 시간 파싱: N시(분 포함)
+        m = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", t)
+        if m:
+            hh = int(m.group(1))
+            mm = int(m.group(2)) if m.group(2) else 0
+            hh = parse_hour(hh, ctx)
+            start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
+            return start, start
+
+        # 4) 수식어만 있을 때 기본값
+        if "새벽" in ctx:
+            hh = 2
+        elif ("아침" in ctx) or ("오전" in ctx):
+            hh = 9
+        elif "점심" in ctx:
+            hh = 12
+        elif any(w in ctx for w in ["저녁", "오후", "밤", "낮"]):
+            hh = 18
         else:
-            return {
-                "message": "일정 조율을 도와드리겠습니다. 어떤 약속을 잡고 싶으신가요? (예: '아구만이랑 내일 점심 약속 잡아줘')",
-                "session_info": None
-            } 
+            hh = 14
+        start = date.replace(hour=hh, minute=0, second=0, microsecond=0, tzinfo=KST)
+        return start, start

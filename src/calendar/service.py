@@ -275,3 +275,58 @@ class GoogleCalendarService:
         except Exception as e:
             logger.error(f"토큰 갱신 중 오류: {str(e)}")
             raise
+
+class CalendarService:
+    """캘린더 서비스 - 사용자 인증 및 이벤트 관리"""
+    
+    @staticmethod
+    async def create_event(user_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
+        """사용자 ID로 일정 생성"""
+        try:
+            from src.auth.service import AuthService
+            
+            # 사용자 정보 조회 (Google 액세스 토큰 포함)
+            user_info = await AuthService.get_user_by_id(user_id)
+            if not user_info:
+                return {"status": 404, "error": "사용자를 찾을 수 없습니다."}
+            
+            access_token = user_info.get("access_token")
+            if not access_token:
+                return {"status": 401, "error": "Google Calendar 연동이 필요합니다."}
+            
+            # GoogleCalendarService 인스턴스 생성
+            google_calendar = GoogleCalendarService()
+            
+            # CreateEventRequest 객체 생성
+            from .models import CreateEventRequest
+            create_request = CreateEventRequest(
+                summary=event_data.get("summary", "새 일정"),
+                description=event_data.get("description", ""),
+                start_time=event_data.get("start_time"),
+                end_time=event_data.get("end_time"),
+                location=event_data.get("location", ""),
+                attendees=event_data.get("attendees", [])
+            )
+            
+            # Google Calendar에 이벤트 생성
+            calendar_event = await google_calendar.create_calendar_event(
+                access_token=access_token,
+                event_data=create_request
+            )
+            
+            return {
+                "status": 200,
+                "data": {
+                    "id": calendar_event.id,
+                    "summary": calendar_event.summary,
+                    "description": calendar_event.description,
+                    "start": calendar_event.start,
+                    "end": calendar_event.end,
+                    "location": calendar_event.location,
+                    "htmlLink": calendar_event.htmlLink
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"일정 생성 실패: {str(e)}")
+            return {"status": 500, "error": f"일정 생성 실패: {str(e)}"}
