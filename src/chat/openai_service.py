@@ -1,15 +1,19 @@
-import openai
+from openai import OpenAI
 from typing import Dict, Any, List
 from config.settings import settings
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
+import os
+print("🚨 현재 FastAPI가 인식한 OPENAI_API_KEY:", os.getenv("OPENAI_API_KEY"))
 
 class OpenAIService:
     def __init__(self):
-        self.client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
     
     def _get_current_time_info(self) -> str:

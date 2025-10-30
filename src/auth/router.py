@@ -202,7 +202,8 @@ async def google_auth_callback(code: str, request: Request):
                     }}, '*');
                     window.close();
                 }} else {{
-                    window.location.href = 'http://localhost:8081?token={token.access_token}';
+                    // RN/Expo(모바일) 환경: 앱 스킴으로 리다이렉트하여 토큰 전달
+                    window.location.href = 'frontend://auth-success?token={token.access_token}';
                 }}
             </script>
             <h1>로그인 성공!</h1>
@@ -231,7 +232,8 @@ async def google_auth_callback(code: str, request: Request):
                     }}, '*');
                     window.close();
                 }} else {{
-                    window.location.href = 'http://localhost:8081?error={str(e)}';
+                    // RN/Expo(모바일) 환경: 앱 스킴으로 에러 전달
+                    window.location.href = 'frontend://auth-error?error={str(e)}';
                 }}
             </script>
             <h1>로그인 실패</h1>

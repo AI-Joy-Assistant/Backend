@@ -99,6 +99,68 @@ async def _ensure_access_token(current_user: dict) -> str:
     return new_access
 
 # ---------------------------
+# 내부 유틸: 다른 사용자 ID로 액세스 토큰 확보
+# ---------------------------
+async def _ensure_access_token_by_user_id(user_id: str) -> str:
+    db_user = await AuthRepository.find_user_by_id(user_id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="대상 사용자를 찾을 수 없습니다.")
+
+    access_token = db_user.get("access_token")
+    refresh_token = db_user.get("refresh_token")
+    expiry = db_user.get("token_expiry") or db_user.get("expiry")
+
+    def _to_dt(x):
+        if not x:
+            return None
+        if isinstance(x, dt.datetime):
+            return x
+        try:
+            return dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    expiry_dt = _to_dt(expiry)
+    needs_refresh = False
+    if access_token and expiry_dt:
+        now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        needs_refresh = (expiry_dt - now_utc).total_seconds() < 60
+    elif access_token and not expiry_dt:
+        needs_refresh = False
+    else:
+        needs_refresh = True
+
+    if not needs_refresh and access_token:
+        return access_token
+
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="대상 사용자의 Google 재로그인이 필요합니다 (refresh_token 없음).")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        r = await client.post(GOOGLE_TOKEN_URL, data=data)
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Google 토큰 갱신 실패: {r.text}")
+        tok = r.json()
+
+    new_access = tok["access_token"]
+    now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+    new_expiry = (now_utc + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
+
+    # 이메일 대신 ID 기준 업데이트
+    try:
+        await AuthRepository.update_tokens(user_id=user_id, access_token=new_access)
+    except Exception:
+        pass
+
+    return new_access
+
+# ---------------------------
 # OAuth (선택 유지)
 # ---------------------------
 @router.get("/auth-url")
@@ -206,6 +268,172 @@ async def delete_calendar_event(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
+
+# ---------------------------
+# 공통 가용 시간 계산
+# ---------------------------
+@router.get("/common-free")
+async def get_common_free_slots(
+        friend_id: str,
+        duration_minutes: int = Query(60, ge=15, le=240),
+        time_min: Optional[str] = Query(None, description="ISO8601"),
+        time_max: Optional[str] = Query(None, description="ISO8601"),
+        current_user: dict = Depends(AuthService.get_current_user),
+):
+    try:
+        # 각 사용자 액세스 토큰 확보 (만료 시 리프레시)
+        me_access = await _ensure_access_token(current_user)
+        friend_access = await _ensure_access_token_by_user_id(friend_id)
+
+        service = GoogleCalendarService()
+        # 이벤트 조회 기간 기본값: 오늘 0시 ~ 14일 후 0시
+        now_kst = dt.datetime.now(dt.timezone.utc).astimezone(dt.timezone(dt.timedelta(hours=9)))
+        default_min = (now_kst.replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()
+        default_max = (now_kst + dt.timedelta(days=14)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        me_events = await service.get_calendar_events(
+            access_token=me_access,
+            time_min=time_min or default_min,
+            time_max=time_max or default_max,
+        )
+        friend_events = await service.get_calendar_events(
+            access_token=friend_access,
+            time_min=time_min or default_min,
+            time_max=time_max or default_max,
+        )
+
+        # 바쁜 구간 추출 (dateTime 기준만 고려)
+        def to_busy_intervals(events):
+            intervals = []
+            for e in events:
+                try:
+                    s = e.start.get("dateTime")
+                    e_ = e.end.get("dateTime")
+                    if not s or not e_:
+                        continue
+                    start = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    end = dt.datetime.fromisoformat(e_.replace("Z", "+00:00"))
+                    intervals.append((start, end))
+                except Exception:
+                    continue
+            return intervals
+
+        me_busy = to_busy_intervals(me_events)
+        friend_busy = to_busy_intervals(friend_events)
+
+        # 기간 경계
+        min_boundary = dt.datetime.fromisoformat((time_min or default_min).replace("Z", "+00:00"))
+        max_boundary = dt.datetime.fromisoformat((time_max or default_max).replace("Z", "+00:00"))
+
+        # 병합 함수
+        def merge(intervals):
+            intervals = sorted(intervals, key=lambda x: x[0])
+            merged = []
+            for s, e in intervals:
+                if not merged or s > merged[-1][1]:
+                    merged.append([s, e])
+                else:
+                    merged[-1][1] = max(merged[-1][1], e)
+            return [(s, e) for s, e in merged]
+
+        # 바쁜 구간 합집합
+        all_busy = merge(me_busy + friend_busy)
+
+        # 전체 기간에서 바쁜 구간을 제외하여 free 구간 계산
+        free = []
+        cursor = min_boundary
+        for s, e in all_busy:
+            if e <= min_boundary:
+                continue
+            if s >= max_boundary:
+                break
+            if s > cursor:
+                free.append((cursor, min(s, max_boundary)))
+            cursor = max(cursor, e)
+        if cursor < max_boundary:
+            free.append((cursor, max_boundary))
+
+        # duration 기준으로 슬롯 분할
+        delta = dt.timedelta(minutes=duration_minutes)
+        slots = []
+        for s, e in free:
+            t = s
+            while t + delta <= e:
+                slots.append({
+                    "start": t.isoformat(),
+                    "end": (t + delta).isoformat(),
+                })
+                t += delta
+
+        return {"slots": slots}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"공통 가용 시간 계산 실패: {str(e)}")
+
+@router.post("/meet-with-friend")
+async def create_meeting_with_friend(
+        payload: dict,
+        current_user: dict = Depends(AuthService.get_current_user),
+):
+    """
+    friend_id, summary, location, duration_minutes, time_min, time_max 를 받아
+    공통 가용 시간 중 가장 이른 슬롯에 일정 생성.
+    """
+    try:
+        friend_id = payload.get("friend_id")
+        if not friend_id:
+            raise HTTPException(status_code=400, detail="friend_id가 필요합니다.")
+        summary = payload.get("summary", "만남")
+        location = payload.get("location")
+        duration_minutes = int(payload.get("duration_minutes", 60))
+        time_min = payload.get("time_min")
+        time_max = payload.get("time_max")
+
+        # 공통 가용 슬롯 계산 재사용
+        result = await get_common_free_slots(
+            friend_id=friend_id,
+            duration_minutes=duration_minutes,
+            time_min=time_min,
+            time_max=time_max,
+            current_user=current_user,
+        )
+        slots = result.get("slots", [])
+        if not slots:
+            raise HTTPException(status_code=409, detail="공통 가용 시간이 없습니다.")
+
+        slot = slots[0]
+        start = slot["start"]
+        end = slot["end"]
+
+        # 이메일 수집 (참석자)
+        me_email = current_user.get("email")
+        friend = await AuthRepository.find_user_by_id(friend_id)
+        if not friend:
+            raise HTTPException(status_code=404, detail="친구 정보를 찾을 수 없습니다.")
+        friend_email = friend.get("email")
+
+        service = GoogleCalendarService()
+        me_access = await _ensure_access_token(current_user)
+
+        from .models import CreateEventRequest
+        event_req = CreateEventRequest(
+            summary=summary,
+            start_time=start,
+            end_time=end,
+            location=location,
+            attendees=[e for e in [me_email, friend_email] if e],
+        )
+
+        event = await service.create_calendar_event(
+            access_token=me_access,
+            event_data=event_req,
+        )
+        return {"event": event}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"친구와 일정 생성 실패: {str(e)}")
 
 # ---------------------------
 # Google Calendar Webhook

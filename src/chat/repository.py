@@ -122,9 +122,16 @@ class ChatRepository:
     async def get_user_chat_sessions(user_id: str) -> List[Dict[str, Any]]:
         """사용자의 친구별 채팅 목록 조회"""
         try:
-            response = supabase.table('chat_log').select(
-                'friend_id, request_text, response_text, created_at'
-            ).eq('user_id', user_id).is_('friend_id', 'not.null').order('created_at', desc=True).execute()
+            # 일부 환경에서 is_('not.null')가 400을 유발하는 케이스가 있어 not_.is_('null')로 대체
+            response = (
+                supabase
+                .table('chat_log')
+                .select('friend_id, request_text, response_text, created_at')
+                .eq('user_id', user_id)
+                .not_.is_('friend_id', 'null')
+                .order('created_at', desc=True)
+                .execute()
+            )
             
             return response.data if response.data else []
         except Exception as e:
@@ -141,6 +148,17 @@ class ChatRepository:
             return response.data if response.data else []
         except Exception as e:
             raise Exception(f"친구 메시지 조회 오류: {str(e)}")
+
+    @staticmethod
+    async def delete_user_friend_session(user_id: str, friend_id: str) -> int:
+        """사용자-친구 간 세션(chat_log) 전체 삭제, 삭제된 행 수 반환"""
+        try:
+            response = supabase.table('chat_log').delete().eq('user_id', user_id).eq('friend_id', friend_id).execute()
+            # supabase-py는 반환 데이터에 삭제된 행이 포함될 수 있음
+            deleted_count = len(response.data) if response.data else 0
+            return deleted_count
+        except Exception as e:
+            raise Exception(f"세션 삭제 오류: {str(e)}")
     
     @staticmethod
     async def get_recent_chat_logs(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -156,3 +174,20 @@ class ChatRepository:
             return []
         except Exception as e:
             raise Exception(f"최근 채팅 로그 조회 오류: {str(e)}") 
+
+    @staticmethod
+    async def delete_chat_room(user_id: str, friend_id: str) -> int:
+        """특정 친구와의 채팅 로그 전체 삭제(현재 사용자 관점)"""
+        try:
+            (
+                supabase
+                .table('chat_log')
+                .delete()
+                .eq('user_id', user_id)
+                .eq('friend_id', friend_id)
+                .execute()
+            )
+            # Supabase는 delete 기본동작이 representation 미반환이므로 성공 시 1로 간주
+            return 1
+        except Exception as e:
+            raise Exception(f"채팅방 삭제 오류: {str(e)}")

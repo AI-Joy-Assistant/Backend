@@ -308,15 +308,29 @@ class ChatService:
     async def _find_friend_id_by_name(user_id: str, friend_name: str) -> str:
         """친구 이름으로 친구 ID 찾기"""
         try:
-            # 사용자의 친구 목록에서 이름으로 검색
+            # 1) 사용자의 친구 목록 조회 (friend_id만)
             friends_data = await ChatRepository.get_friends_list(user_id)
-            
-            for friend in friends_data:
-                # TODO: 실제로는 friend_list 테이블에서 friend_name 컬럼을 조회해야 함
-                # 현재는 간단히 friend_id를 반환
-                if friend.get("friend_id"):
-                    return friend["friend_id"]
-            
+            friend_ids = [f.get("friend_id") for f in friends_data if f.get("friend_id")]
+            if not friend_ids:
+                return None
+
+            # 2) ID → 이름 매핑 조회
+            id_to_name = await ChatRepository.get_user_names_by_ids(friend_ids)
+
+            # 3) 이름 정규화 후 매칭 (포함/공백 무시, 대소문자 무시)
+            def norm(s: str) -> str:
+                return (s or "").strip().lower()
+
+            target = norm(friend_name)
+            # 우선 완전 일치
+            for fid, name in id_to_name.items():
+                if norm(name) == target:
+                    return fid
+            # 포함 일치 보조
+            for fid, name in id_to_name.items():
+                if target and target in norm(name):
+                    return fid
+
             return None
             
         except Exception as e:

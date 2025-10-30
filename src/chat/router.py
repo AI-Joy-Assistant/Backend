@@ -143,3 +143,52 @@ async def get_friend_messages(
         return result["data"]
     else:
         raise HTTPException(status_code=result["status"], detail=result["error"]) 
+
+@router.post("/log", summary="A2A 등 외부 흐름에서 대화 로그 남기기")
+async def append_chat_log(
+    request: dict,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    외부(예: A2A 자동 조율)에서 상단 히스토리에 보여줄 로그를 직접 남깁니다.
+    body: { friend_id: string, message: string, role: 'user'|'ai'|'system' }
+    """
+    friend_id = request.get("friend_id")
+    message = request.get("message")
+    role = (request.get("role") or "ai").lower()
+
+    if not friend_id or not message:
+        raise HTTPException(status_code=400, detail="friend_id와 message가 필요합니다.")
+
+    try:
+        if role == "user":
+            await ChatRepository.create_chat_log(
+                user_id=current_user_id,
+                request_text=message,
+                response_text=None,
+                friend_id=friend_id,
+                message_type="user_message",
+            )
+        else:
+            await ChatRepository.create_chat_log(
+                user_id=current_user_id,
+                request_text=None,
+                response_text=message,
+                friend_id=friend_id,
+                message_type="ai_response",
+            )
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"로그 기록 실패: {str(e)}")
+
+@router.delete("/rooms/{friend_id}", summary="채팅방(대화 히스토리) 삭제")
+async def delete_chat_room(friend_id: str, current_user_id: str = Depends(get_current_user_id)):
+    """
+    현재 사용자 기준으로 특정 친구와의 방(히스토리)을 삭제합니다.
+    chat_log에서 user_id, friend_id로 매칭되는 레코드를 제거합니다.
+    """
+    try:
+        deleted = await ChatRepository.delete_chat_room(current_user_id, friend_id)
+        return {"deleted": deleted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"삭제 실패: {str(e)}")
