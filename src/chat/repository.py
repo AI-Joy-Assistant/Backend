@@ -73,7 +73,8 @@ class ChatRepository:
         request_text: str = None, 
         response_text: str = None,
         friend_id: str = None,
-        message_type: str = "user_request"
+        message_type: str = "user_request",
+        metadata: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """AI 채팅 로그 생성"""
         try:
@@ -85,8 +86,12 @@ class ChatRepository:
                 "message_type": message_type
             }
             
-            # None 값들 제거
-            log_data = {k: v for k, v in log_data.items() if v is not None}
+            # metadata가 있으면 추가 (승인 요청 정보 등)
+            if metadata:
+                log_data["metadata"] = metadata
+            
+            # None 값들 제거 (metadata는 제외)
+            log_data = {k: v for k, v in log_data.items() if v is not None or k == "metadata"}
             
             response = supabase.table('chat_log').insert(log_data).execute()
             if response.data:

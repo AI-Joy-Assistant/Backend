@@ -204,19 +204,78 @@ class ChatService:
             
             logger.info(f"[CHAT] schedule_info: has={schedule_info.get('has_schedule_request')}, friends={friend_names}, intent={schedule_info.get('intent')}")
             
-            # 여러 친구 ID 찾기
+            # 재조율 요청 확인: 이전 거절 메시지의 thread_id와 session_ids 확인
+            recoordination_needed = False
+            thread_id_for_recoordination = None
+            session_ids_for_recoordination = []
+            
+            # 최근 거절 메시지 또는 거절 응답 확인
+            from config.database import supabase
+            
+            # 1) 사용자가 "아니오"를 눌렀는지 확인 (schedule_approval_response)
+            rejection_response = supabase.table('chat_log').select('*').eq(
+                'user_id', user_id
+            ).eq('message_type', 'schedule_approval_response').order('created_at', desc=True).limit(1).execute()
+            
+            if rejection_response.data:
+                rejection_log = rejection_response.data[0]
+                rejection_metadata = rejection_log.get('metadata', {})
+                # 거절했고 (approved가 False), 재조율이 필요한 경우
+                if not rejection_metadata.get('approved', True) and rejection_metadata.get('thread_id'):
+                    # 일정 정보가 추출되었으면 재조율 진행
+                    if schedule_info.get("date") or schedule_info.get("time") or message.strip():
+                        recoordination_needed = True
+                        thread_id_for_recoordination = rejection_metadata.get('thread_id')
+                        session_ids_for_recoordination = rejection_metadata.get('session_ids', [])
+                        logger.info(f"[CHAT] 재조율 감지 (거절 응답): thread_id={thread_id_for_recoordination}, session_ids={session_ids_for_recoordination}")
+            
+            # 2) 거절 메시지 확인 (schedule_rejection)
+            if not recoordination_needed:
+                rejection_response = supabase.table('chat_log').select('*').eq(
+                    'user_id', user_id
+                ).eq('message_type', 'schedule_rejection').order('created_at', desc=True).limit(1).execute()
+                
+                if rejection_response.data:
+                    rejection_log = rejection_response.data[0]
+                    rejection_metadata = rejection_log.get('metadata', {})
+                    if rejection_metadata.get('needs_recoordination') and rejection_metadata.get('thread_id'):
+                        # 재조율이 필요한 상황이고, 일정 정보가 추출되었으면 재조율 진행
+                        if schedule_info.get("date") or schedule_info.get("time") or message.strip():
+                            recoordination_needed = True
+                            thread_id_for_recoordination = rejection_metadata.get('thread_id')
+                            session_ids_for_recoordination = rejection_metadata.get('session_ids', [])
+                            logger.info(f"[CHAT] 재조율 감지 (거절 메시지): thread_id={thread_id_for_recoordination}, session_ids={session_ids_for_recoordination}")
+            
+            # 여러 친구 ID 찾기 (재조율이 아니면 새로 찾기)
             friend_ids = []
             friend_id_to_name = {}
-            for name in friend_names:
-                fid = await ChatService._find_friend_id_by_name(user_id, name)
-                if fid:
-                    friend_ids.append(fid)
-                    friend_id_to_name[fid] = name
-                    logger.info(f"[CHAT] friend_id lookup result for '{name}': {fid}")
+            
+            if recoordination_needed:
+                # 재조율인 경우: 기존 세션에서 참여자 정보 가져오기
+                from src.a2a.repository import A2ARepository
+                if session_ids_for_recoordination:
+                    first_session = await A2ARepository.get_session(session_ids_for_recoordination[0])
+                    if first_session:
+                        place_pref = first_session.get('place_pref', {})
+                        participant_ids = place_pref.get('participants', [])
+                        # 현재 사용자 제외
+                        friend_ids = [pid for pid in participant_ids if pid != user_id]
+                        # 이름 매핑
+                        user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
+                        friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
+                        friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
+            else:
+                # 새 일정 요청: 친구 이름으로 찾기
+                for name in friend_names:
+                    fid = await ChatService._find_friend_id_by_name(user_id, name)
+                    if fid:
+                        friend_ids.append(fid)
+                        friend_id_to_name[fid] = name
+                        logger.info(f"[CHAT] friend_id lookup result for '{name}': {fid}")
             
             # 일정 요청이 감지되고 친구 ID가 있으면 A2A 세션 자동 시작
             a2a_session_id = None
-            if schedule_info.get("has_schedule_request") and friend_ids:
+            if (schedule_info.get("has_schedule_request") or recoordination_needed) and friend_ids:
                 try:
                     from src.a2a.service import A2AService
                     # 요약 메시지 생성
@@ -233,22 +292,77 @@ class ChatService:
                     summary = " ".join(summary_parts) if summary_parts else "약속"
                     
                     # A2A 세션 시작 (다중 사용자 지원)
-                    a2a_result = await A2AService.start_multi_user_session(
-                        initiator_user_id=user_id,
-                        target_user_ids=friend_ids,
-                        summary=summary,
-                        date=schedule_info.get("date"),
-                        time=schedule_info.get("time"),
-                        location=schedule_info.get("location"),
-                        activity=schedule_info.get("activity"),
-                        duration_minutes=60
-                    )
+                    # 재조율인 경우 기존 thread_id와 session_ids 사용
+                    if recoordination_needed:
+                        # 기존 세션 재활성화 및 재조율 진행
+                        from src.a2a.service import A2AService
+                        from src.auth.repository import AuthRepository
+                        
+                        # 사용자 이름 조회
+                        user_info = await AuthRepository.find_user_by_id(user_id)
+                        initiator_name = user_info.get("name", "사용자") if user_info else "사용자"
+                        
+                        # 기존 세션의 상태를 in_progress로 변경
+                        for session_id in session_ids_for_recoordination:
+                            await A2ARepository.update_session_status(session_id, "in_progress")
+                        
+                        # 세션 정보 구성
+                        sessions_info = []
+                        for session_id, friend_id in zip(session_ids_for_recoordination, friend_ids):
+                            sessions_info.append({
+                                "session_id": session_id,
+                                "target_id": friend_id,
+                                "target_name": friend_id_to_name.get(friend_id, "사용자")
+                            })
+                        
+                        # 재조율 시뮬레이션 실행
+                        a2a_result = await A2AService._execute_multi_user_coordination(
+                            thread_id=thread_id_for_recoordination,
+                            sessions=sessions_info,
+                            initiator_user_id=user_id,
+                            initiator_name=initiator_name,
+                            date=schedule_info.get("date"),
+                            time=schedule_info.get("time"),
+                            location=schedule_info.get("location"),
+                            activity=schedule_info.get("activity"),
+                            duration_minutes=60,
+                            reuse_existing=True
+                        )
+                        
+                        # thread_id와 session_ids 설정
+                        thread_id = thread_id_for_recoordination
+                        session_ids = session_ids_for_recoordination
+                    else:
+                        # 새 일정 요청
+                        a2a_result = await A2AService.start_multi_user_session(
+                            initiator_user_id=user_id,
+                            target_user_ids=friend_ids,
+                            summary=summary,
+                            date=schedule_info.get("date"),
+                            time=schedule_info.get("time"),
+                            location=schedule_info.get("location"),
+                            activity=schedule_info.get("activity"),
+                            duration_minutes=60
+                        )
                     
-                    if a2a_result.get("status") == 200:
+                    # 재조율인 경우와 새 세션인 경우 결과 처리
+                    if recoordination_needed:
+                        # 재조율 결과는 _execute_multi_user_coordination의 반환값
+                        needs_approval = a2a_result.get("needs_approval", False)
+                        proposal = a2a_result.get("proposal")
+                        # thread_id와 session_ids는 이미 설정됨
+                    elif a2a_result.get("status") == 200:
                         thread_id = a2a_result.get("thread_id")
                         session_ids = a2a_result.get("session_ids", [])
                         needs_approval = a2a_result.get("needs_approval", False)
                         proposal = a2a_result.get("proposal")
+                    else:
+                        thread_id = None
+                        session_ids = []
+                        needs_approval = False
+                        proposal = None
+                    
+                    if (recoordination_needed or a2a_result.get("status") == 200) and (thread_id or recoordination_needed):
                         
                         if needs_approval and proposal:
                             # 승인 필요: 사용자에게 확정 제안
@@ -384,16 +498,39 @@ class ChatService:
     async def _get_conversation_history(user_id: str) -> List[Dict[str, str]]:
         """사용자의 최근 대화 히스토리 가져오기"""
         try:
-            # 최근 20개의 대화 로그 가져오기
-            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=20)
+            # 최근 30개의 대화 로그 가져오기 (거절 맥락 포함을 위해 증가)
+            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=30)
             
             conversation_history = []
             for log in recent_logs:
+                # 사용자 메시지
                 if log.get("request_text"):
-                    conversation_history.append({
-                        "type": "user",
-                        "message": log["request_text"]
-                    })
+                    # 승인/거절 응답인 경우 맥락을 포함한 메시지로 변환
+                    if log.get("message_type") == "schedule_approval_response":
+                        metadata = log.get("metadata", {})
+                        approved = metadata.get("approved", True)
+                        proposal = metadata.get("proposal", {})
+                        
+                        if approved:
+                            # 승인한 경우
+                            conversation_history.append({
+                                "type": "user",
+                                "message": f"일정을 승인했습니다: {proposal.get('date', '')} {proposal.get('time', '')}"
+                            })
+                        else:
+                            # 거절한 경우 - 재조율 맥락 포함
+                            conversation_history.append({
+                                "type": "user",
+                                "message": f"일정을 거절했습니다: {proposal.get('date', '')} {proposal.get('time', '')}. 다른 시간으로 재조율을 원합니다."
+                            })
+                    else:
+                        # 일반 사용자 메시지
+                        conversation_history.append({
+                            "type": "user",
+                            "message": log["request_text"]
+                        })
+                
+                # AI 응답
                 if log.get("response_text"):
                     conversation_history.append({
                         "type": "assistant",

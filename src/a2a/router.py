@@ -160,21 +160,33 @@ async def get_user_sessions(
             # 가장 최근 세션을 대표로 사용
             representative = max(thread_sessions, key=lambda x: x.get('created_at', ''))
             
-            # 참여자 정보 추가
+            # 참여자 정보 추가 (모든 세션의 initiator와 target 수집)
             participants = []
-            for s in thread_sessions:
-                if s.get("initiator_user_id") == current_user_id:
-                    participants.append(s.get("target_user_id"))
-                else:
-                    participants.append(s.get("initiator_user_id"))
+            initiators = set()
+            targets = set()
             
-            # 중복 제거
-            participants = list(set(participants))
+            for s in thread_sessions:
+                initiators.add(s.get("initiator_user_id"))
+                targets.add(s.get("target_user_id"))
+            
+            # 현재 사용자를 제외한 모든 참여자 수집
+            all_participants = (initiators | targets) - {current_user_id}
+            participants = list(all_participants)
             
             # thread_id와 참여자 정보를 place_pref에 추가
             representative["thread_id"] = thread_id
             representative["participant_count"] = len(participants)
             representative["participant_ids"] = participants
+            
+            # place_pref에서 participants 정보도 가져오기 (다중 참여자 정보)
+            place_pref = representative.get("place_pref", {})
+            if isinstance(place_pref, dict) and place_pref.get("participants"):
+                # place_pref에 저장된 모든 참여자 정보도 포함
+                pref_participants = place_pref.get("participants", [])
+                all_participants_set = set(participants) | set(pref_participants)
+                all_participants_set.discard(current_user_id)
+                representative["participant_ids"] = list(all_participants_set)
+                representative["participant_count"] = len(all_participants_set)
             
             grouped_sessions.append(representative)
         

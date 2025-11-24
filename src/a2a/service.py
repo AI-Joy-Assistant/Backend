@@ -12,6 +12,7 @@ from config.settings import settings
 from config.database import supabase
 import httpx
 import datetime as dt
+from datetime import datetime as dt_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -1284,8 +1285,8 @@ class A2AService:
     ) -> Dict[str, Any]:
         """
         일정 승인/거절 처리
-        - 승인: 모든 참여자 캘린더에 일정 추가
-        - 거절: 재조율 시작
+        - 승인: 모든 참여자가 승인한 후에만 캘린더에 일정 추가
+        - 거절: 재조율 시작 (가능한 시간 확인)
         """
         try:
             # 세션 정보 조회
@@ -1302,89 +1303,200 @@ class A2AService:
             user = await AuthRepository.find_user_by_id(user_id)
             user_name = user.get("name", "사용자") if user else "사용자"
             
+            # 모든 참여자 ID 수집
+            all_participants = set()
+            for session in sessions:
+                all_participants.add(session.get("initiator_user_id"))
+                all_participants.add(session.get("target_user_id"))
+            
             if approved:
-                # 승인: 모든 참여자 캘린더에 일정 추가
-                date = proposal.get("date")
-                time = proposal.get("time")
-                location = proposal.get("location", "")
-                participants = proposal.get("participants", [])
-                
-                # 날짜/시간 파싱
-                # 실제로는 더 정교한 파싱 필요
-                from datetime import datetime, timedelta
-                # 간단한 파싱 (실제로는 더 정교하게)
-                start_time = datetime.now() + timedelta(days=1)  # 임시
-                end_time = start_time + timedelta(hours=1)
-                
-                # 모든 참여자 캘린더에 일정 추가
-                event_ids = []
-                for session in sessions:
-                    target_id = session.get("target_user_id")
-                    initiator_id = session.get("initiator_user_id")
+                # 승인 상태 저장 (thread_id 기준)
+                # 승인 요청 메시지의 metadata에서 승인 상태 확인 및 업데이트
+                try:
+                    from config.database import supabase
+                    from src.chat.repository import ChatRepository
                     
-                    # 참여자 ID 결정
-                    participant_id = target_id if target_id != user_id else initiator_id
+                    # 승인 요청 메시지 조회하여 현재 승인 상태 확인 (thread_id 기준)
+                    approval_logs = []
+                    for participant_id in all_participants:
+                        response = supabase.table('chat_log').select('*').eq(
+                            'user_id', participant_id
+                        ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(10).execute()
+                        
+                        # thread_id가 일치하는 메시지 찾기
+                        for log in response.data or []:
+                            metadata = log.get('metadata', {})
+                            if metadata.get('thread_id') == thread_id:
+                                approval_logs.append({
+                                    'user_id': participant_id,
+                                    'log': log
+                                })
+                                break
                     
-                    # 캘린더 이벤트 생성
-                    access_token = await A2AService._ensure_access_token_by_user_id(participant_id)
-                    if access_token:
-                        from src.calendar.service import CreateEventRequest
-                        from src.calendar.service import GoogleCalendarService
-                        
-                        summary = f"{', '.join(participants)}와의 미팅"
-                        if location:
-                            summary += f" ({location})"
-                        
-                        event_req = CreateEventRequest(
-                            summary=summary,
-                            start_time=start_time.isoformat(),
-                            end_time=end_time.isoformat(),
-                            location=location,
-                            attendees=[]  # 참여자 이메일 추가 필요
+                    # 현재 승인한 사용자 수집 (approved_by_list에서)
+                    approved_users = set()
+                    for log_data in approval_logs:
+                        metadata = log_data['log'].get('metadata', {})
+                        approved_list = metadata.get('approved_by_list', [])
+                        if isinstance(approved_list, list):
+                            approved_users.update(approved_list)
+                        elif metadata.get('approved_by'):
+                            # 기존 방식 호환
+                            approved_users.add(metadata['approved_by'])
+                    
+                    # 현재 사용자 승인 추가
+                    approved_users.add(user_id)
+                    
+                    # 모든 참여자가 승인했는지 확인
+                    all_approved = len(approved_users) == len(all_participants)
+                    
+                    # 승인 메시지 추가
+                    approval_msg = f"{user_name}님이 일정을 승인했습니다."
+                    if all_approved:
+                        approval_msg += " 모든 참여자가 승인하여 캘린더에 일정을 추가하겠습니다."
+                    else:
+                        remaining = len(all_participants) - len(approved_users)
+                        approval_msg += f" ({remaining}명의 승인 대기 중)"
+                    
+                    for session in sessions:
+                        await A2ARepository.add_message(
+                            session_id=session["id"],
+                            sender_user_id=user_id,
+                            receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
+                            message_type="confirm",
+                            message={"text": approval_msg}
                         )
+                    
+                    # 승인 요청 메시지의 metadata 업데이트 (모든 참여자의 메시지에 동기화)
+                    # 모든 참여자의 승인 요청 메시지를 찾아서 approved_by_list 동기화
+                    all_approval_logs = []
+                    for participant_id in all_participants:
+                        response = supabase.table('chat_log').select('*').eq(
+                            'user_id', participant_id
+                        ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(10).execute()
                         
-                        google_calendar = GoogleCalendarService()
-                        event = await google_calendar.create_calendar_event(
-                            access_token=access_token,
-                            event_data=event_req
-                        )
+                        for log in response.data or []:
+                            metadata = log.get('metadata', {})
+                            if metadata.get('thread_id') == thread_id:
+                                all_approval_logs.append({
+                                    'user_id': participant_id,
+                                    'log': log
+                                })
+                                break
+                    
+                    # 모든 승인 요청 메시지에 동일한 approved_by_list 업데이트
+                    updated_approved_list = list(approved_users)
+                    for log_data in all_approval_logs:
+                        existing_metadata = log_data['log'].get('metadata', {})
+                        supabase.table('chat_log').update({
+                            'metadata': {
+                                **existing_metadata,
+                                'approved_by': user_id,
+                                'approved_by_list': updated_approved_list,
+                                'approved_at': dt_datetime.now().isoformat(),
+                                'all_approved': all_approved
+                            }
+                        }).eq('id', log_data['log']['id']).execute()
+                    
+                    # 모든 참여자가 승인한 경우에만 캘린더에 일정 추가
+                    if all_approved:
+                        date = proposal.get("date")
+                        time = proposal.get("time")
+                        location = proposal.get("location", "")
+                        participants = proposal.get("participants", [])
                         
-                        if event:
-                            # calendar_event 테이블에 저장
-                            await A2AService._save_calendar_event_to_db(
-                                session_id=session["id"],
-                                owner_user_id=participant_id,
-                                google_event_id=event.id,
-                                summary=summary,
-                                location=location,
-                                start_at=start_time.isoformat(),
-                                end_at=end_time.isoformat(),
-                                html_link=event.htmlLink
-                            )
-                            
-                            # 세션에 연결
-                            await A2ARepository.link_calendar_event(session["id"], event.id)
-                            event_ids.append(event.id)
-                
-                # 승인 메시지 추가
-                approval_msg = f"{user_name}님이 일정을 승인했습니다. 캘린더에 일정을 추가하겠습니다."
-                for session in sessions:
-                    await A2ARepository.add_message(
-                        session_id=session["id"],
-                        sender_user_id=user_id,
-                        receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
-                        message_type="confirm",
-                        message={"text": approval_msg}
-                    )
-                
-                return {
-                    "status": 200,
-                    "message": "일정이 확정되어 모든 참여자 캘린더에 추가되었습니다.",
-                    "event_ids": event_ids
-                }
+                        # 날짜/시간 파싱
+                        from src.chat.service import ChatService
+                        from zoneinfo import ZoneInfo
+                        KST = ZoneInfo("Asia/Seoul")
+                        
+                        # 시간 파싱 (ChatService의 로직 활용)
+                        parsed_time = await ChatService.parse_time_string(time, f"{date} {time}")
+                        if parsed_time:
+                            start_time = parsed_time['start_time']
+                            end_time = parsed_time['end_time']
+                        else:
+                            # 파싱 실패 시 기본값
+                            from datetime import timedelta
+                            start_time = datetime.now(KST) + timedelta(days=1)
+                            end_time = start_time + timedelta(hours=1)
+                        
+                        # 모든 참여자의 이메일 수집
+                        participant_emails = []
+                        for participant_id in all_participants:
+                            participant_user = await AuthRepository.find_user_by_id(participant_id)
+                            if participant_user and participant_user.get("email"):
+                                participant_emails.append(participant_user["email"])
+                        
+                        # 모든 참여자 캘린더에 일정 추가
+                        event_ids = []
+                        for participant_id in all_participants:
+                            access_token = await A2AService._ensure_access_token_by_user_id(participant_id)
+                            if access_token:
+                                from src.calendar.service import CreateEventRequest
+                                from src.calendar.service import GoogleCalendarService
+                                
+                                summary = f"{', '.join(participants)}와의 미팅"
+                                if location:
+                                    summary += f" ({location})"
+                                
+                                event_req = CreateEventRequest(
+                                    summary=summary,
+                                    start_time=start_time.isoformat(),
+                                    end_time=end_time.isoformat(),
+                                    location=location,
+                                    attendees=participant_emails  # 모든 참여자 이메일 추가
+                                )
+                                
+                                google_calendar = GoogleCalendarService()
+                                event = await google_calendar.create_calendar_event(
+                                    access_token=access_token,
+                                    event_data=event_req
+                                )
+                                
+                                if event:
+                                    # calendar_event 테이블에 저장
+                                    # 세션 ID는 첫 번째 세션 사용
+                                    session_id = sessions[0]["id"] if sessions else None
+                                    await A2AService._save_calendar_event_to_db(
+                                        session_id=session_id,
+                                        owner_user_id=participant_id,
+                                        google_event_id=event.id,
+                                        summary=summary,
+                                        location=location,
+                                        start_at=start_time.isoformat(),
+                                        end_at=end_time.isoformat(),
+                                        html_link=event.htmlLink
+                                    )
+                                    
+                                    # 세션에 연결
+                                    if session_id:
+                                        await A2ARepository.link_calendar_event(session_id, event.id)
+                                    event_ids.append(event.id)
+                        
+                        return {
+                            "status": 200,
+                            "message": "모든 참여자가 승인하여 일정이 확정되었습니다. 모든 참여자 캘린더에 일정을 추가했습니다.",
+                            "event_ids": event_ids,
+                            "all_approved": True
+                        }
+                    else:
+                        return {
+                            "status": 200,
+                            "message": approval_msg,
+                            "all_approved": False,
+                            "remaining_approvals": len(all_participants) - len(approved_users)
+                        }
+                        
+                except Exception as e:
+                    logger.error(f"승인 처리 중 오류: {str(e)}", exc_info=True)
+                    return {
+                        "status": 500,
+                        "error": f"승인 처리 실패: {str(e)}"
+                    }
             else:
-                # 거절: 재조율 시작
-                reject_msg = f"{user_name}님이 일정을 거절했습니다. 일정을 재조율하겠습니다."
+                # 거절: 재조율 시작 (가능한 시간 확인)
+                reject_msg = f"{user_name}님이 일정을 거절했습니다. 재조율을 진행하겠습니다."
                 
                 for session in sessions:
                     await A2ARepository.add_message(
@@ -1395,11 +1507,75 @@ class A2AService:
                         message={"text": reject_msg}
                     )
                 
-                # 재조율 로직 (간단히 메시지만 추가)
+                # 거절한 사용자의 가능한 시간 확인
+                date = proposal.get("date")
+                time = proposal.get("time")
+                duration_minutes = proposal.get("duration_minutes", 60)
+                
+                # 가능한 시간 슬롯 조회
+                availability = await A2AService._check_user_availability(
+                    user_id=user_id,
+                    date=date,
+                    time=None,  # 시간 미지정으로 가능한 시간 슬롯 조회
+                    duration_minutes=duration_minutes
+                )
+                
+                available_slots = availability.get("available_slots", [])
+                if not available_slots:
+                    # 가능한 시간이 없으면 일반적인 시간 제안
+                    available_slots = [
+                        {"date": "내일", "time": "오후 2시"},
+                        {"date": "내일", "time": "오후 4시"},
+                        {"date": "모레", "time": "오전 10시"}
+                    ]
+                
+                # 가능한 시간을 메시지로 구성
+                slots_text = "\n".join([f"- {slot.get('date', '')} {slot.get('time', '')}" for slot in available_slots[:5]])
+                recoordination_msg = f"{reject_msg}\n\n가능한 시간 후보:\n{slots_text}\n\n어떤 시간이 가능하신가요?"
+                
+                # 거절 메시지를 모든 참여자의 chat_log에 저장
+                try:
+                    from src.chat.repository import ChatRepository
+                    for participant_id in all_participants:
+                        # chat_log에 거절 및 재조율 메시지 저장
+                        await ChatRepository.create_chat_log(
+                            user_id=participant_id,
+                            request_text=None,
+                            response_text=recoordination_msg,
+                            friend_id=None,
+                            message_type="schedule_rejection",
+                            metadata={
+                                "rejected_by": user_id,
+                                "rejected_at": dt_datetime.now().isoformat(),
+                                "proposal": proposal,
+                                "thread_id": thread_id,
+                                "session_ids": session_ids,
+                                "needs_recoordination": True,
+                                "available_slots": available_slots
+                            }
+                        )
+                        
+                        # 승인 요청 메시지의 metadata 업데이트 (버튼 숨기기)
+                        from config.database import supabase
+                        supabase.table('chat_log').update({
+                            'metadata': {
+                                'needs_approval': False,
+                                'rejected_by': user_id,
+                                'rejected_at': dt_datetime.now().isoformat(),
+                                'proposal': proposal,
+                                'thread_id': thread_id,
+                                'session_ids': session_ids
+                            }
+                        }).eq('user_id', participant_id).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1).execute()
+                except Exception as e:
+                    logger.warning(f"거절 메시지 저장 실패: {str(e)}")
+                
+                # 재조율 로직
                 return {
                     "status": 200,
-                    "message": "일정이 거절되었습니다. 재조율을 진행합니다.",
-                    "needs_recoordination": True
+                    "message": recoordination_msg,
+                    "needs_recoordination": True,
+                    "available_slots": available_slots
                 }
                 
         except Exception as e:
@@ -1436,12 +1612,19 @@ class A2AService:
             # chat_log에 승인 요청 메시지 저장
             # friend_id는 initiator_id로 설정 (요청자와의 대화로 표시)
             # 실제로는 thread_id를 사용하여 모든 참여자와의 대화로 표시해야 함
+            # metadata에 승인에 필요한 정보 저장
             await ChatRepository.create_chat_log(
                 user_id=user_id,
                 request_text=None,
                 response_text=approval_message,
                 friend_id=None,  # 다중 참여자이므로 None
-                message_type="schedule_approval"
+                message_type="schedule_approval",
+                metadata={
+                    "proposal": proposal,
+                    "thread_id": thread_id,
+                    "session_ids": session_ids,
+                    "needs_approval": True
+                }
             )
             
             logger.info(f"승인 요청 메시지 전송 완료: user_id={user_id}, thread_id={thread_id}")

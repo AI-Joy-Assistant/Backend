@@ -214,6 +214,7 @@ async def approve_schedule(
     """
     try:
         from src.a2a.service import A2AService
+        from src.chat.repository import ChatRepository
         
         thread_id = request.get("thread_id")
         session_ids = request.get("session_ids", [])
@@ -222,6 +223,22 @@ async def approve_schedule(
         
         if not thread_id or not proposal:
             raise HTTPException(status_code=400, detail="thread_id와 proposal이 필요합니다.")
+        
+        # 사용자의 승인/거절 의사를 chat_log에 저장
+        user_response_text = "예" if approved else "아니오"
+        await ChatRepository.create_chat_log(
+            user_id=current_user_id,
+            request_text=user_response_text,
+            response_text=None,
+            friend_id=None,
+            message_type="schedule_approval_response",
+            metadata={
+                "approved": approved,
+                "thread_id": thread_id,
+                "session_ids": session_ids,
+                "proposal": proposal
+            }
+        )
         
         result = await A2AService.handle_schedule_approval(
             thread_id=thread_id,
