@@ -101,7 +101,7 @@ Authorization: Bearer <jwt_token>
 API 키 설정 후 다음 명령으로 테스트할 수 있습니다:
 
 ```bash
-curl -X POST "http://localhost:3000/chat/chat" \
+curl -X POST "http://localhost:8000/chat/chat" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <your_jwt_token>" \
   -d '{"message": "안녕하세요!"}'

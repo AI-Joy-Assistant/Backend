@@ -3,6 +3,11 @@ node_modules/
 
 # 환경 변수 파일
 .env
+.env
+.env.*
+*.env
+*.env.*
+.env.backup
 
 # 로그 파일
 *.log
@@ -29,10 +34,4 @@ git rm --cached src/calendar/__pycache__/router.cpython-313.pyc
 
 # 디렉터리 통째로(권장)
 git rm -r --cached src/calendar/__pycache__/
-.env.backup
-
-.env
-.env.*
-*.env
-*.env.*
 .env.backup

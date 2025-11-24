@@ -6,6 +6,8 @@ from src.auth.router import router as auth_router
 from src.chat.router import router as chat_router
 from src.friends.router import router as friends_router
 from src.calendar.router import router as calendar_router
+from src.a2a.router import router as a2a_router
+from src.intent.router import router as intent_router
 
 # FastAPI 애플리케이션 생성
 app = FastAPI(
@@ -37,6 +39,8 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(friends_router)
 app.include_router(calendar_router)
+app.include_router(a2a_router)
+app.include_router(intent_router)
 
 @app.get("/")
 async def root():

@@ -1,15 +1,14 @@
-from openai import OpenAI
-from typing import Dict, Any, List
-from config.settings import settings
+import json
 import logging
 from datetime import datetime
+from typing import Dict, Any, List
 from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
-load_dotenv()
+
+from openai import OpenAI
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
-import os
-print("🚨 현재 FastAPI가 인식한 OPENAI_API_KEY:", os.getenv("OPENAI_API_KEY"))
 
 class OpenAIService:
     def __init__(self):
@@ -103,20 +102,25 @@ class OpenAIService:
             system_prompt = f"""다음 메시지에서 일정 관련 정보를 추출해주세요.
 현재 시간: {current_time}
 
+**중요: 반드시 유효한 JSON만 반환하세요. 설명이나 추가 텍스트 없이 JSON만 반환하세요.**
+
 JSON 형태로 다음 정보를 반환하세요:
 {{
-    "friend_name": "친구 이름",
+    "friend_name": "친구 이름 (있다면)",
     "date": "날짜 (오늘, 내일, 모레, 특정 날짜)",
     "time": "시간 (점심, 저녁, 특정 시간)",
     "activity": "활동 내용",
     "location": "장소 (있다면)",
-    "has_schedule_request": true/false
+    "has_schedule_request": true 또는 false
 }}
 
 예시:
 - "아구만이랑 내일 점심 약속 잡아줘" → {{"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "has_schedule_request": true}}
+- "민서와 내일 만나자" → {{"friend_name": "민서", "date": "내일", "has_schedule_request": true}}
 - "내일 오후 3시에 카페에서 공부" → {{"date": "내일", "time": "오후 3시", "activity": "공부", "location": "카페", "has_schedule_request": true}}
-- "안녕하세요" → {{"has_schedule_request": false}}"""
+- "안녕하세요" → {{"has_schedule_request": false}}
+
+**반드시 JSON 형식만 반환하세요. 다른 텍스트는 포함하지 마세요.**"""
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -129,13 +133,33 @@ JSON 형태로 다음 정보를 반환하세요:
             )
             
             try:
-                import json
-                result = json.loads(response.choices[0].message.content)
+                content = response.choices[0].message.content.strip()
+                # JSON 코드 블록 제거 (```json ... ``` 형태)
+                if content.startswith("```"):
+                    # 첫 번째 ``` 이후부터 마지막 ``` 이전까지 추출
+                    lines = content.split("\n")
+                    json_lines = []
+                    in_json = False
+                    for line in lines:
+                        if line.strip().startswith("```"):
+                            in_json = not in_json
+                            continue
+                        if in_json:
+                            json_lines.append(line)
+                    content = "\n".join(json_lines)
+                
+                result = json.loads(content)
+                # 필수 필드 확인
+                if "has_schedule_request" not in result:
+                    result["has_schedule_request"] = bool(result.get("friend_name") or result.get("date") or result.get("time"))
                 return result
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON 파싱 실패, 원본: {response.choices[0].message.content[:100]}")
+                # JSON 파싱 실패 시 휴리스틱으로 폴백
                 return {
                     "has_schedule_request": False,
-                    "message": response.choices[0].message.content
+                    "error": "JSON 파싱 실패",
+                    "raw_content": response.choices[0].message.content[:200]
                 }
                 
         except Exception as e:

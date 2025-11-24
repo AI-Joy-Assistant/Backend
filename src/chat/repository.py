@@ -5,25 +5,13 @@ import uuid
 class ChatRepository:
     
     @staticmethod
-    async def get_chat_rooms_by_user(user_id: str) -> List[Dict[str, Any]]:
-        """사용자가 참여한 채팅방 목록 조회"""
-        try:
-            # a2a 테이블에서 사용자가 보내거나 받은 메시지들을 기반으로 채팅방 목록 생성
-            response = supabase.table('a2a').select(
-                'send_id, receive_id, message, created_at'
-            ).or_(f'send_id.eq.{user_id},receive_id.eq.{user_id}').order('created_at', desc=True).execute()
-            
-            return response.data if response.data else []
-        except Exception as e:
-            raise Exception(f"채팅방 목록 조회 오류: {str(e)}")
-    
-    @staticmethod
     async def get_chat_messages(user_id: str, other_user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """두 사용자 간의 채팅 메시지 조회"""
+        """두 사용자 간의 채팅 메시지 조회 (chat_log 사용)"""
         try:
-            response = supabase.table('a2a').select('*').or_(
-                f'and(send_id.eq.{user_id},receive_id.eq.{other_user_id}),and(send_id.eq.{other_user_id},receive_id.eq.{user_id})'
-            ).order('created_at', desc=False).limit(limit).execute()
+            # chat_log에서 두 사용자 간의 메시지 조회
+            response = supabase.table('chat_log').select('*').eq(
+                'user_id', user_id
+            ).eq('friend_id', other_user_id).order('created_at', desc=False).limit(limit).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -31,16 +19,17 @@ class ChatRepository:
     
     @staticmethod
     async def send_message(send_id: str, receive_id: str, message: str, message_type: str = "text") -> Dict[str, Any]:
-        """메시지 전송"""
+        """메시지 전송 (chat_log 사용)"""
         try:
+            # chat_log에 사용자 메시지 저장
             message_data = {
-                "send_id": send_id,
-                "receive_id": receive_id,
-                "message": message,
+                "user_id": send_id,
+                "friend_id": receive_id,
+                "request_text": message,
                 "message_type": message_type
             }
             
-            response = supabase.table('a2a').insert(message_data).execute()
+            response = supabase.table('chat_log').insert(message_data).execute()
             if response.data:
                 return response.data[0]
             raise Exception("메시지 전송 실패")

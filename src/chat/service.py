@@ -9,6 +9,7 @@ import uuid
 import logging
 from datetime import datetime, timedelta
 import re
+from src.intent.service import IntentService
 
 logger = logging.getLogger(__name__)
 
@@ -70,21 +71,32 @@ class ChatService:
     
     @staticmethod
     async def get_chat_messages(user_id: str, other_user_id: str) -> Dict[str, Any]:
-        """두 사용자 간의 채팅 메시지 조회"""
+        """두 사용자 간의 채팅 메시지 조회 (chat_log 기반)"""
         try:
             messages_data = await ChatRepository.get_chat_messages(user_id, other_user_id)
             
-            messages = [
-                ChatMessage(
-                    id=msg['id'],
-                    send_id=msg['send_id'],
-                    receive_id=msg['receive_id'],
-                    message=msg['message'],
-                    message_type=msg.get('message_type', 'text'),
-                    created_at=msg['created_at']
-                )
-                for msg in messages_data
-            ]
+            messages = []
+            for msg in messages_data:
+                # chat_log 형식을 ChatMessage 형식으로 변환
+                # request_text가 있으면 사용자 메시지, response_text가 있으면 AI 응답
+                if msg.get('request_text'):
+                    messages.append(ChatMessage(
+                        id=msg['id'],
+                        send_id=msg['user_id'],
+                        receive_id=msg.get('friend_id', other_user_id),
+                        message=msg['request_text'],
+                        message_type=msg.get('message_type', 'text'),
+                        created_at=msg['created_at']
+                    ))
+                if msg.get('response_text'):
+                    messages.append(ChatMessage(
+                        id=f"{msg['id']}_response",
+                        send_id='ai',  # AI 응답
+                        receive_id=msg['user_id'],
+                        message=msg['response_text'],
+                        message_type='ai_response',
+                        created_at=msg['created_at']
+                    ))
             
             return {
                 "status": 200,
@@ -92,6 +104,7 @@ class ChatService:
             }
             
         except Exception as e:
+            logger.error(f"채팅 메시지 조회 실패: {str(e)}")
             return {
                 "status": 500,
                 "error": f"채팅 메시지 조회 실패: {str(e)}"
@@ -176,19 +189,65 @@ class ChatService:
             
             ai_response = ai_result["message"]
             
-            # 일정 정보 추출
-            schedule_info = await openai_service.extract_schedule_info(message)
+            # 일정 정보 추출 (Intent 모듈로 분리)
+            schedule_info = await IntentService.extract_schedule_info(message)
             friend_name = schedule_info.get("friend_name") if schedule_info.get("has_schedule_request") else None
+            logger.info(f"[CHAT] schedule_info: has={schedule_info.get('has_schedule_request')}, friend='{friend_name}', intent={schedule_info.get('intent')}")
             
             # 친구 ID 찾기
             friend_id = None
             if friend_name:
                 friend_id = await ChatService._find_friend_id_by_name(user_id, friend_name)
+                logger.info(f"[CHAT] friend_id lookup result for '{friend_name}': {friend_id}")
             
-            # 일정 추가 시도
+            # 일정 요청이 감지되고 친구 ID가 있으면 A2A 세션 자동 시작
+            a2a_session_id = None
+            if schedule_info.get("has_schedule_request") and friend_id:
+                try:
+                    from src.a2a.service import A2AService
+                    # 요약 메시지 생성
+                    summary_parts = []
+                    if friend_name:
+                        summary_parts.append(friend_name)
+                    if schedule_info.get("date"):
+                        summary_parts.append(schedule_info.get("date"))
+                    if schedule_info.get("time"):
+                        summary_parts.append(schedule_info.get("time"))
+                    summary = "와 ".join(summary_parts) if summary_parts else f"{friend_name}와 약속"
+                    
+                    # A2A 세션 시작 (백엔드가 전체 시뮬레이션 자동 진행)
+                    a2a_result = await A2AService.start_a2a_session(
+                        initiator_user_id=user_id,
+                        target_user_id=friend_id,
+                        summary=summary,
+                        duration_minutes=60
+                    )
+                    
+                    if a2a_result.get("status") == 200:
+                        a2a_session_id = a2a_result.get("session_id")
+                        event_created = a2a_result.get("event") is not None
+                        
+                        # A2A 세션이 성공적으로 시작되었음을 알리는 응답
+                        if event_created:
+                            ai_response = f"✅ {friend_name}님과의 일정 조율이 완료되었습니다! A2A 화면에서 상세 내용을 확인하실 수 있습니다."
+                        else:
+                            ai_response = f"🤖 {friend_name}님의 Agent와 일정을 조율하고 있습니다. A2A 화면에서 진행 상황을 확인하실 수 있습니다."
+                        
+                        logger.info(f"A2A 세션 시작 성공: session_id={a2a_session_id}, event_created={event_created}")
+                    else:
+                        # A2A 세션 시작 실패 시 기존 로직으로 폴백
+                        error_msg = a2a_result.get('error', '알 수 없는 오류')
+                        logger.warning(f"A2A 세션 시작 실패: {error_msg}")
+                        ai_response = f"일정 조율을 시도했지만 문제가 발생했습니다: {error_msg}. 다시 시도해주세요."
+                except Exception as e:
+                    logger.error(f"A2A 세션 시작 중 오류: {str(e)}")
+                    # 오류 발생 시 기존 로직으로 폴백
+                    ai_response = "일정 조율을 시도했지만 문제가 발생했습니다. 다시 시도해주세요."
+            
+            # A2A 세션이 시작되지 않은 경우에만 기존 일정 추가 로직 실행
             calendar_event = None
-            if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
-                calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info,original_text=message)
+            if not a2a_session_id and schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
+                calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info, original_text=message)
 
                 if calendar_event:
                     start_str = (
@@ -306,35 +365,85 @@ class ChatService:
     
     @staticmethod
     async def _find_friend_id_by_name(user_id: str, friend_name: str) -> str:
-        """친구 이름으로 친구 ID 찾기"""
+        """친구 이름으로 친구 ID 찾기 (개선된 매칭 알고리즘)"""
         try:
+            if not friend_name or not friend_name.strip():
+                return None
+
             # 1) 사용자의 친구 목록 조회 (friend_id만)
             friends_data = await ChatRepository.get_friends_list(user_id)
             friend_ids = [f.get("friend_id") for f in friends_data if f.get("friend_id")]
             if not friend_ids:
+                logger.warning(f"친구 목록이 비어있음: user_id={user_id}")
                 return None
 
             # 2) ID → 이름 매핑 조회
             id_to_name = await ChatRepository.get_user_names_by_ids(friend_ids)
+            if not id_to_name:
+                logger.warning(f"친구 이름 매핑 실패: friend_ids={friend_ids}")
+                return None
 
-            # 3) 이름 정규화 후 매칭 (포함/공백 무시, 대소문자 무시)
-            def norm(s: str) -> str:
-                return (s or "").strip().lower()
+            # 3) 강화된 이름 정규화 및 매칭
+            def normalize(s: str) -> str:
+                """이름 정규화: 공백 제거, 소문자 변환, 특수문자 제거"""
+                if not s:
+                    return ""
+                # 공백 제거, 소문자 변환
+                normalized = s.strip().lower().replace(" ", "").replace("-", "")
+                # 한글 자음/모음 제거하지 않고 그대로 반환
+                return normalized
 
-            target = norm(friend_name)
-            # 우선 완전 일치
+            def similarity_score(name1: str, name2: str) -> float:
+                """두 이름의 유사도 점수 계산 (0.0 ~ 1.0)"""
+                n1 = normalize(name1)
+                n2 = normalize(name2)
+                
+                if n1 == n2:
+                    return 1.0
+                if n1 in n2 or n2 in n1:
+                    return 0.8
+                # 공통 문자 비율 계산
+                common = set(n1) & set(n2)
+                if not common:
+                    return 0.0
+                return len(common) / max(len(n1), len(n2))
+
+            target = normalize(friend_name)
+            logger.info(f"친구 이름 검색: '{friend_name}' (정규화: '{target}'), 후보: {list(id_to_name.values())}")
+
+            # 우선순위 1: 완전 일치
             for fid, name in id_to_name.items():
-                if norm(name) == target:
-                    return fid
-            # 포함 일치 보조
-            for fid, name in id_to_name.items():
-                if target and target in norm(name):
+                if normalize(name) == target:
+                    logger.info(f"완전 일치 발견: {name} (id: {fid})")
                     return fid
 
+            # 우선순위 2: 포함 관계 (긴 이름에 짧은 이름이 포함)
+            for fid, name in id_to_name.items():
+                norm_name = normalize(name)
+                if target in norm_name or norm_name in target:
+                    logger.info(f"포함 일치 발견: {name} (id: {fid})")
+                    return fid
+
+            # 우선순위 3: 유사도 기반 매칭 (0.6 이상)
+            best_match = None
+            best_score = 0.0
+            for fid, name in id_to_name.items():
+                score = similarity_score(friend_name, name)
+                if score > best_score:
+                    best_score = score
+                    best_match = fid
+                    logger.debug(f"유사도 매칭: {name} (id: {fid}, score: {score:.2f})")
+
+            if best_score >= 0.6:
+                matched_name = id_to_name.get(best_match, "알 수 없음")
+                logger.info(f"유사도 매칭 성공: {matched_name} (id: {best_match}, score: {best_score:.2f})")
+                return best_match
+
+            logger.warning(f"친구 이름 매칭 실패: '{friend_name}' (최고 점수: {best_score:.2f})")
             return None
             
         except Exception as e:
-            logger.error(f"친구 ID 검색 실패: {str(e)}")
+            logger.error(f"친구 ID 검색 실패: {str(e)}", exc_info=True)
             return None
     
     @staticmethod

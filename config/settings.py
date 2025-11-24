@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # 서버 설정
     PORT: int = 8000
     HOST: str = "0.0.0.0"
-    BASE_URL: str = "http://localhost:3000"  # 웹훅 URL용
+    BASE_URL: str = "http://localhost:8000"  # 웹훅 URL용
     
     # JWT 설정
     JWT_SECRET: str = "PLEASE_SET_JWT_SECRET_IN_ENV_FILE"
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     "http://127.0.0.1:5173",
     "http://localhost:8081",
     "http://127.0.0.1:8081",
-    "http://localhost:3000",
+    "http://localhost:8000",
     "http://127.0.0.1:3000",
     "http://localhost:19006",
     "http://127.0.0.1:19006",# Expo 웹 대체 포트
