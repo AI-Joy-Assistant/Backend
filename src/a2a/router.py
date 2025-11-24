@@ -92,7 +92,18 @@ async def get_a2a_messages(
         if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
             raise HTTPException(status_code=403, detail="세션 접근 권한이 없습니다.")
         
-        messages = await A2ARepository.get_session_messages(session_id)
+        # thread_id 확인
+        place_pref = session.get("place_pref", {})
+        thread_id = None
+        if isinstance(place_pref, dict):
+            thread_id = place_pref.get("thread_id")
+        
+        # thread_id가 있으면 thread의 모든 메시지 조회 (단체 채팅방)
+        if thread_id:
+            messages = await A2ARepository.get_thread_messages(thread_id)
+        else:
+            # thread_id가 없으면 해당 세션의 메시지만 조회 (1:1 채팅방)
+            messages = await A2ARepository.get_session_messages(session_id)
         
         # Supabase에서 가져온 데이터를 A2AMessageResponse 형식으로 변환
         formatted_messages = []
@@ -111,6 +122,7 @@ async def get_a2a_messages(
         
         return {
             "session_id": session_id,
+            "thread_id": thread_id,
             "messages": formatted_messages
         }
     except HTTPException:
@@ -122,12 +134,85 @@ async def get_a2a_messages(
 async def get_user_sessions(
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """현재 사용자가 참여한 모든 A2A 세션 목록 조회"""
+    """현재 사용자가 참여한 모든 A2A 세션 목록 조회 (thread_id 기준으로 그룹화)"""
     try:
         sessions = await A2ARepository.get_user_sessions(current_user_id)
+        
+        # thread_id 기준으로 그룹화
+        from collections import defaultdict
+        sessions_by_thread = defaultdict(list)
+        
+        for session in sessions:
+            place_pref = session.get("place_pref", {})
+            thread_id = None
+            if isinstance(place_pref, dict):
+                thread_id = place_pref.get("thread_id")
+            
+            # thread_id가 없으면 세션 ID를 thread_id로 사용 (1:1 세션)
+            if not thread_id:
+                thread_id = session.get("id")
+            
+            sessions_by_thread[thread_id].append(session)
+        
+        # 각 thread 그룹에서 대표 세션 선택 (가장 최근 세션)
+        grouped_sessions = []
+        for thread_id, thread_sessions in sessions_by_thread.items():
+            # 가장 최근 세션을 대표로 사용
+            representative = max(thread_sessions, key=lambda x: x.get('created_at', ''))
+            
+            # 참여자 정보 추가
+            participants = []
+            for s in thread_sessions:
+                if s.get("initiator_user_id") == current_user_id:
+                    participants.append(s.get("target_user_id"))
+                else:
+                    participants.append(s.get("initiator_user_id"))
+            
+            # 중복 제거
+            participants = list(set(participants))
+            
+            # thread_id와 참여자 정보를 place_pref에 추가
+            representative["thread_id"] = thread_id
+            representative["participant_count"] = len(participants)
+            representative["participant_ids"] = participants
+            
+            grouped_sessions.append(representative)
+        
+        # 최근 순으로 정렬
+        grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
         return {
-            "sessions": [A2ASessionResponse(**session) for session in sessions]
+            "sessions": [A2ASessionResponse(**session) for session in grouped_sessions]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 목록 조회 실패: {str(e)}")
+
+@router.delete("/session/{session_id}", summary="A2A 세션 삭제")
+async def delete_a2a_session(
+    session_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """A2A 세션 삭제 (세션과 관련된 모든 메시지도 함께 삭제)"""
+    try:
+        # 세션 존재 및 권한 확인
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        # 권한 확인 (세션 참여자만 삭제 가능)
+        if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
+            raise HTTPException(status_code=403, detail="세션 삭제 권한이 없습니다.")
+        
+        # 세션 삭제 (메시지도 함께 삭제)
+        deleted = await A2ARepository.delete_session(session_id)
+        
+        if deleted:
+            return {"status": "success", "message": "세션이 삭제되었습니다."}
+        else:
+            raise HTTPException(status_code=500, detail="세션 삭제 실패")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"세션 삭제 실패: {str(e)}")
 

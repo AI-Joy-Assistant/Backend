@@ -192,3 +192,46 @@ async def delete_chat_room(friend_id: str, current_user_id: str = Depends(get_cu
         return {"deleted": deleted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"삭제 실패: {str(e)}")
+
+@router.post("/approve-schedule", summary="일정 승인/거절")
+async def approve_schedule(
+    request: dict,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    일정 확정 제안에 대한 승인/거절 처리
+    body: {
+        "thread_id": "string",
+        "session_ids": ["string"],
+        "approved": true/false,
+        "proposal": {
+            "date": "string",
+            "time": "string",
+            "location": "string",
+            "participants": ["string"]
+        }
+    }
+    """
+    try:
+        from src.a2a.service import A2AService
+        
+        thread_id = request.get("thread_id")
+        session_ids = request.get("session_ids", [])
+        approved = request.get("approved", False)
+        proposal = request.get("proposal")
+        
+        if not thread_id or not proposal:
+            raise HTTPException(status_code=400, detail="thread_id와 proposal이 필요합니다.")
+        
+        result = await A2AService.handle_schedule_approval(
+            thread_id=thread_id,
+            session_ids=session_ids,
+            user_id=current_user_id,
+            approved=approved,
+            proposal=proposal
+        )
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"일정 승인 처리 실패: {str(e)}")

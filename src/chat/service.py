@@ -191,49 +191,90 @@ class ChatService:
             
             # 일정 정보 추출 (Intent 모듈로 분리)
             schedule_info = await IntentService.extract_schedule_info(message)
+            friend_names_list = schedule_info.get("friend_names")  # 여러 명
             friend_name = schedule_info.get("friend_name") if schedule_info.get("has_schedule_request") else None
-            logger.info(f"[CHAT] schedule_info: has={schedule_info.get('has_schedule_request')}, friend='{friend_name}', intent={schedule_info.get('intent')}")
             
-            # 친구 ID 찾기
-            friend_id = None
-            if friend_name:
-                friend_id = await ChatService._find_friend_id_by_name(user_id, friend_name)
-                logger.info(f"[CHAT] friend_id lookup result for '{friend_name}': {friend_id}")
+            # 여러 친구 이름이 있으면 리스트로, 없으면 단일 이름으로 처리
+            if friend_names_list and len(friend_names_list) > 1:
+                friend_names = friend_names_list
+            elif friend_name:
+                friend_names = [friend_name]
+            else:
+                friend_names = []
+            
+            logger.info(f"[CHAT] schedule_info: has={schedule_info.get('has_schedule_request')}, friends={friend_names}, intent={schedule_info.get('intent')}")
+            
+            # 여러 친구 ID 찾기
+            friend_ids = []
+            friend_id_to_name = {}
+            for name in friend_names:
+                fid = await ChatService._find_friend_id_by_name(user_id, name)
+                if fid:
+                    friend_ids.append(fid)
+                    friend_id_to_name[fid] = name
+                    logger.info(f"[CHAT] friend_id lookup result for '{name}': {fid}")
             
             # 일정 요청이 감지되고 친구 ID가 있으면 A2A 세션 자동 시작
             a2a_session_id = None
-            if schedule_info.get("has_schedule_request") and friend_id:
+            if schedule_info.get("has_schedule_request") and friend_ids:
                 try:
                     from src.a2a.service import A2AService
                     # 요약 메시지 생성
                     summary_parts = []
-                    if friend_name:
-                        summary_parts.append(friend_name)
+                    if friend_names:
+                        if len(friend_names) > 1:
+                            summary_parts.append(", ".join(friend_names[:-1]) + f"와 {friend_names[-1]}")
+                        else:
+                            summary_parts.append(friend_names[0])
                     if schedule_info.get("date"):
                         summary_parts.append(schedule_info.get("date"))
                     if schedule_info.get("time"):
                         summary_parts.append(schedule_info.get("time"))
-                    summary = "와 ".join(summary_parts) if summary_parts else f"{friend_name}와 약속"
+                    summary = " ".join(summary_parts) if summary_parts else "약속"
                     
-                    # A2A 세션 시작 (백엔드가 전체 시뮬레이션 자동 진행)
-                    a2a_result = await A2AService.start_a2a_session(
+                    # A2A 세션 시작 (다중 사용자 지원)
+                    a2a_result = await A2AService.start_multi_user_session(
                         initiator_user_id=user_id,
-                        target_user_id=friend_id,
+                        target_user_ids=friend_ids,
                         summary=summary,
+                        date=schedule_info.get("date"),
+                        time=schedule_info.get("time"),
+                        location=schedule_info.get("location"),
+                        activity=schedule_info.get("activity"),
                         duration_minutes=60
                     )
                     
                     if a2a_result.get("status") == 200:
-                        a2a_session_id = a2a_result.get("session_id")
-                        event_created = a2a_result.get("event") is not None
+                        thread_id = a2a_result.get("thread_id")
+                        session_ids = a2a_result.get("session_ids", [])
+                        needs_approval = a2a_result.get("needs_approval", False)
+                        proposal = a2a_result.get("proposal")
                         
-                        # A2A 세션이 성공적으로 시작되었음을 알리는 응답
-                        if event_created:
-                            ai_response = f"✅ {friend_name}님과의 일정 조율이 완료되었습니다! A2A 화면에서 상세 내용을 확인하실 수 있습니다."
+                        if needs_approval and proposal:
+                            # 승인 필요: 사용자에게 확정 제안
+                            date_str = proposal.get("date", "")
+                            time_str = proposal.get("time", "")
+                            location_str = proposal.get("location", "")
+                            participants_str = ", ".join(proposal.get("participants", []))
+                            
+                            ai_response = f"✅ 약속 확정: {date_str} {time_str}"
+                            if location_str:
+                                ai_response += f" / {location_str}"
+                            ai_response += f"\n참여자: {participants_str}\n확정하시겠습니까?"
+                            
+                            # schedule_info에 승인 필요 정보 추가
+                            schedule_info["needs_approval"] = True
+                            schedule_info["proposal"] = proposal
+                            schedule_info["thread_id"] = thread_id
+                            schedule_info["session_ids"] = session_ids
                         else:
-                            ai_response = f"🤖 {friend_name}님의 Agent와 일정을 조율하고 있습니다. A2A 화면에서 진행 상황을 확인하실 수 있습니다."
+                            # A2A 세션이 성공적으로 시작되었음을 알리는 응답
+                            if len(friend_names) > 1:
+                                ai_response = f"🤖 {', '.join(friend_names)}님들의 Agent와 일정을 조율하고 있습니다. A2A 화면에서 진행 상황을 확인하실 수 있습니다."
+                            else:
+                                ai_response = f"🤖 {friend_names[0]}님의 Agent와 일정을 조율하고 있습니다. A2A 화면에서 진행 상황을 확인하실 수 있습니다."
                         
-                        logger.info(f"A2A 세션 시작 성공: session_id={a2a_session_id}, event_created={event_created}")
+                        logger.info(f"A2A 세션 시작 성공: thread_id={thread_id}, session_ids={session_ids}, needs_approval={needs_approval}")
                     else:
                         # A2A 세션 시작 실패 시 기존 로직으로 폴백
                         error_msg = a2a_result.get('error', '알 수 없는 오류')
@@ -263,12 +304,14 @@ class ChatService:
                         f"🕐 {calendar_event.get('start_time_kst', '')}\n"
                         f"📍 {calendar_event.get('location', '')}"
                     )
-            # 사용자 메시지 저장
+            # 사용자 메시지 저장 (여러 친구인 경우 friend_id는 None)
+            # 여러 친구와의 일정은 A2A 세션으로 처리되므로 friend_id는 첫 번째 친구 또는 None
+            first_friend_id = friend_ids[0] if friend_ids else None
             await ChatRepository.create_chat_log(
                 user_id=user_id,
                 request_text=message,
                 response_text=None,
-                friend_id=friend_id,
+                friend_id=first_friend_id if len(friend_ids) == 1 else None,  # 여러 명이면 None
                 message_type="user_message"
             )
             
@@ -277,7 +320,7 @@ class ChatService:
                 user_id=user_id,
                 request_text=None,
                 response_text=ai_response,
-                friend_id=friend_id,
+                friend_id=first_friend_id if len(friend_ids) == 1 else None,  # 여러 명이면 None
                 message_type="ai_response"
             )
             
@@ -400,12 +443,30 @@ class ChatService:
                 
                 if n1 == n2:
                     return 1.0
-                if n1 in n2 or n2 in n1:
-                    return 0.8
-                # 공통 문자 비율 계산
+                
+                # 완전 포함 관계 (긴 이름에 짧은 이름이 포함되는 경우)
+                if len(n1) > len(n2):
+                    if n2 in n1:
+                        # 짧은 이름이 긴 이름의 시작 부분과 일치하는 경우 더 높은 점수
+                        if n1.startswith(n2):
+                            return 0.9
+                        return 0.7
+                elif len(n2) > len(n1):
+                    if n1 in n2:
+                        if n2.startswith(n1):
+                            return 0.9
+                        return 0.7
+                
+                # 공통 문자 비율 계산 (더 정교하게)
                 common = set(n1) & set(n2)
                 if not common:
                     return 0.0
+                
+                # 길이 차이가 크면 점수 감소
+                length_diff = abs(len(n1) - len(n2))
+                if length_diff > 2:
+                    return 0.3
+                
                 return len(common) / max(len(n1), len(n2))
 
             target = normalize(friend_name)
@@ -417,14 +478,27 @@ class ChatService:
                     logger.info(f"완전 일치 발견: {name} (id: {fid})")
                     return fid
 
-            # 우선순위 2: 포함 관계 (긴 이름에 짧은 이름이 포함)
+            # 우선순위 2: 시작 부분 일치 (더 정확한 매칭)
+            # "성신조이"를 찾을 때 "성신조"가 아닌 "성신조이"를 우선 매칭
+            for fid, name in id_to_name.items():
+                norm_name = normalize(name)
+                # 입력 이름이 DB 이름의 시작 부분과 일치하는 경우
+                if norm_name.startswith(target) and len(norm_name) >= len(target):
+                    logger.info(f"시작 부분 일치 발견: {name} (id: {fid})")
+                    return fid
+                # DB 이름이 입력 이름의 시작 부분과 일치하는 경우
+                if target.startswith(norm_name) and len(target) >= len(norm_name):
+                    logger.info(f"시작 부분 일치 발견: {name} (id: {fid})")
+                    return fid
+
+            # 우선순위 3: 포함 관계 (긴 이름에 짧은 이름이 포함)
             for fid, name in id_to_name.items():
                 norm_name = normalize(name)
                 if target in norm_name or norm_name in target:
                     logger.info(f"포함 일치 발견: {name} (id: {fid})")
                     return fid
 
-            # 우선순위 3: 유사도 기반 매칭 (0.6 이상)
+            # 우선순위 4: 유사도 기반 매칭 (0.7 이상, 더 엄격하게)
             best_match = None
             best_score = 0.0
             for fid, name in id_to_name.items():
@@ -434,7 +508,7 @@ class ChatService:
                     best_match = fid
                     logger.debug(f"유사도 매칭: {name} (id: {fid}, score: {score:.2f})")
 
-            if best_score >= 0.6:
+            if best_score >= 0.7:
                 matched_name = id_to_name.get(best_match, "알 수 없음")
                 logger.info(f"유사도 매칭 성공: {matched_name} (id: {best_match}, score: {best_score:.2f})")
                 return best_match

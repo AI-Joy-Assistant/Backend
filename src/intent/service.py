@@ -33,25 +33,57 @@ class IntentService:
         ]
         has_schedule = any(k in text for k in schedule_keywords) or any(k in lowered for k in ["schedule", "meeting", "appointment"])
 
-        friend_name = None
-        # 다양한 친구 이름 패턴 추출
-        patterns = [
-            r"([가-힣A-Za-z]{2,})\s*(씨|님|이랑|랑|하고|과|와|와\s*함께|와\s*같이)",  # "민서랑", "민서와 함께"
-            r"([가-힣A-Za-z]{2,})\s*하고\s*",  # "민서하고"
-            r"([가-힣A-Za-z]{2,})\s*와\s*",  # "민서와"
-            r"([가-힣A-Za-z]{2,})\s*랑\s*",  # "민서랑"
-            r"([가-힣A-Za-z]{2,})\s*과\s*",  # "민서과"
-            r"([가-힣A-Za-z]{2,})\s*님",  # "민서님"
-            r"([가-힣A-Za-z]{2,})\s*씨",  # "민서씨"
+        friend_names = []
+        # 여러 친구 이름 추출 (쉼표, "이랑", "랑", "와" 등으로 구분)
+        # 예: "민서, 규민이랑", "민서와 규민", "민서랑 규민이랑"
+        
+        # 먼저 쉼표로 구분된 이름들 추출
+        comma_pattern = r"([가-힣A-Za-z]{2,})\s*[,，]\s*([가-힣A-Za-z]{2,})"
+        comma_match = re.search(comma_pattern, text)
+        if comma_match:
+            friend_names.extend([comma_match.group(1).strip(), comma_match.group(2).strip()])
+        
+        # "이랑", "랑", "와", "과" 등으로 연결된 이름들 추출
+        connector_patterns = [
+            r"([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,})",  # "민서랑 규민"
+            r"([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)",  # "민서랑 규민이랑"
         ]
         
-        for pattern in patterns:
+        for pattern in connector_patterns:
             m = re.search(pattern, text)
             if m:
-                friend_name = m.group(1).strip()
-                # 너무 짧거나 일반 단어는 제외
-                if len(friend_name) >= 2 and friend_name not in ["내일", "오늘", "모레", "다음", "이번"]:
+                names = [m.group(1).strip(), m.group(3).strip()]
+                friend_names.extend([n for n in names if len(n) >= 2 and n not in ["내일", "오늘", "모레", "다음", "이번"]])
+                if friend_names:
                     break
+        
+        # 단일 친구 이름 추출 (여러 명이 없을 경우)
+        if not friend_names:
+            # 더 정확한 패턴: 이름 뒤에 오는 접미사를 명확히 구분
+            # "성신조이랑" 같은 경우 "성신조이" 전체를 매칭하도록 수정
+            single_patterns = [
+                r"([가-힣A-Za-z]{2,}이)\s*(랑|와|과|하고)",  # "성신조이랑", "민서이랑" (이름이 "이"로 끝나는 경우)
+                r"([가-힣A-Za-z]{2,})\s*(씨|님|이랑|랑|하고|과|와|와\s*함께|와\s*같이)",  # "민서랑", "민서와 함께"
+                r"([가-힣A-Za-z]{2,})\s*하고\s*",  # "민서하고"
+                r"([가-힣A-Za-z]{2,})\s*와\s*",  # "민서와"
+                r"([가-힣A-Za-z]{2,})\s*랑\s*",  # "민서랑"
+                r"([가-힣A-Za-z]{2,})\s*과\s*",  # "민서과"
+                r"([가-힣A-Za-z]{2,})\s*님",  # "민서님"
+                r"([가-힣A-Za-z]{2,})\s*씨",  # "민서씨"
+            ]
+            
+            for pattern in single_patterns:
+                m = re.search(pattern, text)
+                if m:
+                    name = m.group(1).strip()
+                    # 최소 2글자 이상이고, 일반 단어가 아닌 경우만 추가
+                    if len(name) >= 2 and name not in ["내일", "오늘", "모레", "다음", "이번", "이번주", "다음주"]:
+                        friend_names.append(name)
+                        break
+        
+        # 중복 제거 및 정리
+        friend_names = list(dict.fromkeys(friend_names))  # 순서 유지하며 중복 제거
+        friend_name = friend_names[0] if friend_names else None
 
         # 날짜 추출
         date_expr = None
@@ -99,6 +131,7 @@ class IntentService:
         return {
             "intent": "schedule" if has_schedule else None,
             "friend_name": friend_name,
+            "friend_names": friend_names if len(friend_names) > 1 else None,  # 여러 명일 때
             "date": date_expr,
             "time": time_expr,
             "activity": "약속" if has_schedule else None,
@@ -143,10 +176,19 @@ class IntentService:
             raw = {**heuristic_result, **{k: v for k, v in raw.items() if v not in [None, "", False]}}
             has_schedule = True
 
+        # 여러 친구 이름 처리
+        friend_names_list = raw.get("friend_names") or heuristic_result.get("friend_names")
+        if friend_names_list and len(friend_names_list) > 1:
+            # 여러 명인 경우
+            friend_name = friend_names_list[0]  # 첫 번째 이름을 대표로
+        elif not friend_name:
+            friend_name = raw.get("friend_name") or heuristic_result.get("friend_name")
+        
         # 최종 병합 (빈 필드는 휴리스틱으로 채움)
         final_result = {
             "intent": "schedule" if has_schedule else None,
             "friend_name": friend_name,
+            "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
             "date": raw.get("date") or heuristic_result.get("date"),
             "time": raw.get("time") or heuristic_result.get("time"),
             "activity": raw.get("activity") or heuristic_result.get("activity"),

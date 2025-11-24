@@ -2,6 +2,9 @@ from typing import List, Dict, Any, Optional
 from config.database import supabase
 import uuid
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 class A2ARepository:
     
@@ -106,6 +109,31 @@ class A2ARepository:
             raise Exception(f"메시지 조회 오류: {str(e)}")
     
     @staticmethod
+    async def get_thread_messages(thread_id: str) -> List[Dict[str, Any]]:
+        """thread_id에 속한 모든 세션의 메시지 조회 (단체 채팅방용)"""
+        try:
+            # thread_id를 가진 모든 세션 찾기 (get_thread_sessions 사용)
+            thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+            
+            if not thread_sessions:
+                return []
+            
+            session_ids = [s['id'] for s in thread_sessions]
+            
+            # 모든 세션의 메시지 조회
+            all_messages = []
+            for sid in session_ids:
+                messages = await A2ARepository.get_session_messages(sid)
+                all_messages.extend(messages)
+            
+            # 시간순 정렬
+            all_messages.sort(key=lambda x: x.get('created_at', ''))
+            
+            return all_messages
+        except Exception as e:
+            raise Exception(f"thread 메시지 조회 오류: {str(e)}")
+    
+    @staticmethod
     async def get_user_sessions(user_id: str) -> List[Dict[str, Any]]:
         """사용자의 모든 세션 조회"""
         try:
@@ -116,6 +144,113 @@ class A2ARepository:
             return response.data if response.data else []
         except Exception as e:
             raise Exception(f"세션 목록 조회 오류: {str(e)}")
+    
+    @staticmethod
+    async def find_existing_session(
+        initiator_user_id: str,
+        target_user_ids: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        같은 참여자들로 진행 중이거나 최근에 생성된 기존 세션 찾기
+        여러 참여자가 있는 경우, 모든 참여자가 포함된 세션을 찾습니다.
+        """
+        try:
+            # 모든 참여자 ID (initiator + targets)
+            all_participants = [initiator_user_id] + target_user_ids
+            
+            # initiator가 같고, target_user_id가 target_user_ids 중 하나인 세션들 조회
+            # 최근 생성된 순으로 정렬하여 가장 최근 세션 반환
+            sessions = []
+            for target_id in target_user_ids:
+                response = supabase.table('a2a_session').select('*').eq(
+                    'initiator_user_id', initiator_user_id
+                ).eq('target_user_id', target_id).order('created_at', desc=True).limit(1).execute()
+                
+                if response.data:
+                    sessions.extend(response.data)
+            
+            # 반대 방향도 확인 (target이 initiator였던 경우)
+            for target_id in target_user_ids:
+                response = supabase.table('a2a_session').select('*').eq(
+                    'initiator_user_id', target_id
+                ).eq('target_user_id', initiator_user_id).order('created_at', desc=True).limit(1).execute()
+                
+                if response.data:
+                    sessions.extend(response.data)
+            
+            if not sessions:
+                return None
+            
+            # 가장 최근 세션 반환
+            # completed 상태가 아닌 세션 우선, 없으면 가장 최근 세션
+            in_progress = [s for s in sessions if s.get('status') in ['pending', 'in_progress']]
+            if in_progress:
+                # 가장 최근 진행 중인 세션
+                return max(in_progress, key=lambda x: x.get('created_at', ''))
+            else:
+                # 가장 최근 세션 (completed 포함)
+                return max(sessions, key=lambda x: x.get('created_at', ''))
+                
+        except Exception as e:
+            logger.warning(f"기존 세션 찾기 오류: {str(e)}")
+            return None
+    
+    @staticmethod
+    async def delete_session(session_id: str) -> bool:
+        """A2A 세션 삭제 (관련 메시지도 함께 삭제)"""
+        try:
+            # 먼저 관련 메시지 삭제
+            supabase.table('a2a_message').delete().eq('session_id', session_id).execute()
+            
+            # 세션 삭제
+            response = supabase.table('a2a_session').delete().eq('id', session_id).execute()
+            
+            # 삭제 성공 여부 확인
+            return True
+        except Exception as e:
+            raise Exception(f"세션 삭제 오류: {str(e)}")
+    
+    @staticmethod
+    async def create_thread(
+        initiator_id: str,
+        participant_ids: List[str],
+        title: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """A2A Thread 생성 (다중 사용자 그룹)"""
+        try:
+            thread_id = str(uuid.uuid4())
+            # 첫 번째 참여자를 counterpart로 설정 (나머지는 place_pref에 저장)
+            counterpart_id = participant_ids[0] if participant_ids else initiator_id
+            
+            thread_data = {
+                "id": thread_id,
+                "initiator_id": initiator_id,
+                "counterpart_id": counterpart_id,
+                "title": title or "일정 조율",
+                "status": "open"
+            }
+            
+            response = supabase.table('a2a_thread').insert(thread_data).execute()
+            if response.data:
+                return response.data[0]
+            raise Exception("Thread 생성 실패")
+        except Exception as e:
+            raise Exception(f"Thread 생성 오류: {str(e)}")
+    
+    @staticmethod
+    async def get_thread_sessions(thread_id: str) -> List[Dict[str, Any]]:
+        """Thread에 속한 모든 세션 조회"""
+        try:
+            # place_pref에 thread_id가 포함된 세션들 조회
+            # 또는 별도 테이블이 있다면 그걸 사용
+            # 일단 간단하게 place_pref에 thread_id를 저장하는 방식 사용
+            response = supabase.table('a2a_session').select('*').contains(
+                'place_pref', {'thread_id': thread_id}
+            ).execute()
+            return response.data if response.data else []
+        except Exception as e:
+            logger.warning(f"Thread 세션 조회 실패: {str(e)}")
+            return []
     
     @staticmethod
     async def link_calendar_event(session_id: str, google_event_id: str) -> bool:
