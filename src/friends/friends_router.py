@@ -3,8 +3,8 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 import jwt
 from config.settings import settings
-from .service import FriendsService
-from .models import AddFriendRequest, MessageResponse
+from .friends_service import FriendsService
+from .friends_models import AddFriendRequest, MessageResponse
 
 router = APIRouter(prefix="/friends", tags=["Friends"])
 

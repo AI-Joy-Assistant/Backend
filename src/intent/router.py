@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from src.intent.models import IntentParseRequest, IntentParseResult
-from src.intent.service import IntentService
+from .models import IntentParseRequest, IntentParseResult
+from .service import IntentService
 
 router = APIRouter(prefix="/intent", tags=["Intent"])
 

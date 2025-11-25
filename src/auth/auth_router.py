@@ -5,9 +5,9 @@ import json
 import datetime as dt
 from urllib.parse import urlencode
 import jwt
-from .models import UserCreate, UserLogin, UserResponse, TokenResponse
-from .service import AuthService
-from .repository import AuthRepository
+from .auth_models import UserCreate, UserLogin, UserResponse, TokenResponse
+from .auth_service import AuthService
+from .auth_repository import AuthRepository
 from config.database import get_supabase_client  # (사용 안 해도 유지)
 from config.settings import settings
 
@@ -260,7 +260,7 @@ async def get_google_token(request: Request):
     
     # 데이터베이스에서 Google OAuth access_token 가져오기
     try:
-        from .repository import AuthRepository
+        from .auth_repository import AuthRepository
         user_data = await AuthRepository.find_user_by_email(user.get("email"))
         if user_data and user_data.get("access_token"):
             return {"access_token": user_data.get("access_token")}

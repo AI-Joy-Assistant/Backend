@@ -1,13 +1,13 @@
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from typing import Dict, Any, Optional, Tuple
 import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
 from fastapi import Request, HTTPException
 from config.settings import settings
-from .repository import AuthRepository
-from .models import LoginResponse, TokenResponse, UserProfileResponse, UserCreate, UserLogin, UserResponse
+from .auth_repository import AuthRepository
+from .auth_models import LoginResponse, TokenResponse, UserProfileResponse, UserCreate, UserLogin, UserResponse
 
 class AuthService:
     
@@ -469,3 +469,99 @@ class AuthService:
         except Exception as e:
             print(f"사용자 조회 실패: {str(e)}")
             return None 
+    
+    @staticmethod
+    async def get_valid_access_token_by_user_id(user_id: str) -> Optional[str]:
+        """
+        사용자 ID로 유효한 Google Access Token을 반환합니다.
+        토큰이 만료되었다면 Refresh Token을 사용하여 갱신하고 DB를 업데이트합니다.
+        """
+        try:
+            # 1. 사용자 정보 조회
+            user = await AuthRepository.find_user_by_id(user_id)
+            if not user:
+                print(f"❌ [Auth] 사용자를 찾을 수 없음: {user_id}")
+                return None
+
+            access_token = user.get("access_token")
+            refresh_token = user.get("refresh_token")
+            token_expiry = user.get("token_expiry") # ISO 포맷 문자열 예상
+
+            # 2. 토큰 만료 여부 확인
+            needs_refresh = False
+            
+            if not access_token:
+                needs_refresh = True
+            elif token_expiry:
+                try:
+                    # DB에 저장된 시간 파싱 (Timezone 처리)
+                    expiry_dt = datetime.fromisoformat(str(token_expiry).replace("Z", "+00:00"))
+                    
+                    # 만료 시간이 Naive(타임존 없음)라면 UTC로 가정
+                    if expiry_dt.tzinfo is None:
+                        expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                    
+                    # 현재 시간 (UTC)
+                    now_utc = datetime.now(timezone.utc)
+                    
+                    # 만료 1분 전이면 갱신 필요
+                    if (expiry_dt - now_utc).total_seconds() < 60:
+                        print(f"⏰ [Auth] 토큰 만료 임박/경과. 갱신 시도: {user_id}")
+                        needs_refresh = True
+                except Exception as e:
+                    print(f"⚠️ [Auth] 만료 시간 파싱 실패, 안전하게 갱신 시도: {e}")
+                    needs_refresh = True
+            else:
+                # 만료 시간 정보가 없으면 갱신 시도
+                needs_refresh = True
+
+            # 3. 유효하면 바로 반환
+            if not needs_refresh and access_token:
+                return access_token
+
+            # 4. 갱신 로직
+            if not refresh_token:
+                print(f"❌ [Auth] 갱신 불가: Refresh Token 없음 (User: {user_id})")
+                return None
+
+            print(f"🔄 [Auth] Google 토큰 갱신 요청 중... (User: {user_id})")
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": settings.GOOGLE_CLIENT_ID,
+                        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token"
+                    }
+                )
+                
+                if response.status_code != 200:
+                    print(f"❌ [Auth] 구글 토큰 갱신 실패: {response.text}")
+                    return None
+
+                token_data = response.json()
+                new_access_token = token_data.get("access_token")
+                expires_in = token_data.get("expires_in", 3600)
+                
+                # 새 만료 시간 계산
+                new_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+
+                # 5. DB 업데이트
+                # (AuthRepository에 update_user나 update_google_user_info 메서드가 있다고 가정)
+                update_data = {
+                    "access_token": new_access_token,
+                    "token_expiry": new_expiry,
+                    "updated_at": "NOW()" # Supabase가 처리하거나 제외
+                }
+                
+                # 만약 AuthRepository.update_user가 있다면 사용
+                await AuthRepository.update_user(user_id, update_data)
+                
+                print(f"✅ [Auth] 토큰 갱신 및 DB 저장 완료 (User: {user_id})")
+                return new_access_token
+
+        except Exception as e:
+            print(f"❌ [Auth] 토큰 조회/갱신 중 치명적 오류: {e}")
+            return None

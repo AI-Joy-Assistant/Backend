@@ -2,8 +2,8 @@ from typing import Dict, Any
 import logging
 import re
 
-from src.intent.models import IntentParseResult
-from src.chat.openai_service import OpenAIService
+from .models import IntentParseResult
+from src.chat.chat_openai_service import OpenAIService
 
 logger = logging.getLogger(__name__)
 

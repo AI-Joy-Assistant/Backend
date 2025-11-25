@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
 
@@ -30,6 +30,10 @@ class A2ASessionResponse(BaseModel):
     target_user_id: str
     status: str
     created_at: datetime
+    thread_id: Optional[str] = None
+    participant_count: Optional[int] = None
+    participant_ids: Optional[List[str]] = None
+    participant_names: Optional[List[str]] = None
 
 class A2AMessageCreate(BaseModel):
     session_id: str

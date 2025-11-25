@@ -2,10 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from typing import Optional
 import jwt
 from config.settings import settings
-from .service import A2AService
-from .repository import A2ARepository
-from .models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
-from src.auth.service import AuthService
+from .a2a_service import A2AService
+from .a2a_repository import A2ARepository
+from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
+from src.auth.auth_service import AuthService
+from src.chat.chat_repository import ChatRepository
 
 router = APIRouter(prefix="/a2a", tags=["A2A"])
 
@@ -156,43 +157,59 @@ async def get_user_sessions(
         
         # 각 thread 그룹에서 대표 세션 선택 (가장 최근 세션)
         grouped_sessions = []
+        all_participant_ids = set()
         for thread_id, thread_sessions in sessions_by_thread.items():
             # 가장 최근 세션을 대표로 사용
             representative = max(thread_sessions, key=lambda x: x.get('created_at', ''))
-            
-            # 참여자 정보 추가 (모든 세션의 initiator와 target 수집)
-            participants = []
-            initiators = set()
-            targets = set()
-            
-            for s in thread_sessions:
-                initiators.add(s.get("initiator_user_id"))
-                targets.add(s.get("target_user_id"))
-            
-            # 현재 사용자를 제외한 모든 참여자 수집
-            all_participants = (initiators | targets) - {current_user_id}
-            participants = list(all_participants)
-            
-            # thread_id와 참여자 정보를 place_pref에 추가
-            representative["thread_id"] = thread_id
-            representative["participant_count"] = len(participants)
-            representative["participant_ids"] = participants
-            
-            # place_pref에서 participants 정보도 가져오기 (다중 참여자 정보)
+
+            # 참여자 ID 수집 (initiator + target)
+            initiators = {s.get("initiator_user_id") for s in thread_sessions}
+            targets = {s.get("target_user_id") for s in thread_sessions}
+
+            # place_pref에 명시된 참여자 정보도 확인
             place_pref = representative.get("place_pref", {})
+            pref_participants = set()
             if isinstance(place_pref, dict) and place_pref.get("participants"):
-                # place_pref에 저장된 모든 참여자 정보도 포함
-                pref_participants = place_pref.get("participants", [])
-                all_participants_set = set(participants) | set(pref_participants)
-                all_participants_set.discard(current_user_id)
-                representative["participant_ids"] = list(all_participants_set)
-                representative["participant_count"] = len(all_participants_set)
+                pref_participants = set(place_pref.get("participants"))
+
+            # 전체 참여자 합집합 (나 제외)
+            participants_set = (initiators | targets | pref_participants) - {current_user_id}
+
+            participant_list = list(participants_set)
+            all_participant_ids.update(participants_set) # 전체 ID 수집
+
+            # 대표 세션 객체에 정보 주입
+            representative["thread_id"] = thread_id
+            representative["participant_ids"] = participant_list
+            representative["participant_count"] = len(participant_list)
             
             grouped_sessions.append(representative)
         
         # 최근 순으로 정렬
         grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-        
+
+        # 3. 이름 일괄 조회 (DB 부하 감소)
+        user_names_map = {}
+        if all_participant_ids:
+            user_names_map = await ChatRepository.get_user_names_by_ids(list(all_participant_ids))
+
+        # 4. 이름 매핑 적용
+        for session in grouped_sessions:
+            p_ids = session.get("participant_ids", [])
+            p_names = []
+            for pid in p_ids:
+                name = user_names_map.get(pid, "알 수 없음")
+                p_names.append(name)
+
+            # 이름이 없으면(탈퇴 등) '대화상대'로 표시
+            if not p_names:
+                p_names = ["대화상대"]
+
+            session["participant_names"] = p_names
+
+        # 5. 최신순 정렬
+        grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
         return {
             "sessions": [A2ASessionResponse(**session) for session in grouped_sessions]
         }
@@ -228,3 +245,29 @@ async def delete_a2a_session(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 삭제 실패: {str(e)}")
 
+@router.delete("/room/{room_id}", summary="채팅방(스레드 또는 세션) 삭제")
+async def delete_chat_room(
+        room_id: str,
+        current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    채팅방을 삭제합니다.
+    - ID가 Thread ID라면 연결된 모든 그룹 세션을 삭제합니다.
+    - ID가 Session ID라면 해당 1:1 세션을 삭제합니다.
+    """
+    try:
+        # 삭제 권한 체크 로직을 추가할 수 있으나,
+        # Repository 레벨에서 본인 관련 데이터만 지우도록 하거나
+        # 현재는 편의상 조회 없이 삭제 시도 (존재하지 않으면 무시됨)
+
+        deleted = await A2ARepository.delete_room(room_id)
+
+        if deleted:
+            return {"status": "success", "message": "채팅방이 삭제되었습니다."}
+        else:
+            raise HTTPException(status_code=500, detail="채팅방 삭제 실패")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅방 삭제 오류: {str(e)}")

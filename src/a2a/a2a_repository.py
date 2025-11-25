@@ -276,5 +276,53 @@ class A2ARepository:
         except Exception as e:
             raise Exception(f"이벤트 연결 오류: {str(e)}")
 
+    @staticmethod
+    async def delete_room(room_id: str) -> bool:
+        """
+        채팅방 삭제 (Thread ID 또는 Session ID)
+        - room_id가 Thread ID라면: 해당 스레드에 속한 모든 세션 삭제
+        - room_id가 Session ID라면: 해당 세션 삭제
+        """
+        try:
+            session_ids_to_delete = set()
+
+            # 1. room_id가 세션 ID인 경우 조회
+            res_session = supabase.table('a2a_session').select('id').eq('id', room_id).execute()
+            if res_session.data:
+                for s in res_session.data:
+                    session_ids_to_delete.add(s['id'])
+
+            # 2. room_id가 스레드 ID인 경우 조회 (place_pref에 thread_id가 포함된 세션)
+            # contains 연산자를 사용하여 JSONB 필드 검색
+            res_thread = supabase.table('a2a_session').select('id').contains('place_pref', {'thread_id': room_id}).execute()
+            if res_thread.data:
+                for s in res_thread.data:
+                    session_ids_to_delete.add(s['id'])
+
+            ids_list = list(session_ids_to_delete)
+
+            if ids_list:
+                logger.info(f"삭제할 세션 ID 목록: {ids_list}")
+
+                # 3. 종속 데이터 삭제 (순서 중요)
+
+                # 3-1) a2a_message 삭제
+                supabase.table('a2a_message').delete().in_('session_id', ids_list).execute()
+
+                # 3-2) calendar_event 연결 해제 (삭제 대신 NULL 처리)
+                # session_id 컬럼이 nullable이어야 오류가 나지 않습니다.
+                supabase.table('calendar_event').update({'session_id': None}).in_('session_id', ids_list).execute()
+
+                # 3-3) a2a_session 삭제
+                supabase.table('a2a_session').delete().in_('id', ids_list).execute()
+
+            # 4. a2a_thread 삭제 (존재한다면)
+            supabase.table('a2a_thread').delete().eq('id', room_id).execute()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"방 삭제 오류: {str(e)}")
+            return False
 
 

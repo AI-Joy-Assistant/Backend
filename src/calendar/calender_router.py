@@ -5,12 +5,12 @@ import datetime as dt
 import httpx
 import logging
 
-from .models import CalendarEvent, CreateEventRequest, GoogleAuthRequest, GoogleAuthResponse
-from .service import GoogleCalendarService
+from .calender_models import CalendarEvent, CreateEventRequest, GoogleAuthRequest, GoogleAuthResponse
+from .calender_service import GoogleCalendarService
 
 from config.settings import settings
-from src.auth.service import AuthService
-from src.auth.repository import AuthRepository
+from src.auth.auth_service import AuthService
+from src.auth.auth_repository import AuthRepository
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -416,7 +416,7 @@ async def create_meeting_with_friend(
         service = GoogleCalendarService()
         me_access = await _ensure_access_token(current_user)
 
-        from .models import CreateEventRequest
+        from .calender_models import CreateEventRequest
         event_req = CreateEventRequest(
             summary=summary,
             start_time=start,

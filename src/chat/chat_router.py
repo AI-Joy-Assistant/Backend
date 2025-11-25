@@ -2,10 +2,13 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional
 import jwt
+import logging
 from config.settings import settings
-from .service import ChatService
-from .models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse
-from .repository import ChatRepository
+from .chat_service import ChatService
+from .chat_models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse
+from .chat_repository import ChatRepository
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -213,32 +216,39 @@ async def approve_schedule(
     }
     """
     try:
-        from src.a2a.service import A2AService
-        from src.chat.repository import ChatRepository
+        from src.a2a.a2a_service import A2AService
+        from src.chat.chat_repository import ChatRepository
         
-        thread_id = request.get("thread_id")
+        thread_id = request.get("thread_id")  # thread_id는 Optional (1:1 세션은 없을 수 있음)
         session_ids = request.get("session_ids", [])
         approved = request.get("approved", False)
         proposal = request.get("proposal")
         
-        if not thread_id or not proposal:
-            raise HTTPException(status_code=400, detail="thread_id와 proposal이 필요합니다.")
+        if not proposal:
+            raise HTTPException(status_code=400, detail="proposal이 필요합니다.")
+        
+        if not thread_id and not session_ids:
+            raise HTTPException(status_code=400, detail="thread_id 또는 session_ids가 필요합니다.")
         
         # 사용자의 승인/거절 의사를 chat_log에 저장
         user_response_text = "예" if approved else "아니오"
-        await ChatRepository.create_chat_log(
-            user_id=current_user_id,
-            request_text=user_response_text,
-            response_text=None,
-            friend_id=None,
-            message_type="schedule_approval_response",
-            metadata={
-                "approved": approved,
-                "thread_id": thread_id,
-                "session_ids": session_ids,
-                "proposal": proposal
-            }
-        )
+        try:
+            await ChatRepository.create_chat_log(
+                user_id=current_user_id,
+                request_text=user_response_text,
+                response_text=None,
+                friend_id=None,
+                message_type="approval_response",
+                metadata={
+                    "approved": approved,
+                    "thread_id": thread_id,
+                    "session_ids": session_ids,
+                    "proposal": proposal
+                }
+            )
+        except Exception as e:
+            # metadata 저장 실패해도 계속 진행 (로깅만)
+            logger.warning(f"승인/거절 의사 저장 실패: {str(e)}")
         
         result = await A2AService.handle_schedule_approval(
             thread_id=thread_id,

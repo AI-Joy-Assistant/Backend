@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # py>=3.9
 
 from config.settings import settings
-from .models import CalendarEvent, CreateEventRequest
+from .calender_models import CalendarEvent, CreateEventRequest
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -283,7 +283,7 @@ class CalendarService:
     async def create_event(user_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """사용자 ID로 일정 생성"""
         try:
-            from src.auth.service import AuthService
+            from src.auth.auth_service import AuthService
             
             # 사용자 정보 조회 (Google 액세스 토큰 포함)
             user_info = await AuthService.get_user_by_id(user_id)
@@ -298,7 +298,7 @@ class CalendarService:
             google_calendar = GoogleCalendarService()
             
             # CreateEventRequest 객체 생성
-            from .models import CreateEventRequest
+            from .calender_models import CreateEventRequest
             create_request = CreateEventRequest(
                 summary=event_data.get("summary", "새 일정"),
                 description=event_data.get("description", ""),

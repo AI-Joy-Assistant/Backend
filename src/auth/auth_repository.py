@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from config.database import supabase
-from .models import User, UserCreate
+from .auth_models import User, UserCreate
 
 class AuthRepository:
     @staticmethod
@@ -134,7 +134,8 @@ class AuthRepository:
         access_token: Optional[str] = None, 
         refresh_token: Optional[str] = None,
         profile_image: Optional[str] = None,
-        name: Optional[str] = None
+        name: Optional[str] = None,
+        token_expiry: Optional[str] = None
     ) -> None:
         """Google 사용자 정보 업데이트"""
         try:
@@ -154,11 +155,12 @@ class AuthRepository:
             if name is not None:
                 update_data['name'] = name
                 print(f"✅ name 추가됨: {name}")
-            else:
-                print(f"ℹ️ name은 업데이트하지 않음 (기존 닉네임 유지)")
-            
+            if token_expiry is not None:
+                update_data['token_expiry'] = token_expiry
+                print(f"✅ token_expiry 업데이트: {token_expiry}")
+
             print(f"📝 업데이트할 데이터: {update_data}")
-            
+
             response = supabase.table('user').update(update_data).eq('email', email).execute()
             print(f"✅ Google 사용자 정보 업데이트 성공")
             

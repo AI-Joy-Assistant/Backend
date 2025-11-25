@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
-from .repository import FriendsRepository
-from .models import AddFriendRequest
+from .friends_repository import FriendsRepository
+from .friends_models import AddFriendRequest
 
 class FriendsService:
     def __init__(self):

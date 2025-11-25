@@ -2,13 +2,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from config.settings import settings
-from src.auth.router import router as auth_router
-from src.chat.router import router as chat_router
-from src.friends.router import router as friends_router
-from src.calendar.router import router as calendar_router
-from src.a2a.router import router as a2a_router
+from src.auth.auth_router import router as auth_router
+from src.chat.chat_router import router as chat_router
+from src.friends.friends_router import router as friends_router
+from src.calendar.calender_router import router as calendar_router
+from src.a2a.a2a_router import router as a2a_router
 from src.intent.router import router as intent_router
+import logging
 
+# # httpx (Supabase 통신) 로그 숨기기
+# logging.getLogger("httpx").setLevel(logging.WARNING)
+# logging.getLogger("httpcore").setLevel(logging.WARNING)
+#
+# # uvicorn 접속 로그 (GET /chat/history ... 200 OK) 숨기기
+# logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 # FastAPI 애플리케이션 생성
 app = FastAPI(
     title="AI Joy Assistant Backend API",
