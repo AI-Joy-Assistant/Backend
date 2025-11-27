@@ -207,35 +207,56 @@ class ChatService:
             # --- 재조율 감지 로직 ---
             from config.database import supabase
 
-            # 1) 최근 '거절(아니오)' 응답 확인
-            # 내가 거절을 눌렀거나, 상대로부터 거절당한 후 내가 말하는 상황 모두 고려
-            # 여기서는 '내가 방금 거절을 누른 후' 시간을 말하는 상황
-            rejection_response = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'schedule_approval_response').order('created_at', desc=True).limit(1).execute()
+            # 1) 최근 '거절(아니오)' 응답 확인 (schedule_approval_response)
+            # limit(1) -> limit(5)로 늘려서 최근 대화 중 거절이 있었는지 확인
+            rejection_response = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'approval_response').order('created_at', desc=True).limit(5).execute()
 
             if rejection_response.data:
-                rejection_log = rejection_response.data[0]
-                rejection_metadata = rejection_log.get('metadata', {})
-                # 내가 '아니오'를 눌렀고, 그게 최근(예: 10분 이내)이라면 재조율로 간주하는 로직 추가 가능
-                if not rejection_metadata.get('approved', True) and rejection_metadata.get('thread_id'):
-                    # 날짜/시간 언급이 있거나 메시지가 있으면 재조율 시도
-                    if schedule_info.get("date") or schedule_info.get("time") or message.strip():
-                        recoordination_needed = True
-                        thread_id_for_recoordination = rejection_metadata.get('thread_id')
-                        session_ids_for_recoordination = rejection_metadata.get('session_ids', [])
-
-            # 2) 시스템으로부터 '거절 알림'을 받은 경우 확인
-            if not recoordination_needed:
-                # 내가 받은 메시지 중 'schedule_rejection' 타입이 있는지 확인
-                rejection_response = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'schedule_rejection').order('created_at', desc=True).limit(1).execute()
-                if rejection_response.data:
-                    rejection_log = rejection_response.data[0]
-                    rejection_metadata = rejection_log.get('metadata', {})
-                    # 거절된 기록이 있고 thread_id가 있으면
-                    if rejection_metadata.get('thread_id'):
+                # 최근 5개 로그 중 '거절(approved: false)'이 있고, 그 이후에 '승인(approved: true)'가 없으면 재조율 대상으로 판단
+                for log in rejection_response.data:
+                    meta = log.get('metadata', {})
+                    if not meta.get('approved', True) and meta.get('thread_id'):
+                        # 거절 이력 발견
+                        # 여기서 바로 True로 하지 않고, 이 거절 이후에 성공한 세션이 없는지 체크하면 더 좋지만 일단 간단하게 처리
                         if schedule_info.get("date") or schedule_info.get("time") or message.strip():
                             recoordination_needed = True
-                            thread_id_for_recoordination = rejection_metadata.get('thread_id')
-                            session_ids_for_recoordination = rejection_metadata.get('session_ids', [])
+                            thread_id_for_recoordination = meta.get('thread_id')
+                            session_ids_for_recoordination = meta.get('session_ids', [])
+                            logger.info(f"재조율 감지 (사용자 거절): thread_id={thread_id_for_recoordination}")
+                            break
+
+            # 2) 시스템으로부터 '거절 알림'을 받은 경우 확인 (schedule_rejection 또는 ai_response 내의 needs_recoordination)
+            if not recoordination_needed:
+                # message_type이 schedule_rejection 이거나, metadata에 needs_recoordination이 있는 ai_response 조회
+                # OR 조건이 복잡하므로 두 번 쿼리하거나, 가장 최근 로그를 확인
+
+                # A. schedule_rejection 확인
+                sys_reject = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'schedule_rejection').order('created_at', desc=True).limit(3).execute()
+                if sys_reject.data:
+                    for log in sys_reject.data:
+                        meta = log.get('metadata', {})
+                        if meta.get('needs_recoordination') and meta.get('thread_id'):
+                            if schedule_info.get("date") or schedule_info.get("time") or message.strip():
+                                recoordination_needed = True
+                                thread_id_for_recoordination = meta.get('thread_id')
+                                session_ids_for_recoordination = meta.get('session_ids', [])
+                                logger.info(f"재조율 감지 (시스템 거절 알림): thread_id={thread_id_for_recoordination}")
+                                break
+
+                # B. AI가 보낸 "재조율을 위해..." 메시지 확인 (ai_response)
+                if not recoordination_needed:
+                    ai_reject = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'ai_response').order('created_at', desc=True).limit(3).execute()
+                    if ai_reject.data:
+                        for log in ai_reject.data:
+                            meta = log.get('metadata', {})
+                            # [핵심] 로그 상 'metadata': {'needs_recoordination': true, ...} 가 있는지 확인
+                            if meta and meta.get('needs_recoordination') and meta.get('thread_id'):
+                                if schedule_info.get("date") or schedule_info.get("time") or message.strip():
+                                    recoordination_needed = True
+                                    thread_id_for_recoordination = meta.get('thread_id')
+                                    session_ids_for_recoordination = meta.get('session_ids', [])
+                                    logger.info(f"재조율 감지 (AI 재조율 요청): thread_id={thread_id_for_recoordination}")
+                                    break
 
             # [판단] 일정 요청이거나 재조율이면 -> AI 생성 스킵
             is_schedule_related = schedule_info.get("has_schedule_request") or recoordination_needed
@@ -257,27 +278,51 @@ class ChatService:
             if recoordination_needed:
                 # [✅ 수정 2] 재조율 시 친구 정보 복구 확실하게 처리
                 from src.a2a.a2a_repository import A2ARepository
+                # session_ids가 있으면 그것으로, 없으면 thread_id로 찾기
+                target_sessions = []
+                # 1. session_ids로 조회 시도
                 if session_ids_for_recoordination:
-                    # 첫 번째 세션 정보를 가져와서 참여자(친구) 목록 복원
-                    first_session = await A2ARepository.get_session(session_ids_for_recoordination[0])
-                    if first_session:
-                        place_pref = first_session.get('place_pref', {})
-                        # participants 리스트가 있으면 사용, 없으면 initiator/target으로 유추
-                        participant_ids = place_pref.get('participants', [])
+                    for sid in session_ids_for_recoordination:
+                        sess = await A2ARepository.get_session(sid)
+                        if sess: target_sessions.append(sess)
 
-                        if not participant_ids:
-                            # fallback: initiator와 target을 가져옴
-                            participant_ids = [first_session['initiator_user_id'], first_session['target_user_id']]
+                # 2. 실패 시 thread_id로 조회 시도
+                if not target_sessions and thread_id_for_recoordination:
+                    target_sessions = await A2ARepository.get_thread_sessions(thread_id_for_recoordination)
 
-                        # 나(user_id)를 제외한 나머지 ID 수집
-                        friend_ids = [pid for pid in participant_ids if pid != user_id]
+                if target_sessions:
+                    # 모든 참여자 ID 수집 (나 제외)
+                    all_pids = set()
+                    for s in target_sessions:
+                        # place_pref의 participants가 가장 정확함
+                        place_pref = s.get('place_pref') or {}
+                        if isinstance(place_pref, dict) and place_pref.get('participants'):
+                            for p in place_pref['participants']:
+                                all_pids.add(p)
 
+                        # initiator/target 확인
+                        if s.get('initiator_user_id'): all_pids.add(s['initiator_user_id'])
+                        if s.get('target_user_id'): all_pids.add(s['target_user_id'])
+
+                    # 나(user_id) 제외
+                    if user_id in all_pids:
+                        all_pids.remove(user_id)
+
+                    friend_ids = list(all_pids)
+
+                    if friend_ids:
                         # 이름 조회
                         user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
                         friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
                         friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
+                        logger.info(f"재조율 참여자 복구 성공: {friend_names} (IDs: {friend_ids})")
+                    else:
+                        logger.error("재조율 참여자 복구 실패: 친구 ID를 찾을 수 없음")
+                else:
+                    logger.error("재조율 세션 정보를 찾을 수 없습니다.")
+
             else:
-                # 신규 요청일 때 이름으로 찾기
+                # 신규 요청 (기존 유지)
                 for name in friend_names:
                     fid = await ChatService._find_friend_id_by_name(user_id, name)
                     if fid:
@@ -290,8 +335,12 @@ class ChatService:
 
             response_sent_to_db = False
 
-            # friend_ids가 있어야만 A2A 로직 진입 (재조율이면 위에서 friend_ids가 채워져야 함)
-            if is_schedule_related and friend_ids:
+            # [✅ 중요] friend_ids가 비어있으면 A2A 로직을 타지 않음 -> 단독 일정으로 빠지는 것을 방지해야 함
+            # 재조율인데 친구를 못 찾았으면 에러 처리
+            if recoordination_needed and not friend_ids:
+                ai_response = "이전 대화의 참여자 정보를 찾을 수 없어 재조율을 진행할 수 없습니다. 다시 시도해 주세요."
+                # 여기서 리턴해서 아래 캘린더 추가 로직으로 빠지는 것 방지
+            elif is_schedule_related and friend_ids:
                 try:
                     from src.a2a.a2a_service import A2AService
 
@@ -389,7 +438,7 @@ class ChatService:
             # 5. 캘린더 직접 추가 (A2A가 아닐 때만!!)
             # [✅ 수정 3] friend_ids가 있으면(=상대방이 있으면) 절대로 여기로 들어오면 안 됨
             calendar_event = None
-            if not response_sent_to_db and not friend_ids and schedule_info.get("has_schedule_request"):
+            if not response_sent_to_db and not recoordination_needed and not friend_ids and schedule_info.get("has_schedule_request"):
                 if schedule_info.get("date") and schedule_info.get("time"):
                     calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info, original_text=message)
                     if calendar_event:

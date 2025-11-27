@@ -1650,6 +1650,27 @@ class A2AService:
                         message={"text": reject_msg}
                     )
                 from src.chat.chat_repository import ChatRepository
+
+                for pid in all_participants:
+                    # 해당 참여자의 최근 schedule_approval 로그 조회
+                    logs_response = supabase.table('chat_log').select('*').eq(
+                        'user_id', pid
+                    ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1).execute()
+
+                    if logs_response.data:
+                        target_log = logs_response.data[0]
+                        meta = target_log.get('metadata', {})
+
+                        # 같은 일정에 대한 요청인지 확인 (thread_id 일치 여부)
+                        if meta.get('thread_id') == thread_id:
+                            new_meta = {
+                                **meta,
+                                "rejected_by": user_id, # 거절한 사람 기록
+                                "status": "rejected",   # 상태 명시
+                                "needs_approval": False # 더 이상 승인 불가능하게 설정
+                            }
+                            # 로그 업데이트
+                            supabase.table('chat_log').update({'metadata': new_meta}).eq('id', target_log['id']).execute()
                 
                 for pid in all_participants:
                     # 거절한 본인에게는 "거절 처리되었습니다"라고 보내거나 생략 가능
