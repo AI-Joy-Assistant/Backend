@@ -206,6 +206,28 @@ class ChatService:
 
             # --- 재조율 감지 로직 ---
             from config.database import supabase
+            from datetime import datetime, timezone, timedelta
+
+            # 이 시간보다 이전에 일어난 '거절'은 이미 해결된(지나간) 일이므로 무시하기 위함입니다.
+            last_success_time = datetime.min.replace(tzinfo=timezone.utc)
+
+            # 최근 10개 로그 중 'all_approved: True'인 가장 최신 로그 찾기
+            success_check = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(10).execute()
+            if success_check.data:
+                for log in success_check.data:
+                    meta = log.get('metadata', {})
+                    if meta.get('all_approved') is True:
+                        # 문자열 시간을 datetime으로 변환
+                        try:
+                            # created_at 형식에 따라 처리 (Z 또는 +00:00)
+                            t_str = log['created_at'].replace('Z', '+00:00')
+                            log_time = datetime.fromisoformat(t_str)
+                            if log_time > last_success_time:
+                                last_success_time = log_time
+                                # 가장 최신 성공 하나만 찾으면 됨 (정렬되어 있으므로)
+                                break
+                        except Exception:
+                            pass
 
             # 1) 최근 '거절(아니오)' 응답 확인 (schedule_approval_response)
             # limit(1) -> limit(5)로 늘려서 최근 대화 중 거절이 있었는지 확인
@@ -215,6 +237,15 @@ class ChatService:
                 # 최근 5개 로그 중 '거절(approved: false)'이 있고, 그 이후에 '승인(approved: true)'가 없으면 재조율 대상으로 판단
                 for log in rejection_response.data:
                     meta = log.get('metadata', {})
+
+                    # [✅ 추가 2] 거절 시점이 마지막 성공 시점보다 과거라면 무시 (이미 해결된 건)
+                    try:
+                        log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
+                        if log_time < last_success_time:
+                            continue # 건너뜀
+                    except:
+                        pass
+
                     if not meta.get('approved', True) and meta.get('thread_id'):
                         # 거절 이력 발견
                         # 여기서 바로 True로 하지 않고, 이 거절 이후에 성공한 세션이 없는지 체크하면 더 좋지만 일단 간단하게 처리
@@ -234,6 +265,12 @@ class ChatService:
                 sys_reject = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'schedule_rejection').order('created_at', desc=True).limit(3).execute()
                 if sys_reject.data:
                     for log in sys_reject.data:
+                        # [✅ 추가 2] 시간 체크
+                        try:
+                            log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
+                            if log_time < last_success_time: continue
+                        except: pass
+
                         meta = log.get('metadata', {})
                         if meta.get('needs_recoordination') and meta.get('thread_id'):
                             if schedule_info.get("date") or schedule_info.get("time") or message.strip():
@@ -248,6 +285,12 @@ class ChatService:
                     ai_reject = supabase.table('chat_log').select('*').eq('user_id', user_id).eq('message_type', 'ai_response').order('created_at', desc=True).limit(3).execute()
                     if ai_reject.data:
                         for log in ai_reject.data:
+                            # [✅ 추가 2] 시간 체크
+                            try:
+                                log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
+                                if log_time < last_success_time: continue
+                            except: pass
+
                             meta = log.get('metadata', {})
                             # [핵심] 로그 상 'metadata': {'needs_recoordination': true, ...} 가 있는지 확인
                             if meta and meta.get('needs_recoordination') and meta.get('thread_id'):
@@ -257,6 +300,15 @@ class ChatService:
                                     session_ids_for_recoordination = meta.get('session_ids', [])
                                     logger.info(f"재조율 감지 (AI 재조율 요청): thread_id={thread_id_for_recoordination}")
                                     break
+
+            # [FIX] 명시적인 친구 이름이 감지되면 재조율 로직(과거 참여자 복구)을 무시하고 새로운 요청으로 처리
+            # 이렇게 해야 "민서랑 성신조이랑"이라고 했을 때 과거의 "성신조이"만 있는 세션으로 돌아가지 않음
+            if schedule_info.get("friend_names") or schedule_info.get("friend_name"):
+                if recoordination_needed:
+                    logger.info(f"명시적인 친구 이름({schedule_info.get('friend_names') or schedule_info.get('friend_name')})이 감지되어 재조율 모드를 해제합니다.")
+                    recoordination_needed = False
+                    thread_id_for_recoordination = None
+                    session_ids_for_recoordination = []
 
             # [판단] 일정 요청이거나 재조율이면 -> AI 생성 스킵
             is_schedule_related = schedule_info.get("has_schedule_request") or recoordination_needed
@@ -426,6 +478,11 @@ class ChatService:
                             time_str = proposal.get("time", "")
                             confirm_msg = f"✅ 약속 확정: {date_str} {time_str}\n확정하시겠습니까?"
                             ai_response = confirm_msg
+                        elif a2a_result.get("needs_recoordination"):
+                            # [FIX] a2a_service에서 이미 충돌 알림 메시지를 DB에 저장했으므로
+                            # 여기서 또 ai_response로 반환하면 프론트엔드에서 중복으로 표시됨 (폴링 + 로컬 추가)
+                            # 따라서 여기서는 ai_response를 비워서 중복 방지
+                            ai_response = None
 
                 except Exception as e:
                     logger.error(f"A2A 세션 시작 중 오류: {str(e)}")

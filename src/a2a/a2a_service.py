@@ -14,6 +14,8 @@ import httpx
 import datetime as dt
 from datetime import datetime as dt_datetime
 
+from ..chat.chat_repository import ChatRepository
+
 logger = logging.getLogger(__name__)
 
 class A2AService:
@@ -1039,6 +1041,7 @@ class A2AService:
                         "date": date,
                         "time": time,
                         "location": location or None,
+                        "activity": activity,
                         "participants": all_participant_names,
                         "start_time": None,  # 시간 파싱 필요
                         "end_time": None
@@ -1061,13 +1064,69 @@ class A2AService:
                     # 모든 참여자(요청자 포함)에게 승인 요청 메시지 전송
                     all_participant_ids = [r["user_id"] for r in availability_results]
                     for participant_id in all_participant_ids:
-                        await A2AService._send_approval_request_to_chat(
-                            user_id=participant_id,
-                            thread_id=thread_id,
-                            session_ids=[s["session_id"] for s in sessions],
-                            proposal=proposal_data,
-                            initiator_name=initiator_name
-                        )
+                        # 요청자 본인에게는 "조율이 완료되었습니다" 같은 멘트 (선택 사항)
+                        # 여기서는 상대방(수신자)에게 안내하는 것이 목적이므로 구분
+
+                        noti_message = ""
+                        if participant_id != initiator_user_id:
+                            # 상대방에게: "OO님이 ~로 재조율을 요청했습니다."
+                            # [FIX] 문구 수정: "재조율" -> "제안" (상황에 따라 다르게 할 수도 있지만 일단 중립적으로)
+                            # 그리고 중복 전송 방지 로직 추가
+                            
+                            # 1. 문구 수정
+                            action_text = "일정 재조율을 요청했습니다" if reuse_existing else "일정을 제안했습니다"
+                            noti_message = f"🔔 {initiator_name}님이 {date} {time}으로 {action_text}."
+
+                            # 2. 중복 방지: 최근 메시지 확인
+                            from src.chat.chat_repository import ChatRepository
+                            recent_logs = await ChatRepository.get_recent_chat_logs(participant_id, limit=1)
+                            is_duplicate = False
+                            if recent_logs:
+                                last_msg = recent_logs[0]
+                                # 마지막 메시지가 AI 응답이고, 내용이 동일하면 중복으로 간주
+                                if last_msg.get('response_text') == noti_message:
+                                    is_duplicate = True
+                            
+                            if not is_duplicate:
+                                await ChatRepository.create_chat_log(
+                                    user_id=participant_id,
+                                    request_text=None,
+                                    response_text=noti_message,
+                                    friend_id=None,
+                                    message_type="ai_response" # 일반 텍스트 메시지
+                                )
+                            else:
+                                logger.info(f"중복된 알림 메시지라 전송 생략: {participant_id} -> {noti_message}")
+
+                    # [기존 코드] 모든 참여자에게 승인 요청 카드(Proposal Card) 전송
+                    for participant_id in all_participant_ids:
+                        # [FIX] 카드 중복 전송 방지
+                        # 최근 메시지가 동일한 proposal card인지 확인
+                        from src.chat.chat_repository import ChatRepository
+                        recent_logs = await ChatRepository.get_recent_chat_logs(participant_id, limit=1)
+                        is_duplicate_card = False
+                        if recent_logs:
+                            last_msg = recent_logs[0]
+                            # 메시지 타입이 'schedule_approval'이고, 메타데이터의 proposal이 동일하면 중복
+                            if last_msg.get('message_type') == 'schedule_approval':
+                                last_meta = last_msg.get('metadata', {})
+                                last_proposal = last_meta.get('proposal', {})
+                                # 날짜, 시간, 참여자가 같으면 동일한 제안으로 간주
+                                if (last_proposal.get('date') == proposal_data.get('date') and
+                                    last_proposal.get('time') == proposal_data.get('time') and
+                                    set(last_proposal.get('participants', [])) == set(proposal_data.get('participants', []))):
+                                    is_duplicate_card = True
+                        
+                        if not is_duplicate_card:
+                            await A2AService._send_approval_request_to_chat(
+                                user_id=participant_id,
+                                thread_id=thread_id,
+                                session_ids=[s["session_id"] for s in sessions],
+                                proposal=proposal_data,
+                                initiator_name=initiator_name
+                            )
+                        else:
+                            logger.info(f"중복된 제안 카드라 전송 생략: {participant_id}")
                     
                     return {
                         "messages": messages,
@@ -1568,7 +1627,29 @@ class A2AService:
                             from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
                             
                             # 제목 설정
-                            evt_summary = f"{proposal.get('participants', ['미팅'])[0]} 등과 미팅" 
+                            # 1. 제안된 활동 내용 가져오기
+                            act = proposal.get("activity")
+
+                            # 2. 상대방 이름 찾기 (나를 제외한 참여자)
+                            # user_name은 현재 루프의 pid에 해당하는 유저 이름 (즉, 캘린더 주인)
+                            # 따라서 캘린더 주인이 아닌 다른 사람들의 이름을 모아야 함
+                            other_participants = [p for p in proposal.get("participants", []) if p != p_name] # p_name은 위에서 조회한 p_user.name
+
+                            # 만약 이름을 못 찾았다면(리스트가 비었다면) 전체 참여자 중 본인 제외 시도
+                            if not other_participants:
+                                # proposal['participants']가 정확하지 않을 경우를 대비해
+                                # 상대방 이름(target_name 등)을 추론하거나 단순하게 처리
+                                others_str = "상대방"
+                            else:
+                                others_str = ", ".join(other_participants)
+
+                            # 3. 제목 조합: "상대방과 활동내용"
+                            if act:
+                                evt_summary = f"{others_str}와 {act}"
+                            else:
+                                evt_summary = f"{others_str}와 약속"
+
+                                # 장소가 있다면 뒤에 붙임
                             if proposal.get("location"):
                                 evt_summary += f" ({proposal.get('location')})"
 
@@ -1619,6 +1700,17 @@ class A2AService:
                             receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
                             message_type="final",
                             message=final_msg
+                        )
+
+                    from src.chat.chat_repository import ChatRepository
+
+                    for pid in all_participants:
+                        await ChatRepository.create_chat_log(
+                            user_id=pid,
+                            request_text=None,
+                            response_text=final_msg_text, # "모든 참여자의 캘린더에..."
+                            friend_id=None,
+                            message_type="ai_response" # 일반 텍스트 메시지로 저장
                         )
 
                     return {

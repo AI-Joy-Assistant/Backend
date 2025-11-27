@@ -231,14 +231,14 @@ async def approve_schedule(
             raise HTTPException(status_code=400, detail="thread_id 또는 session_ids가 필요합니다.")
         
         # 사용자의 승인/거절 의사를 chat_log에 저장
-        user_response_text = "예" if approved else "아니오"
+        # user_response_text = "예" if approved else "아니오"
         try:
             await ChatRepository.create_chat_log(
                 user_id=current_user_id,
-                request_text=user_response_text,
+                request_text=None,  # [✅ 수정] "예" 대신 None으로 설정
                 response_text=None,
                 friend_id=None,
-                message_type="approval_response",
+                message_type="approval_response", # 타입은 유지 (로직 처리를 위해)
                 metadata={
                     "approved": approved,
                     "thread_id": thread_id,

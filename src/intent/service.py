@@ -15,6 +15,13 @@ class IntentService:
     """
 
     @staticmethod
+    def _has_batchim(char: str) -> bool:
+        """한글 글자에 받침이 있는지 확인"""
+        if not char or not ('가' <= char <= '힣'):
+            return False
+        return (ord(char) - ord('가')) % 28 > 0
+
+    @staticmethod
     def _heuristic_parse(message: str) -> Dict[str, Any]:
         """
         LLM 실패 시를 대비한 강화된 휴리스틱 파서.
@@ -35,48 +42,74 @@ class IntentService:
 
         friend_names = []
         # 여러 친구 이름 추출 (쉼표, "이랑", "랑", "와" 등으로 구분)
-        # 예: "민서, 규민이랑", "민서와 규민", "민서랑 규민이랑"
         
-        # 먼저 쉼표로 구분된 이름들 추출
-        comma_pattern = r"([가-힣A-Za-z]{2,})\s*[,，]\s*([가-힣A-Za-z]{2,})"
+        # 1. 쉼표로 구분된 이름들 추출
+        comma_pattern = r"([가-힣A-Za-z]{2,}?)\s*[,，]\s*([가-힣A-Za-z]{2,}?)(?:\s|$)"
         comma_match = re.search(comma_pattern, text)
         if comma_match:
             friend_names.extend([comma_match.group(1).strip(), comma_match.group(2).strip()])
         
-        # "이랑", "랑", "와", "과" 등으로 연결된 이름들 추출
+        # 2. "이랑", "랑", "와", "과" 등으로 연결된 이름들 추출 (Non-greedy)
+        # 예: "민서랑 규민이랑", "민서와 규민"
         connector_patterns = [
-            r"([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,})",  # "민서랑 규민"
-            r"([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,})\s*(이랑|랑|와|과|하고)",  # "민서랑 규민이랑"
+            # 3명 이상 또는 2명 + 끝맺음 (예: A랑 B랑 C랑, A랑 B랑)
+            r"([가-힣A-Za-z]{2,}?)\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,}?)\s*(이랑|랑|와|과|하고)",
+            # 2명 (예: A랑 B)
+            r"([가-힣A-Za-z]{2,}?)\s*(이랑|랑|와|과|하고)\s*([가-힣A-Za-z]{2,}?)(?:\s|$)",
         ]
         
         for pattern in connector_patterns:
             m = re.search(pattern, text)
             if m:
-                names = [m.group(1).strip(), m.group(3).strip()]
-                friend_names.extend([n for n in names if len(n) >= 2 and n not in ["내일", "오늘", "모레", "다음", "이번"]])
+                # 그룹에서 이름만 추출 (홀수 인덱스)
+                # group(1)=이름1, group(2)=조사1, group(3)=이름2, group(4)=조사2...
+                extracted = []
+                # 정규식 구조상 group(1), group(3)이 이름
+                if m.group(1): extracted.append(m.group(1).strip())
+                if m.group(3): extracted.append(m.group(3).strip())
+                
+                # 조사와 받침 일치 여부 확인으로 정제 (선택적)
+                # 예: "성신조이랑" -> "성신조" + "이랑" (X, 조는 받침 없음) -> "성신조이" + "랑" (O)
+                refined_names = []
+                for i, name in enumerate(extracted):
+                    # 다음 조사가 무엇인지 확인
+                    particle_idx = (i * 2) + 2 # 2, 4...
+                    if particle_idx <= m.lastindex:
+                        particle = m.group(particle_idx)
+                        if particle == "이랑" and not IntentService._has_batchim(name[-1]):
+                            # "이랑"이 왔는데 앞글자에 받침이 없으면, "이"는 이름의 일부일 확률 높음
+                            # 하지만 이미 regex가 "이랑"을 먹었으므로, name에는 "이"가 없음.
+                            # 즉, 원래 텍스트에서 "이"가 분리된 것.
+                            # 그러나 regex group은 "이랑"을 통째로 잡음.
+                            # 따라서 name + "이" 가 원래 의도된 이름일 수 있음.
+                            # 예: "성신조" + "이랑" -> "성신조이" + "랑"
+                            refined_names.append(name + "이")
+                        else:
+                            refined_names.append(name)
+                    else:
+                        refined_names.append(name)
+
+                friend_names.extend([n for n in refined_names if len(n) >= 2 and n not in ["내일", "오늘", "모레", "다음", "이번"]])
                 if friend_names:
                     break
         
-        # 단일 친구 이름 추출 (여러 명이 없을 경우)
+        # 3. 단일 친구 이름 추출 (여러 명이 없을 경우)
         if not friend_names:
-            # 더 정확한 패턴: 이름 뒤에 오는 접미사를 명확히 구분
-            # "성신조이랑" 같은 경우 "성신조이" 전체를 매칭하도록 수정
             single_patterns = [
-                r"([가-힣A-Za-z]{2,}이)\s*(랑|와|과|하고)",  # "성신조이랑", "민서이랑" (이름이 "이"로 끝나는 경우)
-                r"([가-힣A-Za-z]{2,})\s*(씨|님|이랑|랑|하고|과|와|와\s*함께|와\s*같이)",  # "민서랑", "민서와 함께"
-                r"([가-힣A-Za-z]{2,})\s*하고\s*",  # "민서하고"
-                r"([가-힣A-Za-z]{2,})\s*와\s*",  # "민서와"
-                r"([가-힣A-Za-z]{2,})\s*랑\s*",  # "민서랑"
-                r"([가-힣A-Za-z]{2,})\s*과\s*",  # "민서과"
-                r"([가-힣A-Za-z]{2,})\s*님",  # "민서님"
-                r"([가-힣A-Za-z]{2,})\s*씨",  # "민서씨"
+                r"([가-힣A-Za-z]{2,}?)\s*(이랑|랑|와|과|하고|와\s*함께|와\s*같이)(?:\s|$)",
+                r"([가-힣A-Za-z]{2,}?)\s*(씨|님)(?:\s|$)",
             ]
             
             for pattern in single_patterns:
                 m = re.search(pattern, text)
                 if m:
                     name = m.group(1).strip()
-                    # 최소 2글자 이상이고, 일반 단어가 아닌 경우만 추가
+                    particle = m.group(2) if m.lastindex >= 2 else ""
+                    
+                    # 받침 보정
+                    if particle == "이랑" and not IntentService._has_batchim(name[-1]):
+                         name = name + "이"
+                    
                     if len(name) >= 2 and name not in ["내일", "오늘", "모레", "다음", "이번", "이번주", "다음주"]:
                         friend_names.append(name)
                         break
