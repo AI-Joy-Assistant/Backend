@@ -15,6 +15,7 @@ import datetime as dt
 from datetime import datetime as dt_datetime
 
 from ..chat.chat_repository import ChatRepository
+from src.chat.chat_openai_service import OpenAIService
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +147,18 @@ class A2AService:
         
         messages_log = []
         
+        openai_service = OpenAIService()
+
         # 단계 1: 내 캘린더 확인 중
+        # [LLM]
+        text_msg1 = await openai_service.generate_a2a_message(
+            agent_name=f"{initiator_name}의 비서",
+            receiver_name=target_name,
+            context="내 주인의 캘린더를 확인하려고 함",
+            tone="energetic"
+        )
         msg1 = {
-            "text": f"내 캘린더 확인 중...",
+            "text": text_msg1,
             "step": 1
         }
         await A2ARepository.add_message(
@@ -177,8 +187,15 @@ class A2AService:
         await asyncio.sleep(0.5)
         
         # 단계 3: 상대 에이전트가 일정 확인 중
+        # [LLM]
+        text_msg3 = await openai_service.generate_a2a_message(
+            agent_name=f"{target_name}의 비서",
+            receiver_name=initiator_name,
+            context=f"{initiator_name}의 요청을 받고 일정을 확인하는 중",
+            tone="polite"
+        )
         msg3_checking = {
-            "text": f"{initiator_name}님의 일정을 확인하고 있습니다.",
+            "text": text_msg3,
             "step": 3
         }
         await A2ARepository.add_message(
@@ -192,8 +209,15 @@ class A2AService:
         await asyncio.sleep(0.5)
         
         # 단계 4: 상대 에이전트가 일정 확인 완료
+        # [LLM]
+        text_msg4 = await openai_service.generate_a2a_message(
+            agent_name=f"{target_name}의 비서",
+            receiver_name=initiator_name,
+            context="일정 확인을 완료했음",
+            tone="confidence"
+        )
         msg4_done = {
-            "text": f"확인 완료했습니다. {initiator_name}님의 캘린더를 확인했습니다.",
+            "text": text_msg4,
             "step": 4
         }
         await A2ARepository.add_message(
@@ -299,8 +323,15 @@ class A2AService:
             
             if not slots:
                 # 공통 시간이 없는 경우 - 각자의 차선 시간 제안
+                # [LLM]
+                text_no_slot = await openai_service.generate_a2a_message(
+                    agent_name=f"{initiator_name}의 비서",
+                    receiver_name=target_name,
+                    context="공통으로 비는 시간이 없어서 난감함",
+                    tone="apologetic"
+                )
                 msg_no_slot = {
-                    "text": "공통으로 비는 시간을 찾지 못했습니다. 각자의 가능한 시간을 확인 중...",
+                    "text": text_no_slot,
                     "step": 5
                 }
                 await A2ARepository.add_message(
@@ -383,8 +414,15 @@ class A2AService:
                     await asyncio.sleep(0.5)
                 
                 # 재조율 요청 메시지
+                # [LLM]
+                text_reco = await openai_service.generate_a2a_message(
+                    agent_name=f"{initiator_name}의 비서",
+                    receiver_name=target_name,
+                    context="공통 시간이 없어서 각자 가능한 시간을 제안했으니 사용자에게 확인을 요청하겠다고 알림",
+                    tone="polite"
+                )
                 msg_recoordination = {
-                    "text": "공통 시간이 없어 각자의 가능한 시간을 제안했습니다. 사용자에게 확인을 요청하겠습니다.",
+                    "text": text_reco,
                     "step": 6
                 }
                 await A2ARepository.add_message(
@@ -416,8 +454,16 @@ class A2AService:
             
             # 단계 5: 공통 시간 제안
             time_str_detail = start_kst.strftime("%Y년 %m월 %d일 %H시 %M분")
+            
+            # [LLM]
+            text_proposal = await openai_service.generate_a2a_message(
+                agent_name=f"{initiator_name}의 비서",
+                receiver_name=target_name,
+                context=f"공통으로 비는 시간을 찾았음: {time_str_detail}",
+                tone="happy"
+            )
             msg5_proposal = {
-                "text": f"공통으로 비는 시간을 찾았습니다: {time_str_detail}",
+                "text": f"{text_proposal} ({time_str_detail})", # 시간 정보는 명확히 덧붙임
                 "step": 5,
                 "proposed_time": slot_start
             }
@@ -432,8 +478,15 @@ class A2AService:
             await asyncio.sleep(0.5)
             
             # 단계 6: 상대 에이전트가 시간 확인
+            # [LLM]
+            text_confirm = await openai_service.generate_a2a_message(
+                agent_name=f"{target_name}의 비서",
+                receiver_name=initiator_name,
+                context=f"{time_str_detail}에 만나는 것으로 확인하고 동의함",
+                tone="polite"
+            )
             msg6_confirm = {
-                "text": f"{time_str_detail}에 만나는 것으로 확인했습니다.",
+                "text": text_confirm,
                 "step": 6
             }
             await A2ARepository.add_message(
@@ -448,7 +501,7 @@ class A2AService:
             
             # 단계 7: 사용자 승인 대기 (가등록 전)
             msg7_waiting = {
-                "text": "사용자 승인을 기다리는 중...",
+                "text": "사용자 승인을 기다리는 중...", # 시스템 메시지는 그대로 유지하거나 간단히 변경
                 "step": 7
             }
             await A2ARepository.add_message(
@@ -850,6 +903,29 @@ class A2AService:
             
             # 3) 다중 사용자 일정 조율 시뮬레이션 실행
             # 기존 세션을 재사용하는 경우, 기존 메시지에 이어서 추가
+            
+            # [FIX] 재조율 시(reuse_existing=True) location이 None이면 기존 세션의 location 사용
+            final_location = location
+            if reuse_existing and not final_location:
+                # 첫 번째 세션의 place_pref에서 location 확인
+                if sessions:
+                    first_session_id = sessions[0]["session_id"]
+                    # DB에서 다시 조회하거나, 위에서 가져온 existing_session_map 활용
+                    # 여기서는 간단히 existing_session_map이 있다고 가정하고 처리 (위에서 조회함)
+                    # 하지만 sessions 리스트는 새로 구성되었으므로, DB 조회가 안전하나 성능상...
+                    # 위 로직에서 place_pref를 업데이트 했으므로, 업데이트된 값을 써야 함.
+                    # sessions 루프에서 place_pref를 저장해두는 것이 좋음.
+                    pass 
+
+            # 위에서 place_pref를 업데이트 할 때 location이 없으면 기존 값을 유지했음.
+            # 따라서 sessions[0]에 해당하는 세션의 place_pref를 조회하면 됨.
+            # 하지만 여기서는 인자로 넘겨야 함.
+            
+            # 간단히: location이 없으면, existing_session_map의 첫 번째 값에서 가져옴
+            if not final_location and existing_session_map:
+                first_existing = list(existing_session_map.values())[0]
+                final_location = first_existing.get("place_pref", {}).get("location")
+
             result = await A2AService._execute_multi_user_coordination(
                 thread_id=thread_id,
                 sessions=sessions,
@@ -857,7 +933,7 @@ class A2AService:
                 initiator_name=initiator_name,
                 date=date,
                 time=time,
-                location=location,
+                location=final_location, # 수정된 location 전달
                 activity=activity,
                 duration_minutes=duration_minutes,
                 reuse_existing=reuse_existing  # 기존 세션 재사용 여부 전달
@@ -904,14 +980,19 @@ class A2AService:
         각 참여자의 Agent가 캘린더를 확인하고 일정을 조율합니다.
         """
         messages = []
+        openai_service = OpenAIService()
         
         try:
             # 기존 세션 재사용 시, 기존 메시지가 있으면 건너뛰고 새 요청만 추가
             if not reuse_existing:
                 # 1) 초기 메시지: 요청자 Agent가 모든 참여자에게 알림 (새 세션인 경우만)
-                request_text = f"{date or '일정'} {time or ''}에 {initiator_name}님이 약속을 요청했습니다."
-                if activity:
-                    request_text += f" 활동: {activity}"
+                # [LLM]
+                text_request = await openai_service.generate_a2a_message(
+                    agent_name=f"{initiator_name}의 비서",
+                    receiver_name="모두",
+                    context=f"{initiator_name}님이 {date or '일정'} {time or ''}에 약속을 요청함 (활동: {activity or '없음'})",
+                    tone="energetic"
+                )
                 
                 for session_info in sessions:
                     await A2ARepository.add_message(
@@ -919,12 +1000,12 @@ class A2AService:
                         sender_user_id=initiator_user_id,
                         receiver_user_id=session_info["target_id"],
                         message_type="agent_query",
-                        message={"text": request_text}
+                        message={"text": text_request}
                     )
                     messages.append({
                         "session_id": session_info["session_id"],
                         "sender": f"{initiator_name}봇",
-                        "text": request_text
+                        "text": text_request
                     })
             else:
                 # 기존 세션 재사용 시, 새로운 요청 메시지만 추가
@@ -950,18 +1031,24 @@ class A2AService:
             availability_results = []
             
             # 먼저 요청자의 일정 확인
-            initiator_checking_msg = f"{initiator_name}님의 일정을 확인 중입니다..."
+            # [LLM]
+            text_init_check = await openai_service.generate_a2a_message(
+                agent_name=f"{initiator_name}의 비서",
+                receiver_name="모두",
+                context=f"먼저 {initiator_name}님의 일정을 확인해보겠다고 알림",
+                tone="polite"
+            )
             for session_info in sessions:
                 await A2ARepository.add_message(
                     session_id=session_info["session_id"],
                     sender_user_id=initiator_user_id,
                     receiver_user_id=session_info["target_id"],
                     message_type="agent_query",
-                    message={"text": initiator_checking_msg, "step": 1}
+                    message={"text": text_init_check, "step": 1}
                 )
             messages.append({
                 "sender": f"{initiator_name}봇",
-                "text": initiator_checking_msg
+                "text": text_init_check
             })
             
             # 요청자 캘린더 확인
@@ -987,18 +1074,24 @@ class A2AService:
                 target_name = session_info["target_name"]
                 
                 # "사용자의 일정을 확인 중입니다..." 메시지
-                checking_msg = f"{target_name}님의 일정을 확인 중입니다..."
+                # [LLM]
+                text_target_check = await openai_service.generate_a2a_message(
+                    agent_name=f"{target_name}의 비서",
+                    receiver_name=initiator_name,
+                    context=f"{target_name}님의 일정을 확인해보겠다고 알림",
+                    tone="polite"
+                )
                 await A2ARepository.add_message(
                     session_id=session_info["session_id"],
                     sender_user_id=target_id,
                     receiver_user_id=initiator_user_id,
                     message_type="agent_query",
-                    message={"text": checking_msg, "step": 2}
+                    message={"text": text_target_check, "step": 2}
                 )
                 messages.append({
                     "session_id": session_info["session_id"],
                     "sender": f"{target_name}봇",
-                    "text": checking_msg
+                    "text": text_target_check
                 })
                 
                 # 캘린더 확인
@@ -1025,14 +1118,20 @@ class A2AService:
                 if all_available:
                     # 모든 참여자(요청자 포함)가 가능하면 확정 제안
                     # 공통 시간 확인 완료 메시지
-                    common_time_msg = f" 모든 참여자의 일정을 확인했습니다. {date} {time}에 모두 가능합니다."
+                    # [LLM]
+                    text_common = await openai_service.generate_a2a_message(
+                        agent_name=f"{initiator_name}의 비서",
+                        receiver_name="모두",
+                        context=f"모든 참여자의 일정을 확인했고 {date} {time}에 모두 가능하다고 알림",
+                        tone="happy"
+                    )
                     for session_info in sessions:
                         await A2ARepository.add_message(
                             session_id=session_info["session_id"],
                             sender_user_id=initiator_user_id,
                             receiver_user_id=session_info["target_id"],
                             message_type="agent_reply",
-                            message={"text": common_time_msg, "step": 3}
+                            message={"text": text_common, "step": 3}
                         )
                     
                     # 참여자 목록 (요청자 포함)
@@ -1147,7 +1246,13 @@ class A2AService:
 
                         # 내 자신(initiator)이 안 되는 경우
                         if target_id == initiator_user_id:
-                            reject_text = f"저(본인)에게 해당 시간에 {len(conflicts)}개의 일정이 있어 불가능합니다."
+                            # [LLM]
+                            text_reject_me = await openai_service.generate_a2a_message(
+                                agent_name=f"{initiator_name}의 비서",
+                                receiver_name="모두",
+                                context=f"내 주인({initiator_name})에게 해당 시간에 {len(conflicts)}개의 일정이 있어 불가능하다고 알림",
+                                tone="apologetic"
+                            )
                             # A2A 메시지 (내 비서가 나에게/상대에게 알림)
                             for session_info in sessions:
                                 await A2ARepository.add_message(
@@ -1155,12 +1260,25 @@ class A2AService:
                                     sender_user_id=initiator_user_id,
                                     receiver_user_id=session_info["target_id"],
                                     message_type="agent_reply",
-                                    message={"text": reject_text, "step": 3}
+                                    message={"text": text_reject_me, "step": 3}
                                 )
                         else:
                             # 상대방(target)이 안 되는 경우 -> 상대방 봇이 말해야 함
-                            reject_text = f"{target_name}님이 해당 시간에 일정이 있어 재조율이 필요합니다. ({len(conflicts)}개 일정 충돌)"
-                            reco_text = "다른 시간을 입력해주시면 재조율하겠습니다."
+                            # [LLM]
+                            text_reject_target = await openai_service.generate_a2a_message(
+                                agent_name=f"{target_name}의 비서",
+                                receiver_name=initiator_name,
+                                context=f"{target_name}님이 해당 시간에 일정이 있어 불가능하다고 알림 ({len(conflicts)}개 충돌)",
+                                tone="apologetic"
+                            )
+                            
+                            # [LLM]
+                            text_reco_target = await openai_service.generate_a2a_message(
+                                agent_name=f"{target_name}의 비서",
+                                receiver_name=initiator_name,
+                                context="다른 시간을 제안해주시면 다시 조율하겠다고 정중히 요청",
+                                tone="polite"
+                            )
 
                             # 1. 상대방 봇 -> 나(initiator)에게 거절 메시지 전송
                             # 해당 상대방과의 세션 찾기
@@ -1172,12 +1290,12 @@ class A2AService:
                                     sender_user_id=target_id,     # [수정] 보내는 사람: 상대방
                                     receiver_user_id=initiator_user_id, # 받는 사람: 나
                                     message_type="agent_reply",
-                                    message={"text": reject_text, "step": 3}
+                                    message={"text": text_reject_target, "step": 3}
                                 )
                                 messages.append({
                                     "session_id": target_session["session_id"],
                                     "sender": f"{target_name}봇",
-                                    "text": reject_text
+                                    "text": text_reject_target
                                 })
 
                                 # 재조율 요청 멘트
@@ -1186,7 +1304,7 @@ class A2AService:
                                     sender_user_id=target_id,     # [수정] 보내는 사람: 상대방
                                     receiver_user_id=initiator_user_id,
                                     message_type="proposal", # proposal 타입으로 변경하여 강조
-                                    message={"text": reco_text, "step": 4}
+                                    message={"text": text_reco_target, "step": 4}
                                 )
 
                     # [추가] 메인 Chat 화면에 "재조율 필요" 알림 보내기

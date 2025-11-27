@@ -169,3 +169,38 @@ JSON 형태로 다음 정보를 반환하세요:
                 "has_schedule_request": False,
                 "error": str(e)
             }
+    async def generate_a2a_message(self, agent_name: str, receiver_name: str, context: str, tone: str = "polite") -> str:
+        """A2A 에이전트 대화 메시지 생성"""
+        try:
+            system_prompt = f"""당신은 '{agent_name}'이라는 이름의 AI 비서입니다. 
+상대방('{receiver_name}')의 AI 비서와 대화하며 일정을 조율하고 있습니다.
+
+상황: {context}
+톤앤매너: {tone} (친절하고 정중하게, 하지만 간결하게)
+
+규칙:
+1. 30자 이내로 짧게 말하세요.
+2. 상대방의 이름을 부르지 않아도 됩니다.
+3. 이모지를 적절히 사용하세요 (1~2개).
+4. 문맥에 맞는 자연스러운 한국어로 말하세요.
+5. '내 캘린더 확인 중...' 같은 기계적인 말 대신 '잠시만요, 일정 확인해볼게요!' 같이 대화하듯 말하세요.
+"""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "이 상황에 맞는 한 마디를 해주세요."}
+            ]
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=100,
+                temperature=0.8
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"A2A 메시지 생성 실패: {str(e)}")
+            # 실패 시 기본 메시지 반환 (상황에 따라 다를 수 있지만 안전하게)
+            return "일정을 확인하고 있습니다."

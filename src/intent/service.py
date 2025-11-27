@@ -77,19 +77,22 @@ class IntentService:
                     if particle_idx <= m.lastindex:
                         particle = m.group(particle_idx)
                         if particle == "이랑" and not IntentService._has_batchim(name[-1]):
-                            # "이랑"이 왔는데 앞글자에 받침이 없으면, "이"는 이름의 일부일 확률 높음
-                            # 하지만 이미 regex가 "이랑"을 먹었으므로, name에는 "이"가 없음.
-                            # 즉, 원래 텍스트에서 "이"가 분리된 것.
-                            # 그러나 regex group은 "이랑"을 통째로 잡음.
-                            # 따라서 name + "이" 가 원래 의도된 이름일 수 있음.
-                            # 예: "성신조" + "이랑" -> "성신조이" + "랑"
                             refined_names.append(name + "이")
                         else:
                             refined_names.append(name)
                     else:
                         refined_names.append(name)
 
-                friend_names.extend([n for n in refined_names if len(n) >= 2 and n not in ["내일", "오늘", "모레", "다음", "이번"]])
+                # [FIX] 장소 키워드나 '에서'로 끝나는 단어는 이름에서 제외
+                valid_names = []
+                for n in refined_names:
+                    if len(n) < 2: continue
+                    if n in ["내일", "오늘", "모레", "다음", "이번"]: continue
+                    if n.endswith("에서"): continue # '망원에서' 같은 경우 제외
+                    if any(loc in n for loc in ["카페", "식당", "공원", "영화관"]): continue
+                    valid_names.append(n)
+
+                friend_names.extend(valid_names)
                 if friend_names:
                     break
         
@@ -109,6 +112,9 @@ class IntentService:
                     # 받침 보정
                     if particle == "이랑" and not IntentService._has_batchim(name[-1]):
                          name = name + "이"
+                    
+                    # [FIX] 장소 키워드나 '에서'로 끝나는 단어는 이름에서 제외
+                    if name.endswith("에서"): continue
                     
                     if len(name) >= 2 and name not in ["내일", "오늘", "모레", "다음", "이번", "이번주", "다음주"]:
                         friend_names.append(name)
@@ -211,11 +217,29 @@ class IntentService:
 
         # 여러 친구 이름 처리
         friend_names_list = raw.get("friend_names") or heuristic_result.get("friend_names")
+        
+        # [FIX] 최종 결과에서도 장소 키워드 필터링 (LLM이 잘못 반환했을 경우 대비)
+        if friend_names_list:
+            filtered_list = []
+            for n in friend_names_list:
+                if n.endswith("에서"): continue
+                if any(loc in n for loc in ["카페", "식당", "공원", "영화관", "학교"]): continue
+                filtered_list.append(n)
+            friend_names_list = filtered_list
+
         if friend_names_list and len(friend_names_list) > 1:
             # 여러 명인 경우
             friend_name = friend_names_list[0]  # 첫 번째 이름을 대표로
         elif not friend_name:
             friend_name = raw.get("friend_name") or heuristic_result.get("friend_name")
+        
+        # 단일 이름도 필터링
+        if friend_name:
+            if friend_name.endswith("에서") or any(loc in friend_name for loc in ["카페", "식당", "공원", "영화관", "학교"]):
+                friend_name = None
+                # 리스트에 다른 이름이 있으면 그걸로 대체
+                if friend_names_list:
+                    friend_name = friend_names_list[0]
         
         # 최종 병합 (빈 필드는 휴리스틱으로 채움)
         final_result = {
