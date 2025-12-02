@@ -72,6 +72,38 @@ async def get_a2a_session(
         if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
             raise HTTPException(status_code=403, detail="세션 접근 권한이 없습니다.")
         
+        # Details 구성
+        # 1. 메시지 조회하여 Process 구성
+        messages = await A2ARepository.get_session_messages(session_id)
+        process = []
+        for msg in messages:
+            step = msg.get("message", {}).get("step")
+            text = msg.get("message", {}).get("text")
+            if step and text:
+                process.append({"step": str(step), "description": text})
+        
+        # 2. 기본 정보
+        place_pref = session.get("place_pref", {}) or {}
+        summary = place_pref.get("summary") or session.get("summary")
+        
+        # Initiator 이름 (여기서는 간단히 DB 조회 없이 ID로 처리하거나, 필요시 조회)
+        # 성능상 이름 조회는 생략하거나 캐시된 정보 사용 권장. 
+        # 여기서는 간단히 처리.
+        initiator_name = "알 수 없음" # 클라이언트에서 처리하거나 별도 조회 필요
+        
+        details = {
+            "proposer": initiator_name, # 클라이언트에서 목록의 정보를 활용하거나 별도 API로 보완
+            "proposerAvatar": "https://via.placeholder.com/150",
+            "purpose": summary or "일정 조율",
+            "proposedTime": place_pref.get("time") or "미정",
+            "location": place_pref.get("location") or "미정",
+            "process": process
+        }
+
+        session["details"] = details
+        session["title"] = summary if summary else "일정 조율"
+        session["summary"] = summary
+
         return A2ASessionResponse(**session)
     except HTTPException:
         raise
@@ -210,8 +242,46 @@ async def get_user_sessions(
         # 5. 최신순 정렬
         grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
+        # 6. 추가 정보(title, details) 구성
+        final_sessions = []
+        for session in grouped_sessions:
+            # 기본 정보
+            place_pref = session.get("place_pref", {}) or {}
+            summary = place_pref.get("summary") or session.get("summary")
+            
+            # Title
+            p_names = session.get("participant_names", [])
+            title = summary if summary else f"{', '.join(p_names)}와의 약속"
+            
+            # Details 구성
+            # Initiator 이름 찾기
+            initiator_id = session.get("initiator_user_id")
+            initiator_name = "알 수 없음"
+            if initiator_id in user_names_map:
+                initiator_name = user_names_map[initiator_id]
+            
+            # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
+            # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
+            # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 기본 구조만 잡음
+            process = [] 
+            
+            details = {
+                "proposer": initiator_name,
+                "proposerAvatar": "https://via.placeholder.com/150", # TODO: 실제 아바타 URL
+                "purpose": summary or "일정 조율",
+                "proposedTime": place_pref.get("time") or "미정",
+                "location": place_pref.get("location") or "미정",
+                "process": process
+            }
+
+            session["title"] = title
+            session["summary"] = summary
+            session["details"] = details
+            
+            final_sessions.append(A2ASessionResponse(**session))
+
         return {
-            "sessions": [A2ASessionResponse(**session) for session in grouped_sessions]
+            "sessions": final_sessions
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 목록 조회 실패: {str(e)}")
@@ -271,3 +341,71 @@ async def delete_chat_room(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"채팅방 삭제 오류: {str(e)}")
+
+@router.post("/session/{session_id}/approve", summary="A2A 세션 일정 승인")
+async def approve_session(
+    session_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    제안된 일정을 승인합니다.
+    - 캘린더에 일정 등록
+    - 세션 상태를 completed로 변경
+    - 참여자들에게 알림 전송
+    """
+    try:
+        # 권한 확인 및 세션 조회
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
+            raise HTTPException(status_code=403, detail="승인 권한이 없습니다.")
+
+        # 승인 로직 실행 (Service에 위임)
+        result = await A2AService.approve_session(session_id, current_user_id)
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"일정 승인 실패: {str(e)}")
+
+@router.post("/session/{session_id}/reschedule", summary="A2A 세션 재조율 요청")
+async def reschedule_session(
+    session_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    일정 재조율을 요청합니다.
+    - 새로운 요구사항(reason, preferred_time 등)을 반영하여 협상 재개
+    """
+    try:
+        body = await request.json()
+        reason = body.get("reason")
+        preferred_time = body.get("preferred_time")
+        manual_input = body.get("manual_input")
+
+        # 권한 확인 및 세션 조회
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
+            raise HTTPException(status_code=403, detail="재조율 권한이 없습니다.")
+
+        # 재조율 로직 실행 (Service에 위임)
+        result = await A2AService.reschedule_session(
+            session_id=session_id,
+            user_id=current_user_id,
+            reason=reason,
+            preferred_time=preferred_time,
+            manual_input=manual_input
+        )
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"재조율 요청 실패: {str(e)}")
