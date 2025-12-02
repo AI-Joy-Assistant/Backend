@@ -118,7 +118,11 @@ class FriendsRepository:
         """친구 삭제"""
         try:
             # 양방향 친구 관계를 비활성화 (status = False)
-            self.supabase.table('friend_list').update({"status": False, "updated_at": datetime.now().isoformat()}).or_(f'user_id.eq.{user_id},friend_id.eq.{friend_id}').or_(f'user_id.eq.{friend_id},friend_id.eq.{user_id}').execute()
+            # PostgREST syntax for OR with AND groups: or=(and(user_id.eq.A,friend_id.eq.B),and(user_id.eq.B,friend_id.eq.A))
+            self.supabase.table('friend_list').update({
+                "status": False, 
+                "updated_at": datetime.now().isoformat()
+            }).or_(f"and(user_id.eq.{user_id},friend_id.eq.{friend_id}),and(user_id.eq.{friend_id},friend_id.eq.{user_id})").execute()
             
             return {"success": True, "message": "친구를 삭제했습니다."}
         except Exception as e:

@@ -135,6 +135,7 @@ class AuthRepository:
         refresh_token: Optional[str] = None,
         profile_image: Optional[str] = None,
         name: Optional[str] = None,
+        handle: Optional[str] = None,
         token_expiry: Optional[str] = None
     ) -> None:
         """Google 사용자 정보 업데이트"""
@@ -155,6 +156,9 @@ class AuthRepository:
             if name is not None:
                 update_data['name'] = name
                 print(f"✅ name 추가됨: {name}")
+            if handle is not None:
+                update_data['handle'] = handle
+                print(f"✅ handle 추가됨: {handle}")
             if token_expiry is not None:
                 update_data['token_expiry'] = token_expiry
                 print(f"✅ token_expiry 업데이트: {token_expiry}")

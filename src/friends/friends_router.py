@@ -78,10 +78,13 @@ async def delete_friend(
     """친구를 삭제합니다."""
     result = await FriendsService().delete_friend(current_user_id, friend_id)
     
-    return JSONResponse(
-        status_code=result["status"],
-        content={"message": result["message"]}
-    )
+    if result["status"] == 200:
+        return JSONResponse(
+            status_code=result["status"],
+            content={"message": result["message"]}
+        )
+    else:
+        raise HTTPException(status_code=result["status"], detail=result["error"])
 
 @router.post("/add", summary="이메일로 친구 추가")
 async def add_friend_by_email(

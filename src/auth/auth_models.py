@@ -7,6 +7,7 @@ import uuid
 class UserBase(BaseModel):
     email: EmailStr
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
 
 class UserCreate(UserBase):
     password: Optional[str] = None
@@ -18,6 +19,7 @@ class UserLogin(BaseModel):
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     profile_image: Optional[str] = None
@@ -51,6 +53,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     profile_image: Optional[str] = None
     created_at: Optional[datetime] = None
 
@@ -58,10 +61,16 @@ class UserProfileResponse(BaseModel):
     id: uuid.UUID
     email: str
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     profile_image: Optional[str] = None
     status: Optional[bool] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
 class MessageResponse(BaseModel):
-    message: str 
+    message: str
+
+class UserRegisterRequest(BaseModel):
+    register_token: str
+    name: str
+    handle: str 
