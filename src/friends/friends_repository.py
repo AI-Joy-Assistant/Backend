@@ -8,12 +8,28 @@ class FriendsRepository:
     def __init__(self):
         self.supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
     
-    async def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        """이메일로 사용자 조회"""
+    async def get_user_by_email_or_handle(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """이메일 또는 handle로 사용자 조회"""
         try:
-            response = self.supabase.table('user').select('*').eq('email', email).execute()
+            print(f"🔍 사용자 검색 시작: identifier='{identifier}'")
+            
+            # 먼저 이메일로 검색
+            print(f"📧 이메일로 검색 중...")
+            response = self.supabase.table('user').select('*').eq('email', identifier).execute()
+            print(f"📧 이메일 검색 결과: {len(response.data) if response.data else 0}개")
             if response.data:
+                print(f"✅ 이메일로 사용자 찾음: {response.data[0].get('name')}")
                 return response.data[0]
+            
+            # 이메일로 찾지 못하면 handle로 검색
+            print(f"🏷️ handle로 검색 중...")
+            response = self.supabase.table('user').select('*').eq('handle', identifier).execute()
+            print(f"🏷️ handle 검색 결과: {len(response.data) if response.data else 0}개")
+            if response.data:
+                print(f"✅ handle로 사용자 찾음: {response.data[0].get('name')}")
+                return response.data[0]
+            
+            print(f"❌ 사용자를 찾을 수 없음 (이메일/handle 모두 실패)")
             return None
         except Exception as e:
             print(f"사용자 조회 오류: {e}")

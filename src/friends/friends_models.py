@@ -22,7 +22,7 @@ class Friend(BaseModel):
     created_at: datetime
 
 class AddFriendRequest(BaseModel):
-    email: EmailStr
+    email: str  # 이메일 또는 handle 모두 허용
 
 class FriendRequestResponse(BaseModel):
     id: str
