@@ -7,26 +7,34 @@ class FriendsService:
         self.repository = FriendsRepository()
     
     async def add_friend_by_email(self, current_user_id: str, email: str) -> Dict[str, Any]:
-        """이메일로 친구 추가"""
+        """이메일 또는 handle로 친구 추가"""
         try:
-            # 이메일로 사용자 찾기
-            user = await self.repository.get_user_by_email(email)
+            print(f"📧 친구 추가 요청: user_id={current_user_id}, identifier={email}")
+            
+            # 이메일 또는 handle로 사용자 찾기
+            user = await self.repository.get_user_by_email_or_handle(email)
+            print(f"🔍 사용자 조회 결과: {user}")
+            
             if not user:
+                print(f"❌ 사용자를 찾을 수 없음: {email}")
                 return {
                     "status": 404,
-                    "error": "해당 이메일의 사용자를 찾을 수 없습니다."
+                    "error": "해당 이메일 또는 아이디의 사용자를 찾을 수 없습니다."
                 }
             
             if user['id'] == current_user_id:
+                print(f"❌ 자기 자신을 친구로 추가하려고 시도")
                 return {
                     "status": 400,
                     "error": "자기 자신을 친구로 추가할 수 없습니다."
                 }
             
             # 친구 요청 생성
+            print(f"✉️ 친구 요청 생성 시도: from={current_user_id}, to={user['id']}")
             result = await self.repository.create_friend_request(current_user_id, user['id'])
             
             if result["success"]:
+                print(f"✅ 친구 요청 생성 성공")
                 return {
                     "status": 200,
                     "message": "친구 요청을 보냈습니다.",
@@ -41,6 +49,7 @@ class FriendsService:
                     }
                 }
             else:
+                print(f"❌ 친구 요청 생성 실패: {result['message']}")
                 return {
                     "status": 400,
                     "error": result["message"]
