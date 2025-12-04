@@ -34,6 +34,9 @@ class A2ASessionResponse(BaseModel):
     participant_count: Optional[int] = None
     participant_ids: Optional[List[str]] = None
     participant_names: Optional[List[str]] = None
+    details: Optional[Dict[str, Any]] = None
+    title: Optional[str] = None
+    summary: Optional[str] = None
 
 class A2AMessageCreate(BaseModel):
     session_id: str

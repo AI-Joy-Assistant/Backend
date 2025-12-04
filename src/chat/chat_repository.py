@@ -54,6 +54,27 @@ class ChatRepository:
             return user_names
         except Exception as e:
             raise Exception(f"사용자 이름 조회 오류: {str(e)}")
+
+    @staticmethod
+    async def get_user_details_by_ids(user_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """사용자 ID들로 상세 정보(이름, 프로필 이미지) 조회"""
+        try:
+            if not user_ids:
+                return {}
+            
+            response = supabase.table('user').select('id, name, profile_image').in_('id', user_ids).execute()
+            
+            user_details = {}
+            if response.data:
+                for user in response.data:
+                    user_details[user['id']] = {
+                        "name": user.get('name', '이름 없음'),
+                        "profile_image": user.get('profile_image')
+                    }
+            
+            return user_details
+        except Exception as e:
+            raise Exception(f"사용자 상세 정보 조회 오류: {str(e)}")
     
     @staticmethod
     async def get_friends_list(user_id: str) -> List[Dict[str, Any]]:
