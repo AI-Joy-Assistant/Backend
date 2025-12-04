@@ -86,14 +86,33 @@ async def get_a2a_session(
         place_pref = session.get("place_pref", {}) or {}
         summary = place_pref.get("summary") or session.get("summary")
         
-        # Initiator 이름 (여기서는 간단히 DB 조회 없이 ID로 처리하거나, 필요시 조회)
-        # 성능상 이름 조회는 생략하거나 캐시된 정보 사용 권장. 
-        # 여기서는 간단히 처리.
-        initiator_name = "알 수 없음" # 클라이언트에서 처리하거나 별도 조회 필요
+        # Initiator 정보 조회
+        initiator_id = session.get("initiator_user_id")
+        initiator_name = "알 수 없음"
+        initiator_avatar = "https://via.placeholder.com/150"
+        
+        if initiator_id == current_user_id:
+            initiator_name = "나"
+            # 내 정보 조회 (프로필 이미지를 위해)
+            try:
+                initiator_user = await AuthRepository.find_user_by_id(initiator_id)
+                if initiator_user:
+                    initiator_avatar = initiator_user.get("profile_image") or initiator_avatar
+            except:
+                pass
+        elif initiator_id:
+            try:
+                # AuthRepository가 상단에 import 되어 있다고 가정 (line 6)
+                initiator_user = await AuthRepository.find_user_by_id(initiator_id)
+                if initiator_user:
+                    initiator_name = initiator_user.get("name") or initiator_user.get("email") or "알 수 없음"
+                    initiator_avatar = initiator_user.get("profile_image") or initiator_avatar
+            except Exception as e:
+                print(f"Initiator 조회 실패: {e}")
         
         details = {
-            "proposer": initiator_name, # 클라이언트에서 목록의 정보를 활용하거나 별도 API로 보완
-            "proposerAvatar": "https://via.placeholder.com/150",
+            "proposer": initiator_name,
+            "proposerAvatar": initiator_avatar,
             "purpose": summary or "일정 조율",
             "proposedTime": place_pref.get("time") or "미정",
             "location": place_pref.get("location") or "미정",
@@ -220,17 +239,18 @@ async def get_user_sessions(
         # 최근 순으로 정렬
         grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
-        # 3. 이름 일괄 조회 (DB 부하 감소)
-        user_names_map = {}
+        # 3. 상세 정보 일괄 조회 (DB 부하 감소)
+        user_details_map = {}
         if all_participant_ids:
-            user_names_map = await ChatRepository.get_user_names_by_ids(list(all_participant_ids))
+            user_details_map = await ChatRepository.get_user_details_by_ids(list(all_participant_ids))
 
         # 4. 이름 매핑 적용
         for session in grouped_sessions:
             p_ids = session.get("participant_ids", [])
             p_names = []
             for pid in p_ids:
-                name = user_names_map.get(pid, "알 수 없음")
+                user_info = user_details_map.get(pid, {})
+                name = user_info.get("name", "알 수 없음")
                 p_names.append(name)
 
             # 이름이 없으면(탈퇴 등) '대화상대'로 표시
@@ -254,11 +274,20 @@ async def get_user_sessions(
             title = summary if summary else f"{', '.join(p_names)}와의 약속"
             
             # Details 구성
-            # Initiator 이름 찾기
+            # Initiator 이름 및 아바타 찾기
             initiator_id = session.get("initiator_user_id")
             initiator_name = "알 수 없음"
-            if initiator_id in user_names_map:
-                initiator_name = user_names_map[initiator_id]
+            initiator_avatar = "https://via.placeholder.com/150"
+            
+            if initiator_id == current_user_id:
+                initiator_name = "나"
+                if initiator_id in user_details_map:    
+                    user_info = user_details_map[initiator_id]
+                    initiator_avatar = user_info.get("profile_image") or initiator_avatar
+            elif initiator_id in user_details_map:
+                user_info = user_details_map[initiator_id]
+                initiator_name = user_info.get("name", "알 수 없음")
+                initiator_avatar = user_info.get("profile_image") or initiator_avatar
             
             # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
             # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
@@ -267,7 +296,7 @@ async def get_user_sessions(
             
             details = {
                 "proposer": initiator_name,
-                "proposerAvatar": "https://via.placeholder.com/150", # TODO: 실제 아바타 URL
+                "proposerAvatar": initiator_avatar,
                 "purpose": summary or "일정 조율",
                 "proposedTime": place_pref.get("time") or "미정",
                 "location": place_pref.get("location") or "미정",

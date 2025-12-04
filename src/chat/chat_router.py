@@ -113,10 +113,11 @@ async def chat_with_gpt(
 ):
     """ChatGPT와 자유로운 대화를 합니다."""
     message = request.get("message", "")
+    selected_friends = request.get("selected_friends")
     if not message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
-    result = await ChatService.start_ai_conversation(current_user_id, message)
+    result = await ChatService.start_ai_conversation(current_user_id, message, selected_friend_ids=selected_friends)
     
     if result["status"] == 200:
         return result["data"]

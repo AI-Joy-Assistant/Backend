@@ -169,7 +169,7 @@ class ChatService:
             }
 
     @staticmethod
-    async def start_ai_conversation(user_id: str, message: str) -> Dict[str, Any]:
+    async def start_ai_conversation(user_id: str, message: str, selected_friend_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
         try:
             # 1. 사용자 메시지 저장
@@ -310,8 +310,28 @@ class ChatService:
                     thread_id_for_recoordination = None
                     session_ids_for_recoordination = []
 
-            # [판단] 일정 요청이거나 재조율이면 -> AI 생성 스킵
-            is_schedule_related = schedule_info.get("has_schedule_request") or recoordination_needed
+            # [✅ 수정] 명시적으로 선택된 친구가 있으면 우선 처리 및 일정 관련으로 강제 설정
+            friend_ids = []
+            friend_id_to_name = {}
+            
+            if selected_friend_ids:
+                logger.info(f"사용자가 선택한 친구 ID 사용: {selected_friend_ids}")
+                friend_ids = selected_friend_ids
+                # 이름 조회
+                user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
+                friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
+                friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
+                
+                # 선택된 친구가 있으면 재조율 로직 무시 (새로운 요청으로 간주)
+                recoordination_needed = False
+                thread_id_for_recoordination = None
+                session_ids_for_recoordination = []
+                
+                # [중요] 친구를 선택했다면 무조건 일정 조율 모드로 진입
+                is_schedule_related = True
+            else:
+                # [판단] 일정 요청이거나 재조율이면 -> AI 생성 스킵
+                is_schedule_related = schedule_info.get("has_schedule_request") or recoordination_needed
 
             if not is_schedule_related:
                 # 일반 대화
@@ -323,63 +343,61 @@ class ChatService:
             else:
                 ai_response = None
 
-                # 친구 ID 찾기
-            friend_ids = []
-            friend_id_to_name = {}
+                # 3. 친구 ID 찾기 (위에서 처리되지 않은 경우)
+            if not friend_ids:
+                if recoordination_needed:
+                    # [✅ 수정 2] 재조율 시 친구 정보 복구 확실하게 처리
+                    from src.a2a.a2a_repository import A2ARepository
+                    # session_ids가 있으면 그것으로, 없으면 thread_id로 찾기
+                    target_sessions = []
+                    # 1. session_ids로 조회 시도
+                    if session_ids_for_recoordination:
+                        for sid in session_ids_for_recoordination:
+                            sess = await A2ARepository.get_session(sid)
+                            if sess: target_sessions.append(sess)
 
-            if recoordination_needed:
-                # [✅ 수정 2] 재조율 시 친구 정보 복구 확실하게 처리
-                from src.a2a.a2a_repository import A2ARepository
-                # session_ids가 있으면 그것으로, 없으면 thread_id로 찾기
-                target_sessions = []
-                # 1. session_ids로 조회 시도
-                if session_ids_for_recoordination:
-                    for sid in session_ids_for_recoordination:
-                        sess = await A2ARepository.get_session(sid)
-                        if sess: target_sessions.append(sess)
+                    # 2. 실패 시 thread_id로 조회 시도
+                    if not target_sessions and thread_id_for_recoordination:
+                        target_sessions = await A2ARepository.get_thread_sessions(thread_id_for_recoordination)
 
-                # 2. 실패 시 thread_id로 조회 시도
-                if not target_sessions and thread_id_for_recoordination:
-                    target_sessions = await A2ARepository.get_thread_sessions(thread_id_for_recoordination)
+                    if target_sessions:
+                        # 모든 참여자 ID 수집 (나 제외)
+                        all_pids = set()
+                        for s in target_sessions:
+                            # place_pref의 participants가 가장 정확함
+                            place_pref = s.get('place_pref') or {}
+                            if isinstance(place_pref, dict) and place_pref.get('participants'):
+                                for p in place_pref['participants']:
+                                    all_pids.add(p)
 
-                if target_sessions:
-                    # 모든 참여자 ID 수집 (나 제외)
-                    all_pids = set()
-                    for s in target_sessions:
-                        # place_pref의 participants가 가장 정확함
-                        place_pref = s.get('place_pref') or {}
-                        if isinstance(place_pref, dict) and place_pref.get('participants'):
-                            for p in place_pref['participants']:
-                                all_pids.add(p)
+                            # initiator/target 확인
+                            if s.get('initiator_user_id'): all_pids.add(s['initiator_user_id'])
+                            if s.get('target_user_id'): all_pids.add(s['target_user_id'])
 
-                        # initiator/target 확인
-                        if s.get('initiator_user_id'): all_pids.add(s['initiator_user_id'])
-                        if s.get('target_user_id'): all_pids.add(s['target_user_id'])
+                        # 나(user_id) 제외
+                        if user_id in all_pids:
+                            all_pids.remove(user_id)
 
-                    # 나(user_id) 제외
-                    if user_id in all_pids:
-                        all_pids.remove(user_id)
+                        friend_ids = list(all_pids)
 
-                    friend_ids = list(all_pids)
-
-                    if friend_ids:
-                        # 이름 조회
-                        user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
-                        friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
-                        friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
-                        logger.info(f"재조율 참여자 복구 성공: {friend_names} (IDs: {friend_ids})")
+                        if friend_ids:
+                            # 이름 조회
+                            user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
+                            friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
+                            friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
+                            logger.info(f"재조율 참여자 복구 성공: {friend_names} (IDs: {friend_ids})")
+                        else:
+                            logger.error("재조율 참여자 복구 실패: 친구 ID를 찾을 수 없음")
                     else:
-                        logger.error("재조율 참여자 복구 실패: 친구 ID를 찾을 수 없음")
-                else:
-                    logger.error("재조율 세션 정보를 찾을 수 없습니다.")
+                        logger.error("재조율 세션 정보를 찾을 수 없습니다.")
 
-            else:
-                # 신규 요청 (기존 유지)
-                for name in friend_names:
-                    fid = await ChatService._find_friend_id_by_name(user_id, name)
-                    if fid:
-                        friend_ids.append(fid)
-                        friend_id_to_name[fid] = name
+                else:
+                    # 신규 요청 (기존 유지)
+                    for name in friend_names:
+                        fid = await ChatService._find_friend_id_by_name(user_id, name)
+                        if fid:
+                            friend_ids.append(fid)
+                            friend_id_to_name[fid] = name
 
             # -------------------------------------------------------
             # A2A 세션 시작
@@ -463,7 +481,8 @@ class ChatService:
                             time=schedule_info.get("time"),
                             location=schedule_info.get("location"),
                             activity=schedule_info.get("activity"),
-                            duration_minutes=60
+                            duration_minutes=60,
+                            force_new=True  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
                         )
                         thread_id = a2a_result.get("thread_id")
                         session_ids = a2a_result.get("session_ids", [])
