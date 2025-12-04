@@ -768,6 +768,11 @@ class A2AService:
                     target_user_ids=[target_id]  # 1:1 세션 기준으로 찾기
                 )
                 if existing_session:
+                    # [✅ 수정] 완료된 세션은 재사용하지 않고 새로운 세션 생성
+                    if existing_session.get("status") == "completed":
+                        logger.info(f"완료된 세션 발견 (ID: {existing_session['id']}) - 재사용하지 않음")
+                        continue
+                        
                     existing_session_map[target_id] = existing_session
                     all_existing_sessions.append(existing_session)
             
