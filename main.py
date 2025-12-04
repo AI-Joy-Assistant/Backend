@@ -74,6 +74,8 @@ async def debug():
         "google_redirect_uri": settings.GOOGLE_REDIRECT_URI if settings.GOOGLE_REDIRECT_URI else "NOT_SET"
     }
 
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
