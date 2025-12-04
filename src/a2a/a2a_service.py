@@ -749,10 +749,12 @@ class A2AService:
         time: Optional[str] = None,
         location: Optional[str] = None,
         activity: Optional[str] = None,
-        duration_minutes: int = 60
+        duration_minutes: int = 60,
+        force_new: bool = False
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 세션 시작
+        - force_new: True이면 기존 세션을 재사용하지 않고 무조건 새로 생성
         여러 참여자와 동시에 일정을 조율합니다.
         기존 세션이 있으면 재사용합니다.
         """
@@ -777,7 +779,10 @@ class A2AService:
                     all_existing_sessions.append(existing_session)
             
             # 기존 세션이 하나라도 있고, 진행 중이거나 최근에 생성된 경우 재사용
-            reuse_existing = len(existing_session_map) > 0
+            # [✅ 수정] force_new가 True이면 재사용하지 않음
+            reuse_existing = False
+            if not force_new:
+                reuse_existing = len(existing_session_map) > 0
             
             if reuse_existing:
                 # 기존 세션들에서 thread_id 추출

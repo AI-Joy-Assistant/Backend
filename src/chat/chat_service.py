@@ -481,7 +481,8 @@ class ChatService:
                             time=schedule_info.get("time"),
                             location=schedule_info.get("location"),
                             activity=schedule_info.get("activity"),
-                            duration_minutes=60
+                            duration_minutes=60,
+                            force_new=True  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
                         )
                         thread_id = a2a_result.get("thread_id")
                         session_ids = a2a_result.get("session_ids", [])
