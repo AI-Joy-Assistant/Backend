@@ -60,13 +60,16 @@ class A2ARepository:
             raise Exception(f"세션 조회 오류: {str(e)}")
     
     @staticmethod
-    async def update_session_status(session_id: str, status: str) -> bool:
+    async def update_session_status(session_id: str, status: str, details: Optional[Dict[str, Any]] = None) -> bool:
         """세션 상태 업데이트"""
         try:
-            response = supabase.table('a2a_session').update({
+            update_data = {
                 "status": status,
                 "updated_at": datetime.utcnow().isoformat()
-            }).eq('id', session_id).execute()
+            }
+            # details는 무시 (details 컬럼이 테이블에 없음)
+            
+            response = supabase.table('a2a_session').update(update_data).eq('id', session_id).execute()
             return len(response.data) > 0
         except Exception as e:
             raise Exception(f"세션 상태 업데이트 오류: {str(e)}")
@@ -144,6 +147,31 @@ class A2ARepository:
             return response.data if response.data else []
         except Exception as e:
             raise Exception(f"세션 목록 조회 오류: {str(e)}")
+    
+    @staticmethod
+    async def get_pending_requests_for_user(user_id: str) -> List[Dict[str, Any]]:
+        """
+        사용자에게 온 pending 상태의 일정 요청 조회
+        - target_user_id가 현재 사용자인 세션
+        - status가 'pending', 'pending_approval', 'in_progress'인 세션
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"🔍 Pending 요청 조회 시작 - user_id: {user_id}")
+            
+            response = supabase.table('a2a_session').select('*').eq(
+                'target_user_id', user_id
+            ).in_('status', ['pending', 'pending_approval', 'in_progress']).order('created_at', desc=True).execute()
+            
+            logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
+            if response.data:
+                for s in response.data:
+                    logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}")
+            
+            return response.data if response.data else []
+        except Exception as e:
+            raise Exception(f"pending 요청 조회 오류: {str(e)}")
     
     @staticmethod
     async def find_existing_session(
