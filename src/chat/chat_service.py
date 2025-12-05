@@ -333,14 +333,8 @@ class ChatService:
                 # [판단] 일정 요청이거나 재조율이면 -> AI 생성 스킵
                 is_schedule_related = schedule_info.get("has_schedule_request") or recoordination_needed
 
-            if not is_schedule_related:
-                # 일반 대화
-                conversation_history = await ChatService._get_conversation_history(user_id)
-                ai_result = await openai_service.generate_response(message, conversation_history)
-                if ai_result["status"] == "error":
-                    return {"status": 500, "error": ai_result["message"]}
-                ai_response = ai_result["message"]
-            else:
+            # 스케줄 관련 로직 실행
+            if is_schedule_related:
                 ai_response = None
 
                 # 3. 친구 ID 찾기 (위에서 처리되지 않은 경우)
@@ -520,7 +514,15 @@ class ChatService:
                     if calendar_event:
                         ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
 
-            # 6. 일반 대화 저장
+            # 6. 응답이 없는 경우 (스케줄 정보 부족 또는 일반 대화) -> OpenAI Fallback
+            if ai_response is None and not response_sent_to_db:
+                conversation_history = await ChatService._get_conversation_history(user_id)
+                ai_result = await openai_service.generate_response(message, conversation_history)
+                if ai_result["status"] == "error":
+                    return {"status": 500, "error": ai_result["message"]}
+                ai_response = ai_result["message"]
+
+            # 7. 일반 대화 저장
             if not response_sent_to_db and ai_response:
                 first_friend_id = friend_ids[0] if friend_ids else None
                 await ChatRepository.create_chat_log(
