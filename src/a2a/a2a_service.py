@@ -1382,6 +1382,8 @@ class A2AService:
                         "location": location or None,
                         "activity": activity,
                         "participants": all_participant_names,
+                        "proposedDate": date,  # 프론트엔드용
+                        "proposedTime": time,  # 프론트엔드용
                         "start_time": None,  # 시간 파싱 필요
                         "end_time": None
                     }
@@ -1390,13 +1392,93 @@ class A2AService:
                     try:
                         from src.chat.chat_service import ChatService
                         from zoneinfo import ZoneInfo
+                        from datetime import timedelta
+                        import re
                         KST = ZoneInfo("Asia/Seoul")
+                        today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
                         
-                        parsed_time = await ChatService.parse_time_string(time, f"{date} {time}")
-                        if parsed_time:
-                            proposal_data["start_time"] = parsed_time['start_time'].isoformat()
-                            proposal_data["end_time"] = parsed_time['end_time'].isoformat()
-                            proposal_data["date"] = parsed_time['start_time'].strftime("%Y년 %m월 %d일")
+                        # 날짜 파싱
+                        parsed_date = None
+                        date_str = date.strip() if date else ""
+                        
+                        if "오늘" in date_str:
+                            parsed_date = today
+                        elif "내일" in date_str:
+                            parsed_date = today + timedelta(days=1)
+                        elif "모레" in date_str:
+                            parsed_date = today + timedelta(days=2)
+                        elif "다음주" in date_str or "이번주" in date_str:
+                            weekday_map = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+                            for day_name, day_num in weekday_map.items():
+                                if day_name in date_str:
+                                    days_ahead = day_num - today.weekday()
+                                    if "다음주" in date_str:
+                                        days_ahead += 7 if days_ahead > 0 else 14
+                                    else:
+                                        if days_ahead < 0:
+                                            days_ahead += 7
+                                    parsed_date = today + timedelta(days=days_ahead)
+                                    break
+                        else:
+                            # "화요일", "수요일" 등 요일만 있는 경우
+                            weekday_map = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+                            for day_name, day_num in weekday_map.items():
+                                if day_name in date_str:
+                                    days_ahead = day_num - today.weekday()
+                                    if days_ahead <= 0:  # 오늘이거나 이미 지난 요일이면 다음 주
+                                        days_ahead += 7
+                                    parsed_date = today + timedelta(days=days_ahead)
+                                    logger.info(f"📅 요일 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}")
+                                    break
+                        
+                        if not parsed_date:
+                            parsed_date = today + timedelta(days=1)  # 기본값: 내일
+                        
+                        # 시간 파싱
+                        time_str = time.strip() if time else ""
+                        hour = 14  # 기본값: 오후 2시
+                        
+                        if "점심" in time_str:
+                            hour = 12
+                        elif "저녁" in time_str or "밤" in time_str:
+                            hour_match = re.search(r"(\d{1,2})\s*시", time_str)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                                if hour < 12:
+                                    hour += 12  # 저녁/밤이면 PM으로 처리
+                            else:
+                                hour = 19  # 저녁 기본값
+                        elif "오전" in time_str:
+                            hour_match = re.search(r"(\d{1,2})\s*시", time_str)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                        elif "오후" in time_str:
+                            hour_match = re.search(r"(\d{1,2})\s*시", time_str)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                                if hour < 12:
+                                    hour += 12
+                        else:
+                            hour_match = re.search(r"(\d{1,2})\s*시", time_str)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                        
+                        # 최종 datetime 생성
+                        start_time = parsed_date.replace(hour=hour, minute=0)
+                        end_time = start_time + timedelta(hours=1)  # 기본 1시간
+                        
+                        proposal_data["start_time"] = start_time.isoformat()
+                        proposal_data["end_time"] = end_time.isoformat()
+                        # 파싱된 정확한 날짜/시간으로 업데이트
+                        proposal_data["proposedDate"] = start_time.strftime("%-m월 %-d일")
+                        am_pm = "오전" if start_time.hour < 12 else "오후"
+                        display_hour = start_time.hour if start_time.hour <= 12 else start_time.hour - 12
+                        if display_hour == 0:
+                            display_hour = 12
+                        proposal_data["proposedTime"] = f"{am_pm} {display_hour}시"
+                        proposal_data["date"] = start_time.strftime("%Y년 %-m월 %-d일")
+                        
+                        logger.info(f"📅 Proposal 날짜 파싱: '{date}' '{time}' -> {proposal_data['proposedDate']} {proposal_data['proposedTime']}")
                     except Exception as e:
                         logger.warning(f"시간 파싱 실패: {str(e)}")
                     
