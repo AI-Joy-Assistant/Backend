@@ -6,6 +6,7 @@ from .a2a_service import A2AService
 from .a2a_repository import A2ARepository
 from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
 from src.auth.auth_service import AuthService
+from src.auth.auth_repository import AuthRepository
 from src.chat.chat_repository import ChatRepository
 
 router = APIRouter(prefix="/a2a", tags=["A2A"])
@@ -89,7 +90,7 @@ async def get_a2a_session(
         # Initiator 정보 조회
         initiator_id = session.get("initiator_user_id")
         initiator_name = "알 수 없음"
-        initiator_avatar = "https://via.placeholder.com/150"
+        initiator_avatar = "https://picsum.photos/150"
         
         if initiator_id == current_user_id:
             initiator_name = "나"
@@ -217,11 +218,15 @@ async def get_user_sessions(
             initiators = {s.get("initiator_user_id") for s in thread_sessions}
             targets = {s.get("target_user_id") for s in thread_sessions}
 
-            # place_pref에 명시된 참여자 정보도 확인
+            # place_pref에 명시된 참여자 정보도 확인 (UUID 형식인 것만 필터링)
             place_pref = representative.get("place_pref", {})
             pref_participants = set()
             if isinstance(place_pref, dict) and place_pref.get("participants"):
-                pref_participants = set(place_pref.get("participants"))
+                import re
+                uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+                for p in place_pref.get("participants", []):
+                    if isinstance(p, str) and uuid_pattern.match(p):
+                        pref_participants.add(p)
 
             # 전체 참여자 합집합 (나 제외)
             participants_set = (initiators | targets | pref_participants) - {current_user_id}
@@ -277,7 +282,7 @@ async def get_user_sessions(
             # Initiator 이름 및 아바타 찾기
             initiator_id = session.get("initiator_user_id")
             initiator_name = "알 수 없음"
-            initiator_avatar = "https://via.placeholder.com/150"
+            initiator_avatar = "https://picsum.photos/150"
             
             if initiator_id == current_user_id:
                 initiator_name = "나"
@@ -314,6 +319,70 @@ async def get_user_sessions(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 목록 조회 실패: {str(e)}")
+
+@router.get("/pending-requests", summary="사용자에게 온 일정 요청 조회")
+async def get_pending_requests(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    현재 사용자에게 온 pending 상태의 일정 요청 목록 조회
+    - 내가 target_user_id인 세션만 조회
+    - status가 'pending' 또는 'pending_approval'인 세션만 반환
+    """
+    try:
+        sessions = await A2ARepository.get_pending_requests_for_user(current_user_id)
+        
+        if not sessions:
+            return {"requests": []}
+        
+        # 요청자 정보 조회를 위한 ID 수집
+        initiator_ids = list(set(s.get("initiator_user_id") for s in sessions if s.get("initiator_user_id")))
+        user_details_map = {}
+        if initiator_ids:
+            user_details_map = await ChatRepository.get_user_details_by_ids(initiator_ids)
+        
+        # 응답 데이터 구성
+        requests = []
+        for session in sessions:
+            place_pref = session.get("place_pref", {}) or {}
+            thread_id = place_pref.get("thread_id") if isinstance(place_pref, dict) else None
+            summary = place_pref.get("summary") if isinstance(place_pref, dict) else None
+            
+            # 요청자 정보
+            initiator_id = session.get("initiator_user_id")
+            initiator_info = user_details_map.get(initiator_id, {})
+            initiator_name = initiator_info.get("name", "알 수 없음")
+            initiator_avatar = initiator_info.get("profile_image", "https://picsum.photos/150")
+            
+            # 참여자 정보 (place_pref에 있을 수 있음)
+            participants = place_pref.get("participants", []) if isinstance(place_pref, dict) else []
+            participant_count = len(participants) if participants else 1
+            
+            # 날짜/시간 정보
+            proposed_time = place_pref.get("time") if isinstance(place_pref, dict) else None
+            proposed_date = place_pref.get("date") if isinstance(place_pref, dict) else None
+            
+            requests.append({
+                "id": session.get("id"),
+                "thread_id": thread_id or session.get("id"),
+                "title": summary or f"{initiator_name}님의 일정 요청",
+                "summary": summary,
+                "initiator_id": initiator_id,
+                "initiator_name": initiator_name,
+                "initiator_avatar": initiator_avatar,
+                "participant_count": participant_count,
+                "proposed_date": proposed_date,
+                "proposed_time": proposed_time,
+                "status": session.get("status"),
+                "created_at": session.get("created_at")
+            })
+        
+        # 최신순 정렬
+        requests.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return {"requests": requests}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"요청 목록 조회 실패: {str(e)}")
 
 @router.delete("/session/{session_id}", summary="A2A 세션 삭제")
 async def delete_a2a_session(
