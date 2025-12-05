@@ -1563,6 +1563,14 @@ class A2AService:
                         }
                     )
 
+                    # 충돌 감지 시 세션 상태를 needs_recoordination으로 변경하여 pending-requests에서 제외
+                    for session_info in sessions:
+                        await A2ARepository.update_session_status(
+                            session_id=session_info["session_id"],
+                            status="needs_recoordination"
+                        )
+                    logger.info(f"🔄 일정 충돌 감지 - 세션 상태를 needs_recoordination으로 변경")
+
                     return {
                         "status": 200, # 이게 있어야 chat_service가 정상 종료로 인식함
                         "messages": messages,
@@ -1685,15 +1693,24 @@ class A2AService:
                 for day_name, day_num in weekday_map.items():
                     if day_name in date_str:
                         days_ahead = day_num - today.weekday()
-                        if days_ahead <= 0:
-                            days_ahead += 7
+                        if "다음주" in date_str:
+                            # 다음주는 반드시 7일 이상 추가
+                            if days_ahead <= 0:
+                                days_ahead += 7
+                            else:
+                                days_ahead += 7  # 다음주이면 무조건 7일 추가
+                        else:
+                            # 이번주
+                            if days_ahead < 0:
+                                days_ahead += 7
                         parsed_date = today + timedelta(days=days_ahead)
+                        logger.info(f"📅 날짜 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}, days_ahead: {days_ahead}")
                         break
                 if not parsed_date:
                     parsed_date = today + timedelta(days=7)
-                else:
-                    # 숫자로 된 날짜 파싱 시도
-                    match = re.search(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일", date_str)
+            else:
+                # 숫자로 된 날짜 파싱 시도
+                match = re.search(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일", date_str)
                 if match:
                     month = int(match.group(1))
                     day = int(match.group(2))
@@ -1789,7 +1806,9 @@ class A2AService:
                             
                             # 충돌 확인: 요청 시간과 기존 일정이 겹치는지
                             # 겹치는 조건: (parsed_time < event_end_dt) and (end_time > event_start_dt)
+                            logger.debug(f"🔍 충돌 확인: 요청={parsed_time.isoformat()} ~ {end_time.isoformat()}, 이벤트({event.summary})={event_start_dt.isoformat()} ~ {event_end_dt.isoformat()}")
                             if parsed_time < event_end_dt and end_time > event_start_dt:
+                                logger.info(f"❌ 충돌 발견: {event.summary} ({event_start_dt.isoformat()} ~ {event_end_dt.isoformat()})")
                                 conflict_events.append({
                                     "summary": event.summary,
                                     "start": event_start_dt.isoformat(),
