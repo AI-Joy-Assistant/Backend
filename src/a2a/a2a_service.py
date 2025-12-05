@@ -134,6 +134,230 @@ class A2AService:
             }
     
     @staticmethod
+    async def approve_session(session_id: str, user_id: str) -> Dict[str, Any]:
+        """
+        A2A 세션의 일정을 승인합니다.
+        요청 받은 사람(target_user)만 승인하면 바로 확정됩니다.
+        """
+        logger.info(f"🔵 approve_session 시작 - session_id: {session_id}, user_id: {user_id}")
+        try:
+            from zoneinfo import ZoneInfo
+            from datetime import timedelta
+            import re
+            
+            KST = ZoneInfo("Asia/Seoul")
+            
+            # 세션 정보 조회
+            session = await A2ARepository.get_session(session_id)
+            if not session:
+                return {"status": 404, "error": "세션을 찾을 수 없습니다."}
+            
+            target_user_id = session.get("target_user_id")
+            initiator_user_id = session.get("initiator_user_id")
+            
+            # 요청 받은 사람인지 확인
+            if user_id != target_user_id:
+                return {"status": 403, "error": "요청을 받은 사람만 승인할 수 있습니다."}
+            
+            # proposal 정보 구성 (여러 소스에서 가져오기)
+            details = session.get("details", {}) or {}
+            place_pref = session.get("place_pref", {}) or {}
+            time_window = session.get("time_window", {}) or {}
+            
+            logger.info(f"세션 정보 확인 - details: {details}, place_pref: {place_pref}, time_window: {time_window}")
+            
+            # 날짜/시간 정보를 여러 소스에서 찾기 (우선순위: details > time_window > place_pref)
+            date_str = (details.get("proposed_date") or details.get("date") or 
+                       time_window.get("date") or place_pref.get("date") or "")
+            time_str = (details.get("proposed_time") or details.get("time") or 
+                       time_window.get("time") or place_pref.get("time") or "")
+            location = details.get("location") or place_pref.get("location") or ""
+            activity = (details.get("purpose") or place_pref.get("summary") or 
+                       place_pref.get("activity") or "약속")
+            
+            logger.info(f"추출된 정보 - date: {date_str}, time: {time_str}, location: {location}, activity: {activity}")
+            
+            # 메시지에서 날짜/시간 정보 찾기 (details와 time_window가 비어있을 경우)
+            if not date_str or not time_str:
+                messages = await A2ARepository.get_session_messages(session_id)
+                for msg in reversed(messages):  # 최신 메시지부터
+                    msg_content = msg.get("message", {})
+                    if isinstance(msg_content, dict):
+                        text = msg_content.get("text", "")
+                        # 날짜/시간 패턴 추출 (예: "12월 6일 오후 3시", "내일 저녁 7시")
+                        if "오후" in text or "오전" in text or "시" in text:
+                            # 간단한 패턴 매칭으로 시간 정보 추출
+                            if not date_str:
+                                date_match = re.search(r'(\d{1,2}월\s*\d{1,2}일|내일|모레|오늘)', text)
+                                if date_match:
+                                    date_str = date_match.group(1)
+                            if not time_str:
+                                time_match = re.search(r'(오전|오후|저녁|점심)?\s*\d{1,2}\s*시', text)
+                                if time_match:
+                                    time_str = time_match.group(0)
+                            if date_str and time_str:
+                                break
+                logger.info(f"메시지에서 추출된 정보 - date: {date_str}, time: {time_str}")
+            
+            # 시간 파싱
+            start_time = None
+            end_time = None
+            
+            if details.get("start_time"):
+                start_time = datetime.fromisoformat(details["start_time"].replace("Z", "+00:00")).astimezone(KST)
+                end_time = datetime.fromisoformat(details["end_time"].replace("Z", "+00:00")).astimezone(KST)
+            elif date_str or time_str:
+                from src.chat.chat_service import ChatService
+                combined = f"{date_str} {time_str}".strip()
+                parsed = await ChatService.parse_time_string(time_str, combined)
+                if parsed:
+                    start_time = parsed['start_time']
+                    end_time = parsed['end_time']
+            
+            # 시간 정보가 없으면 기본값 (내일 오후 2시)
+            if not start_time:
+                start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                end_time = start_time + timedelta(hours=1)
+            
+            # 참여자 이름 조회
+            initiator = await AuthRepository.find_user_by_id(initiator_user_id)
+            target = await AuthRepository.find_user_by_id(target_user_id)
+            initiator_name = initiator.get("name", "요청자") if initiator else "요청자"
+            target_name = target.get("name", "상대방") if target else "상대방"
+            
+            # 양쪽 캘린더에 일정 추가
+            all_participants = [initiator_user_id, target_user_id]
+            failed_users = []
+            
+            for pid in all_participants:
+                try:
+                    p_user = await AuthRepository.find_user_by_id(pid)
+                    p_name = p_user.get("name", "사용자") if p_user else "사용자"
+                    
+                    access_token = await AuthService.get_valid_access_token_by_user_id(pid)
+                    if not access_token:
+                        logger.error(f"유저 {pid} 토큰 갱신 실패")
+                        failed_users.append(p_name)
+                        continue
+                    
+                    from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
+                    
+                    # 상대방 이름 찾기
+                    other_name = target_name if pid == initiator_user_id else initiator_name
+                    
+                    # 일정 제목
+                    evt_summary = f"{other_name}와 {activity}"
+                    if location:
+                        evt_summary += f" ({location})"
+                    
+                    event_req = CreateEventRequest(
+                        summary=evt_summary,
+                        start_time=start_time.isoformat(),
+                        end_time=end_time.isoformat(),
+                        location=location,
+                        description="A2A Agent에 의해 자동 생성된 일정입니다.",
+                        attendees=[]
+                    )
+                    
+                    gc_service = GoogleCalendarService()
+                    evt = await gc_service.create_calendar_event(access_token, event_req)
+                    
+                    if evt:
+                        await A2AService._save_calendar_event_to_db(
+                            session_id=session_id,
+                            owner_user_id=pid,
+                            google_event_id=evt.id,
+                            summary=evt_summary,
+                            location=location,
+                            start_at=start_time.isoformat(),
+                            end_at=end_time.isoformat(),
+                            html_link=evt.htmlLink
+                        )
+                    else:
+                        failed_users.append(p_name)
+                        
+                except Exception as e:
+                    logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
+                    failed_users.append(p_name if 'p_name' in dir() else pid)
+            
+            # 확정된 정보를 details에 저장
+            confirmed_details = {
+                "proposedDate": start_time.strftime("%m월 %d일"),
+                "proposedTime": start_time.strftime("%p %I시").replace("AM", "오전").replace("PM", "오후"),
+                "location": location,
+                "purpose": activity,
+                "proposer": initiator_name,
+                "participants": [initiator_name, target_name],
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat()
+            }
+            
+            # 세션 상태 및 details 업데이트
+            logger.info(f"🔵 세션 상태 업데이트 시작 - session_id: {session_id}, status: completed")
+            update_result = await A2ARepository.update_session_status(session_id, "completed", confirmed_details)
+            logger.info(f"🔵 세션 상태 업데이트 결과: {update_result}")
+            
+            # 결과 메시지
+            if not failed_users:
+                final_msg = "모든 참여자의 캘린더에 일정이 정상 등록되었습니다."
+            else:
+                final_msg = f"일정이 확정되었으나, 다음 사용자의 캘린더 등록에 실패했습니다: {', '.join(failed_users)}"
+            
+            return {
+                "status": 200,
+                "message": final_msg,
+                "all_approved": True,
+                "failed_users": failed_users,
+                "confirmed_details": confirmed_details
+            }
+            
+        except Exception as e:
+            logger.error(f"세션 승인 실패: {str(e)}", exc_info=True)
+            return {"status": 500, "error": str(e)}
+    
+    @staticmethod
+    async def reschedule_session(
+        session_id: str,
+        user_id: str,
+        reason: Optional[str] = None,
+        preferred_time: Optional[str] = None,
+        manual_input: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        A2A 세션의 재조율을 요청합니다.
+        """
+        try:
+            # 세션 정보 조회
+            session = await A2ARepository.get_session(session_id)
+            if not session:
+                return {"status": 404, "error": "세션을 찾을 수 없습니다."}
+            
+            # proposal 정보 구성
+            details = session.get("details", {})
+            proposal = {
+                "date": details.get("proposed_date", ""),
+                "time": details.get("proposed_time", ""),
+                "location": details.get("location", ""),
+                "activity": details.get("purpose", ""),
+                "participants": details.get("participants", [])
+            }
+            
+            # 거절 처리 (handle_schedule_approval에서 approved=False로 호출)
+            result = await A2AService.handle_schedule_approval(
+                thread_id=session.get("thread_id"),
+                session_ids=[session_id],
+                user_id=user_id,
+                approved=False,
+                proposal=proposal
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"재조율 요청 실패: {str(e)}", exc_info=True)
+            return {"status": 500, "error": str(e)}
+    
+    @staticmethod
     async def _execute_a2a_simulation(
         session_id: str,
         initiator_user_id: str,
@@ -829,7 +1053,9 @@ class A2AService:
                                 "thread_id": thread_id,
                                 "participants": target_user_ids,
                                 "location": location or place_pref.get("location"),
-                                "activity": activity or place_pref.get("activity")
+                                "activity": activity or place_pref.get("activity"),
+                                "date": date or place_pref.get("date"),
+                                "time": time or place_pref.get("time")
                             })
                             # place_pref 업데이트는 Supabase에서 직접 업데이트 필요
                             # 일단 세션은 재사용
@@ -846,7 +1072,9 @@ class A2AService:
                             "thread_id": thread_id,
                             "participants": target_user_ids,
                             "location": location,
-                            "activity": activity
+                            "activity": activity,
+                            "date": date,
+                            "time": time
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -892,7 +1120,9 @@ class A2AService:
                         "thread_id": thread_id,
                         "participants": target_user_ids,
                         "location": location,
-                        "activity": activity
+                        "activity": activity,
+                        "date": date,
+                        "time": time
                     }
                     
                     session = await A2ARepository.create_session(
