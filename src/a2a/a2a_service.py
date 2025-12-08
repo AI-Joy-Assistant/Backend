@@ -332,7 +332,9 @@ class A2AService:
         user_id: str,
         reason: Optional[str] = None,
         preferred_time: Optional[str] = None,
-        manual_input: Optional[str] = None
+        manual_input: Optional[str] = None,
+        new_date: Optional[str] = None,
+        new_time: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         A2A 세션의 재조율을 요청합니다.
@@ -343,15 +345,28 @@ class A2AService:
             if not session:
                 return {"status": 404, "error": "세션을 찾을 수 없습니다."}
             
-            # proposal 정보 구성
+            # proposal 정보 구성 - 프론트엔드에서 전송한 새로운 값 포함
             details = session.get("details", {})
             proposal = {
-                "date": details.get("proposed_date", ""),
-                "time": details.get("proposed_time", ""),
+                # 새로 선택한 날짜/시간이 있으면 사용, 없으면 기존 값 유지
+                "date": new_date or details.get("proposedDate", ""),
+                "time": new_time or details.get("proposedTime", ""),
                 "location": details.get("location", ""),
                 "activity": details.get("purpose", ""),
-                "participants": details.get("participants", [])
+                "participants": details.get("participants", []),
+                # 프론트엔드에서 보낸 재조율 정보 추가
+                "reason": reason,
+                "preferred_time": preferred_time,
+                "manual_input": manual_input
             }
+            
+            print(f"🔄 [Reschedule] Session: {session_id}")
+            print(f"   - User: {user_id}")
+            print(f"   - Reason: {reason}")
+            print(f"   - New Date: {new_date}")
+            print(f"   - New Time: {new_time}")
+            print(f"   - Manual Input: {manual_input}")
+            print(f"   - Proposal: {proposal}")
             
             # 거절 처리 (handle_schedule_approval에서 approved=False로 호출)
             result = await A2AService.handle_schedule_approval(
@@ -1866,15 +1881,102 @@ class A2AService:
             
             # 날짜/시간 파싱
             if not date or not time:
-                # 시간이 지정되지 않으면 가능한 시간 슬롯 반환
-                return {
-                    "available": True,
-                    "available_slots": [
-                        {"date": "9월 3일", "time": "오후 4시"},
-                        {"date": "9월 4일", "time": "오후 5시"},
-                        {"date": "9월 5일", "time": "오후 7시"}
-                    ]
-                }
+                # 시간이 지정되지 않으면 Google Calendar에서 실제 가용 시간 슬롯 조회
+                try:
+                    from zoneinfo import ZoneInfo
+                    KST = ZoneInfo("Asia/Seoul")
+                    # 내일 날짜부터 3일간 조회
+                    base_date = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                    end_check_date = base_date + timedelta(days=3)
+                    
+                    # 캘린더 이벤트 가져오기
+                    gc_service = GoogleCalendarService()
+                    events = await gc_service.get_calendar_events(
+                        access_token=access_token,
+                        time_min=base_date,
+                        time_max=end_check_date
+                    )
+                    
+                    # Busy 구간 정리
+                    busy_intervals = []
+                    for e in events:
+                        start_str = e.start.get("dateTime")
+                        end_str = e.end.get("dateTime")
+                        if start_str and end_str:
+                            s_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                            e_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                            busy_intervals.append((s_dt, e_dt))
+                            
+                    busy_intervals.sort(key=lambda x: x[0])
+                    
+                    # 가용 슬롯 찾기 (09:00 ~ 22:00 사이, 1시간 단위)
+                    available_slots = []
+                    
+                    curr_check = base_date
+                    while curr_check < end_check_date and len(available_slots) < 3:
+                        # 하루의 시작/끝 (09시 ~ 22시)
+                        day_start = curr_check.replace(hour=9, minute=0, second=0)
+                        day_end = curr_check.replace(hour=22, minute=0, second=0)
+                        
+                        # 이 날의 busy 구간 필터링
+                        day_busy = []
+                        for s, e in busy_intervals:
+                            # 겹치는 구간만 추출
+                            # s가 day_end보다 전이고, e가 day_start보다 후면 겹침
+                            if s < day_end and e > day_start:
+                                day_busy.append((max(s, day_start), min(e, day_end)))
+                        
+                        # 빈 시간 찾기
+                        cursor = day_start
+                        while cursor < day_end and len(available_slots) < 3:
+                            slot_end = cursor + timedelta(hours=1)
+                            
+                            # cursor ~ slot_end 구간이 day_busy와 겹치는지 확인
+                            is_busy = False
+                            for s, e in day_busy:
+                                if cursor < e and slot_end > s:
+                                    is_busy = True
+                                    # 겹치면 busy 끝나는 시간으로 점프 (최적화)
+                                    if e > cursor:
+                                        cursor = e
+                                    break
+                            
+                            if not is_busy:
+                                # 찾음
+                                date_str = cursor.strftime("%m월 %d일")
+                                time_str = cursor.strftime("%p %I시").replace("AM", "오전").replace("PM", "오후")
+                                available_slots.append({"date": date_str, "time": time_str})
+                                cursor += timedelta(hours=1) # 다음 슬롯
+                            else:
+                                if is_busy:
+                                     # 이미 위에서 jump 했거나, 1시간 더함 (단순화: 30분 단위 이동 등 가능하지만 여기선 1시간)
+                                     # 위 jump 로직이 완전하지 않을 수 있으므로 안전하게 30분 단위 이동
+                                     pass
+                                     
+                            # cursor 갱신 (loop 안전장치)
+                            # is_busy 였으면 cursor는 busy end로 이동했을 수도 있음.
+                            # 만약 이동 안했으면 30분 추가
+                            if is_busy:
+                                # cursor가 그대로라면 강제 전진
+                                cursor += timedelta(minutes=30)
+                        
+                        curr_check += timedelta(days=1)
+                    
+                    if not available_slots:
+                         # 정말 꽉 찼으면 기본값
+                         available_slots = [{"date": "가능한 시간 없음", "time": ""}]
+
+                    return {
+                        "available": False, # 특정 시간이 없으므로 False가 맞으나, 로직상 제안을 위해 True로 보내거나 client 처리?
+                        # 원본 로직 유지: 시간이 지정되지 않으면 available=True로 보내고 slots를 줌
+                        "available": True,
+                        "available_slots": available_slots
+                    }
+
+                except Exception as e:
+                    logger.error(f"가용 시간 조회 실패: {e}")
+                    # 실패 시 빈 리스트
+                    return {"available": True, "available_slots": []}
             
             # 날짜/시간 파싱 (ChatService의 파싱 로직 활용)
             from src.chat.chat_service import ChatService
@@ -2065,6 +2167,8 @@ class A2AService:
         2. 캘린더 등록 실패 시(상대방 토큰 만료 등) 에러를 무시하지 않고 결과 메시지에 포함
         """
         try:
+            print(f"📌 [handle_schedule_approval] Started - approved={approved}, user_id={user_id}")
+            print(f"📌 [handle_schedule_approval] Proposal: {proposal}")
             # 1. 세션 및 참여자 정보 확보
             sessions = []
             if thread_id:
@@ -2311,6 +2415,91 @@ class A2AService:
                 }
 
             else:
+                print(f"📌 [handle_schedule_approval] Entered ELSE branch (approved=False)")
+                print(f"📌 [handle_schedule_approval] sessions count: {len(sessions)}")
+                # [New] 재조율 요청인 경우 (reason 또는 preferred_time이 존재함)
+                if proposal.get("reason") or proposal.get("preferred_time"):
+                    print(f"📌 [handle_schedule_approval] Reschedule condition MET - reason={proposal.get('reason')}")
+                    logger.info(f"재조율 요청 감지 - user_id: {user_id}")
+                    
+                    # 기존 세션을 '완료됨' 처리하지 않고 업데이트 (User Request)
+                    # "재협상 요청을 하면 새로운 세션이 시작되는게 아니라, 기존 약속이 변경되는걸 원해"
+                    
+                    for session in sessions:
+                        try:
+                            sid = session["id"]
+                            # 현재 세션의 initiator/target 확인
+                            curr_initiator = session["initiator_user_id"]
+                            curr_target = session["target_user_id"]
+                            
+                            # 역할 스왑: 재조율 요청자(user_id)가 initiator가 되고, 상대방이 target이 됨
+                            # 이렇게 해야 상대방의 홈 화면(Pending Requests)에 카드가 뜸
+                            new_initiator = user_id
+                            new_target = curr_target if curr_initiator == user_id else curr_initiator
+                            
+                            # details 업데이트 내용 구성
+                            old_details = session.get("details", {})
+                            new_details = {
+                                **old_details,
+                                "purpose": proposal.get('activity', old_details.get('purpose')),
+                                "location": proposal.get('location', old_details.get('location')),
+                                "participants": old_details.get('participants', []),
+                                "proposedDate": proposal.get('date', old_details.get('proposedDate')),
+                                "proposedTime": proposal.get('time', old_details.get('proposedTime')),
+                                "originalProposedDate": old_details.get('proposedDate') if 'originalProposedDate' not in old_details else old_details.get('originalProposedDate'),
+                                "originalProposedTime": old_details.get('proposedTime') if 'originalProposedTime' not in old_details else old_details.get('originalProposedTime'),
+                                "rescheduleReason": proposal.get('reason'),
+                                "note": proposal.get('manual_input'),
+                                "preferredTime": proposal.get('preferred_time'),
+                                "proposer": user_name # 제안자 이름 업데이트
+                            }
+                            
+                            # 5. DB 업데이트 (in_progress로 변경, initiator/target 교체, details 업데이트)
+                            print(f"🔄 Rescheduling Session: {sid}")
+                            print(f"   - Old Initiator: {curr_initiator}, Old Target: {curr_target}")
+                            print(f"   - New Initiator: {new_initiator}, New Target: {new_target}")
+                            print(f"   - New Details: {new_details}")
+
+                            update_data = {
+                                "status": "in_progress",
+                                "initiator_user_id": new_initiator,
+                                "target_user_id": new_target,
+                                "place_pref": new_details,  # Changed from 'details' to 'place_pref'
+                                "updated_at": dt_datetime.now().isoformat()
+                            }
+                            
+                            # ⚠️ 중요: 모든 관련 세션 업데이트
+                            result = supabase.table('a2a_session').update(update_data).eq('id', sid).execute()
+                            print(f"✅ Update Result: {result.data if result.data else 'No Data'}")
+
+                            # 6. 채팅방에 알림 메시지 전송 (상대방에겐 새로운 요청처럼 보임)
+                            # _send_approval_request_to_chat 재사용
+                            # proposal 구조 맞춰주기
+                            approval_proposal = {
+                                "date": new_details["proposedDate"],
+                                "time": new_details["proposedTime"],
+                                "location": new_details["location"],
+                                "activity": new_details["purpose"],
+                                "participants": new_details["participants"]
+                            }
+                            
+                            await A2AService._send_approval_request_to_chat(
+                                user_id=new_target, # 상대방에게 전송
+                                thread_id=session.get('thread_id'),
+                                session_ids=[sid],
+                                proposal=approval_proposal,
+                                initiator_name=user_name
+                            )
+                            
+                        except Exception as e:
+                            logger.error(f"세션 {session.get('id')} 업데이트 중 오류: {e}")
+
+                    return {
+                        "status": 200, 
+                        "message": "기존 약속 내용을 변경하여 재요청했습니다.",
+                        "updated_session_id": sessions[0]["id"] if sessions else None
+                    }
+
                 # 거절 로직 (기존 코드 유지)
                 # ... (필요 시 거절 처리 코드도 동일한 동기화 방식 적용 권장)
                 

@@ -126,8 +126,9 @@ async def get_a2a_session(
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
             "purpose": summary or "일정 조율",
-            "proposedDate": time_window.get("date") or place_pref.get("date") or "",
-            "proposedTime": time_window.get("time") or place_pref.get("time") or "미정",
+            # 우선순위: place_pref.proposedDate > place_pref.date > time_window.date (재조율 시 place_pref에 proposedDate 키로 저장됨)
+            "proposedDate": place_pref.get("proposedDate") or place_pref.get("date") or time_window.get("date") or "",
+            "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or time_window.get("time") or "미정",
             "location": place_pref.get("location") or "미정",
             "process": process
         }
@@ -287,6 +288,17 @@ async def get_user_sessions(
         for session in grouped_sessions:
             # 기본 정보
             place_pref = session.get("place_pref", {}) or {}
+            # place_pref가 문자열로 저장된 경우 JSON 파싱
+            if isinstance(place_pref, str):
+                try:
+                    place_pref = json.loads(place_pref)
+                except:
+                    place_pref = {}
+            if not isinstance(place_pref, dict):
+                place_pref = {}
+                
+            print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
+            
             summary = place_pref.get("summary") or session.get("summary")
             
             # Title
@@ -312,13 +324,17 @@ async def get_user_sessions(
             # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
             # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
             # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 기본 구조만 잡음
+            
             process = [] 
             
+            # place_pref에서 직접 날짜/시간 정보 추출 (details 컬럼은 DB에 없음)
+            # 재조율 시 proposedDate/proposedTime 키, 초기 생성 시 date/time 키 사용
             details = {
                 "proposer": initiator_name,
                 "proposerAvatar": initiator_avatar,
-                "purpose": summary or "일정 조율",
-                "proposedTime": place_pref.get("time") or "미정",
+                "purpose": place_pref.get("purpose") or summary or "일정 조율",
+                "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or "미정",
+                "proposedDate": place_pref.get("proposedDate") or place_pref.get("date"),
                 "location": place_pref.get("location") or "미정",
                 "process": process
             }
@@ -345,7 +361,12 @@ async def get_pending_requests(
     - status가 'pending' 또는 'pending_approval'인 세션만 반환
     """
     try:
+        print(f"🔍 [Pending Requests] Fetching for user: {current_user_id}")
         sessions = await A2ARepository.get_pending_requests_for_user(current_user_id)
+        print(f"🔍 [Pending Requests] Found {len(sessions) if sessions else 0} sessions")
+        if sessions:
+            for s in sessions:
+                print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
         
         if not sessions:
             return {"requests": []}
@@ -373,9 +394,15 @@ async def get_pending_requests(
             participants = place_pref.get("participants", []) if isinstance(place_pref, dict) else []
             participant_count = len(participants) if participants else 1
             
-            # 날짜/시간 정보
-            proposed_time = place_pref.get("time") if isinstance(place_pref, dict) else None
-            proposed_date = place_pref.get("date") if isinstance(place_pref, dict) else None
+            # 날짜/시간 정보 (place_pref에 저장됨)
+            # 재조율 시 proposedDate/proposedTime 키로 저장, 초기 생성 시 date/time 키로 저장
+            proposed_date = None
+            proposed_time = None
+            
+            if isinstance(place_pref, dict):
+                # 재조율된 경우 proposedDate/proposedTime 키 사용
+                proposed_date = place_pref.get("proposedDate") or place_pref.get("date")
+                proposed_time = place_pref.get("proposedTime") or place_pref.get("time")
             
             requests.append({
                 "id": session.get("id"),
@@ -495,10 +522,14 @@ async def reschedule_session(
     - 새로운 요구사항(reason, preferred_time 등)을 반영하여 협상 재개
     """
     try:
+        print(f"📥 [Reschedule Router] Incoming request for session: {session_id}")
         body = await request.json()
+        print(f"📥 [Reschedule Router] Body: {body}")
         reason = body.get("reason")
         preferred_time = body.get("preferred_time")
-        manual_input = body.get("manual_input")
+        manual_input = body.get("manual_input") or body.get("note")
+        new_date = body.get("date")  # 새로 선택한 날짜
+        new_time = body.get("time")  # 새로 선택한 시간
 
         # 권한 확인 및 세션 조회
         session = await A2ARepository.get_session(session_id)
@@ -514,7 +545,9 @@ async def reschedule_session(
             user_id=current_user_id,
             reason=reason,
             preferred_time=preferred_time,
-            manual_input=manual_input
+            manual_input=manual_input,
+            new_date=new_date,
+            new_time=new_time
         )
         
         return result
