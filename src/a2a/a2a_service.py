@@ -163,6 +163,17 @@ class A2AService:
             details = session.get("details", {}) or {}
             place_pref = session.get("place_pref", {}) or {}
             time_window = session.get("time_window", {}) or {}
+
+            # JSON 파싱 (문자열로 저장된 경우)
+            if isinstance(details, str):
+                try: details = json.loads(details)
+                except: details = {}
+            if isinstance(place_pref, str):
+                try: place_pref = json.loads(place_pref)
+                except: place_pref = {}
+            if isinstance(time_window, str):
+                try: time_window = json.loads(time_window)
+                except: time_window = {}
             
             logger.info(f"세션 정보 확인 - details: {details}, place_pref: {place_pref}, time_window: {time_window}")
             
@@ -355,6 +366,119 @@ class A2AService:
             
         except Exception as e:
             logger.error(f"재조율 요청 실패: {str(e)}", exc_info=True)
+            return {"status": 500, "error": str(e)}
+
+    @staticmethod
+    async def get_available_dates(session_id: str, year: int, month: int) -> Dict[str, Any]:
+        """
+        특정 월의 모든 참여자 공통 가능 날짜 반환
+        """
+        try:
+            # 세션 및 참여자 확인
+            session = await A2ARepository.get_session(session_id)
+            if not session:
+                return {"status": 404, "error": "세션을 찾을 수 없습니다."}
+            
+            initiator_user_id = session.get("initiator_user_id")
+            target_user_id = session.get("target_user_id")
+            participants = [initiator_user_id, target_user_id]
+            
+            # Google Calendar Service
+            service = GoogleCalendarService()
+            
+            # 시간 범위 설정 (해당 월 1일 ~ 말일)
+            import calendar
+            last_day = calendar.monthrange(year, month)[1]
+            
+            tz = timezone(timedelta(hours=9)) # KST
+            time_min = datetime(year, month, 1, 0, 0, 0, tzinfo=tz).isoformat()
+            time_max = datetime(year, month, last_day, 23, 59, 59, tzinfo=tz).isoformat()
+            
+            # 모든 참여자의 바쁜 구간 수집
+            all_busy_intervals = []
+            
+            for pid in participants:
+                # 토큰 확보
+                access_token = await AuthService.get_valid_access_token_by_user_id(pid)
+                if not access_token:
+                    continue # 토큰 없는 유저는 무시하거나 에러 처리 (여기선 무시하고 진행)
+                
+                events = await service.get_calendar_events(
+                    access_token=access_token,
+                    time_min=time_min,
+                    time_max=time_max
+                )
+                
+                for e in events:
+                    s = e.start.get("dateTime")
+                    e_ = e.end.get("dateTime")
+                    if s and e_:
+                        try:
+                            start = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                            end = datetime.fromisoformat(e_.replace("Z", "+00:00"))
+                            all_busy_intervals.append((start, end))
+                        except:
+                            continue
+
+            # 병합 및 가용성 체크
+            all_busy_intervals.sort(key=lambda x: x[0])
+            merged_busy = []
+            for s, e in all_busy_intervals:
+                if not merged_busy or s > merged_busy[-1][1]:
+                    merged_busy.append([s, e])
+                else:
+                    merged_busy[-1][1] = max(merged_busy[-1][1], e)
+            
+            # 날짜별 가용 여부 판단
+            # 간단한 로직: 하루 중 9시~22시 사이에 1시간 이상 비어있으면 Available로 간주
+            
+            available_date_strings = []
+            
+            curr_date = datetime(year, month, 1, tzinfo=tz).date()
+            end_date_obj = datetime(year, month, last_day, tzinfo=tz).date()
+            
+            while curr_date <= end_date_obj:
+                # 해당 날짜의 9시 ~ 22시
+                day_start = datetime(curr_date.year, curr_date.month, curr_date.day, 9, 0, 0, tzinfo=tz)
+                day_end = datetime(curr_date.year, curr_date.month, curr_date.day, 22, 0, 0, tzinfo=tz)
+                
+                # 해당 날짜에 겹치는 busy interval 찾기
+                day_busy = []
+                for s, e in merged_busy:
+                    # s, e는 aware datetime. 
+                    # 겹치는 구간 구하기
+                    overlap_start = max(s, day_start)
+                    overlap_end = min(e, day_end)
+                    
+                    if overlap_start < overlap_end:
+                        day_busy.append((overlap_start, overlap_end))
+                
+                # Free time 찾기
+                cursor = day_start
+                has_slot = False
+                for s, e in day_busy:
+                    if cursor < s:
+                        if (s - cursor).total_seconds() >= 3600: # 1시간 이상
+                            has_slot = True
+                            break
+                    cursor = max(cursor, e)
+                
+                if not has_slot:
+                    if cursor < day_end and (day_end - cursor).total_seconds() >= 3600:
+                        has_slot = True
+                
+                if has_slot:
+                    available_date_strings.append(curr_date.strftime("%Y-%m-%d"))
+                
+                curr_date += timedelta(days=1)
+
+            return {
+                "status": 200,
+                "available_dates": available_date_strings
+            }
+
+        except Exception as e:
+            logger.error(f"가용 날짜 조회 실패: {str(e)}")
             return {"status": 500, "error": str(e)}
     
     @staticmethod

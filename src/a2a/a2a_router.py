@@ -85,6 +85,17 @@ async def get_a2a_session(
         
         # 2. 기본 정보
         place_pref = session.get("place_pref", {}) or {}
+        time_window = session.get("time_window", {}) or {}
+
+        # JSON 파싱 (문자열로 저장된 경우)
+        import json
+        if isinstance(place_pref, str):
+            try: place_pref = json.loads(place_pref)
+            except: place_pref = {}
+        if isinstance(time_window, str):
+            try: time_window = json.loads(time_window)
+            except: time_window = {}
+            
         summary = place_pref.get("summary") or session.get("summary")
         
         # Initiator 정보 조회
@@ -115,10 +126,14 @@ async def get_a2a_session(
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
             "purpose": summary or "일정 조율",
-            "proposedTime": place_pref.get("time") or "미정",
+            "proposedDate": time_window.get("date") or place_pref.get("date") or "",
+            "proposedTime": time_window.get("time") or place_pref.get("time") or "미정",
             "location": place_pref.get("location") or "미정",
             "process": process
         }
+        
+        # 디버깅: 추출된 날짜 확인
+        print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}")
 
         session["details"] = details
         session["title"] = summary if summary else "일정 조율"
@@ -507,3 +522,31 @@ async def reschedule_session(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"재조율 요청 실패: {str(e)}")
+@router.get("/session/{session_id}/availability", summary="특정 월의 가용 날짜 조회")
+async def get_session_availability(
+    session_id: str,
+    year: int,
+    month: int,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    세션 참여자 모두가 가능한 날짜 목록을 반환합니다.
+    - year, month 쿼리 파라미터 필요
+    """
+    try:
+        # 권한 확인 (세션 참여자만)
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
+            raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+        result = await A2AService.get_available_dates(session_id, year, month)
+        if result["status"] == 200:
+            return result
+        else:
+            raise HTTPException(status_code=result["status"], detail=result.get("error"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"가용 날짜 조회 실패: {str(e)}")
