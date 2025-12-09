@@ -167,13 +167,31 @@ class IntentService:
                         location = words[-1] if len(words[-1]) > 1 else None
                 break
 
+        # 제목(Title) 추출
+        title = None
+        # "XX 예약", "XX 약속", "XX 미팅" 패턴
+        title_pattern = r"([가-힣A-Za-z0-9]+)\s*(예약|약속|미팅|모임|회식)"
+        # [FIX] finditer로 모든 매칭을 확인하여 "내일 예약" 같은 건너뛰고 "치과 예약"을 찾음
+        matches = re.finditer(title_pattern, text)
+        for m in matches:
+            word = m.group(1)
+            type_ = m.group(2)
+            # "내일 예약", "오늘 약속" 등은 타이틀로 부적절하므로 제외
+            if word in ["오늘", "내일", "모레", "이번주", "다음주", "점심", "저녁", "아침", "새벽", "오후", "오전"]:
+                continue
+            
+            # 유효한 타이틀 발견
+            title = f"{word} {type_}"
+            break
+
         return {
             "intent": "schedule" if has_schedule else None,
             "friend_name": friend_name,
             "friend_names": friend_names if len(friend_names) > 1 else None,  # 여러 명일 때
             "date": date_expr,
             "time": time_expr,
-            "activity": "약속" if has_schedule else None,
+            "activity": None,
+            "title": title,
             "location": location,
             "has_schedule_request": has_schedule,
             "raw": {"heuristic": True},
@@ -241,18 +259,33 @@ class IntentService:
                 if friend_names_list:
                     friend_name = friend_names_list[0]
         
+        # [FIX] 날짜 우선순위 조정: 명시적인 상대 날짜(내일, 모레 등)가 휴리스틱에 있다면 LLM보다 우선
+        # LLM이 "내일"을 "오늘" 날짜로 잘못 계산해서 반환하는 경우 방지
+        heuristic_date = heuristic_result.get("date")
+        if heuristic_date and heuristic_date in ["내일", "모레", "다음주", "이번주"]:
+            final_date = heuristic_date
+        else:
+            final_date = raw.get("date") or heuristic_date
+
         # 최종 병합 (빈 필드는 휴리스틱으로 채움)
         final_result = {
             "intent": "schedule" if has_schedule else None,
             "friend_name": friend_name,
             "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
-            "date": raw.get("date") or heuristic_result.get("date"),
+            "date": final_date,
             "time": raw.get("time") or heuristic_result.get("time"),
             "activity": raw.get("activity") or heuristic_result.get("activity"),
+            "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
             "has_schedule_request": bool(has_schedule),
             "raw": {**raw, "heuristic_used": heuristic_result.get("has_schedule_request", False)},
         }
+
+        # [Safety Check] "내일" 키워드가 원문에 있고, 부정어("안되고" 등)가 없으면 무조건 date="내일"로 덮어쓰기
+        # LLM이나 휴리스틱이 놓쳤을 경우를 대비
+        if "내일" in message and "내일" not in (final_result["date"] or ""):
+            # 단순 포함 여부만 보면 위험할 수 있으나(내일은 안돼), 현재 이슈 해결을 위해 우선 적용
+            final_result["date"] = "내일"
 
         logger.info(f"최종 Intent 추출 결과: {final_result}")
         

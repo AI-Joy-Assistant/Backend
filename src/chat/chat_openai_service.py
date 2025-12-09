@@ -110,15 +110,17 @@ JSON 형태로 다음 정보를 반환하세요:
     "friend_names": ["친구1", "친구2"] (여러 명인 경우, friend_name보다 우선),
     "date": "날짜 (오늘, 내일, 모레, 특정 날짜, 이번주 등)",
     "time": "시간 (점심, 저녁, 특정 시간) 또는 null (시간 후보 요청 시)",
-    "activity": "활동 내용",
+    "activity": "활동 내용 (밥, 미팅 등)",
+    "title": "일정 제목 (예: 치과 예약, 팀 미팅, 점심 약속 등 - 구체적인 명칭이 있다면 우선 사용)",
     "location": "장소 (있다면)",
     "has_schedule_request": true 또는 false
 }}
 
 예시:
-- "아구만이랑 내일 점심 약속 잡아줘" → {{"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "has_schedule_request": true}}
-- "민서, 규민이랑 이번주 금요일 저녁 7시에 밥 약속 잡아줘" → {{"friend_names": ["민서", "규민"], "date": "이번주 금요일", "time": "저녁 7시", "activity": "밥", "has_schedule_request": true}}
-- "이번주에 규민이랑 민서랑 미팅하고싶어. 가능한 일정 후보를 알려줘" → {{"friend_names": ["규민", "민서"], "date": "이번주", "time": null, "activity": "미팅", "has_schedule_request": true}}
+- "아구만이랑 내일 점심 약속 잡아줘" → {{"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "title": "점심 약속", "has_schedule_request": true}}
+- "민서, 규민이랑 이번주 금요일 저녁 7시에 밥 약속 잡아줘" → {{"friend_names": ["민서", "규민"], "date": "이번주 금요일", "time": "저녁 7시", "activity": "밥", "title": "저녁 식사", "has_schedule_request": true}}
+- "내일 치과 예약이 있어 3시에 일정 등록해줘" → {{"date": "내일", "time": "3시", "title": "치과 예약", "has_schedule_request": true}}
+- "이번주에 규민이랑 민서랑 미팅하고싶어. 가능한 일정 후보를 알려줘" → {{"friend_names": ["규민", "민서"], "date": "이번주", "time": null, "activity": "미팅", "title": "미팅", "has_schedule_request": true}}
 - "안녕하세요" → {{"has_schedule_request": false}}
 
 **반드시 JSON 형식만 반환하세요. 다른 텍스트는 포함하지 마세요.**"""

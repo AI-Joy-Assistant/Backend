@@ -7,6 +7,7 @@ from config.settings import settings
 from .chat_service import ChatService
 from .chat_models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse
 from .chat_repository import ChatRepository
+from config.database import supabase
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +115,11 @@ async def chat_with_gpt(
     """ChatGPT와 자유로운 대화를 합니다."""
     message = request.get("message", "")
     selected_friends = request.get("selected_friends")
+    session_id = request.get("session_id")
     if not message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
-    result = await ChatService.start_ai_conversation(current_user_id, message, selected_friend_ids=selected_friends)
+    result = await ChatService.start_ai_conversation(current_user_id, message, selected_friend_ids=selected_friends,session_id=session_id)
     
     if result["status"] == 200:
         return result["data"]
@@ -126,14 +128,54 @@ async def chat_with_gpt(
 
 @router.get("/history", summary="채팅 기록 조회")
 async def get_chat_history(
+    session_id: Optional[str] = None,
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """사용자의 채팅 기록을 조회합니다."""
+    """
+    사용자의 채팅 기록을 조회합니다.
+    - session_id가 넘어오면 해당 세션의 기록만 조회
+    - 없으면 기존처럼 전체 최근 기록 조회
+    """
     try:
-        chat_logs = await ChatRepository.get_recent_chat_logs(current_user_id, limit=50)
+        chat_logs = await ChatRepository.get_recent_chat_logs(
+            current_user_id,
+            limit=50,
+            session_id=session_id,   # ✅ 추가
+        )
         return chat_logs
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"채팅 기록 조회 실패: {str(e)}")
+
+
+
+@router.post("/sessions", summary="새 채팅 세션 생성")
+async def create_chat_session(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    비서 채팅 화면에서 사용할 '채팅 세션(채팅방)'을 하나 생성합니다.
+    chat_sessions 테이블에 row를 하나 만들고, 생성된 정보를 그대로 돌려줍니다.
+    """
+    try:
+        res = supabase.table("chat_sessions").insert({
+            "user_id": current_user_id,
+            "title": "새 채팅",
+        }).execute()
+
+        if not res.data:
+            raise HTTPException(status_code=500, detail="채팅 세션 생성 실패")
+
+        session = res.data[0]
+
+        return {
+            "id": session["id"],
+            "title": session.get("title", "새 채팅"),
+            "created_at": session.get("created_at"),
+            "updated_at": session.get("updated_at"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅 세션 생성 실패: {str(e)}")
+
 
 @router.get("/friend/{friend_id}", summary="특정 친구와의 대화 내용 조회")
 async def get_friend_messages(

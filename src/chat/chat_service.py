@@ -1,6 +1,5 @@
 from typing import List, Dict, Any, Optional
 from zoneinfo import ZoneInfo
-
 from .chat_repository import ChatRepository
 from .chat_models import ChatRoom, ChatMessage, ChatRoomListResponse, ChatMessagesResponse
 from .chat_openai_service import OpenAIService
@@ -12,6 +11,7 @@ import re
 from src.intent.service import IntentService
 
 logger = logging.getLogger(__name__)
+
 
 class ChatService:
 
@@ -114,14 +114,14 @@ class ChatService:
     async def send_message(send_id: str, receive_id: str, message: str, message_type: str = "text") -> Dict[str, Any]:
         """메시지 전송"""
         try:
-            # 메시지 전송
+            # 메시지 전송 (chat_log에 한 줄 저장)
             sent_message = await ChatRepository.send_message(send_id, receive_id, message, message_type)
 
             message_obj = ChatMessage(
                 id=sent_message['id'],
-                send_id=sent_message['send_id'],
-                receive_id=sent_message['receive_id'],
-                message=sent_message['message'],
+                send_id=sent_message.get('user_id'),
+                receive_id=sent_message.get('friend_id'),
+                message=sent_message.get('request_text'),
                 message_type=sent_message.get('message_type', 'text'),
                 created_at=sent_message['created_at']
             )
@@ -169,7 +169,12 @@ class ChatService:
             }
 
     @staticmethod
-    async def start_ai_conversation(user_id: str, message: str, selected_friend_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def start_ai_conversation(
+        user_id: str,
+        message: str,
+        selected_friend_ids: Optional[List[str]] = None,
+        session_id: Optional[str] = None,   # ✅ 프론트에서 넘어오는 session_id
+    ) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
         try:
             # 1. 사용자 메시지 저장
@@ -178,7 +183,8 @@ class ChatService:
                 request_text=message,
                 response_text=None,
                 friend_id=None,
-                message_type="user_message"
+                message_type="user_message",
+                session_id=session_id,  # ✅ 세션 연결
             )
 
             # 2. 의도 파악
@@ -196,17 +202,17 @@ class ChatService:
             logger.info(f"[CHAT] schedule_info: {schedule_info}")
 
             # [✅ 수정 1] 변수 초기화 (500 에러 방지)
-            ai_result = {}
-            ai_response = None
+            ai_result: Dict[str, Any] = {}
+            ai_response: Optional[str] = None
             openai_service = OpenAIService()
 
             recoordination_needed = False
-            thread_id_for_recoordination = None
-            session_ids_for_recoordination = []
+            thread_id_for_recoordination: Optional[str] = None
+            session_ids_for_recoordination: List[str] = []
 
             # --- 재조율 감지 로직 ---
             from config.database import supabase
-            from datetime import datetime, timezone, timedelta
+            from datetime import timezone
 
             # 이 시간보다 이전에 일어난 '거절'은 이미 해결된(지나간) 일이므로 무시하기 위함입니다.
             last_success_time = datetime.min.replace(tzinfo=timezone.utc)
@@ -242,8 +248,8 @@ class ChatService:
                     try:
                         log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
                         if log_time < last_success_time:
-                            continue # 건너뜀
-                    except:
+                            continue  # 건너뜀
+                    except Exception:
                         pass
 
                     if not meta.get('approved', True) and meta.get('thread_id'):
@@ -268,8 +274,10 @@ class ChatService:
                         # [✅ 추가 2] 시간 체크
                         try:
                             log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
-                            if log_time < last_success_time: continue
-                        except: pass
+                            if log_time < last_success_time:
+                                continue
+                        except Exception:
+                            pass
 
                         meta = log.get('metadata', {})
                         if meta.get('needs_recoordination') and meta.get('thread_id'):
@@ -288,8 +296,10 @@ class ChatService:
                             # [✅ 추가 2] 시간 체크
                             try:
                                 log_time = datetime.fromisoformat(log['created_at'].replace('Z', '+00:00'))
-                                if log_time < last_success_time: continue
-                            except: pass
+                                if log_time < last_success_time:
+                                    continue
+                            except Exception:
+                                pass
 
                             meta = log.get('metadata', {})
                             # [핵심] 로그 상 'metadata': {'needs_recoordination': true, ...} 가 있는지 확인
@@ -311,8 +321,8 @@ class ChatService:
                     session_ids_for_recoordination = []
 
             # [✅ 수정] 명시적으로 선택된 친구가 있으면 우선 처리 및 일정 관련으로 강제 설정
-            friend_ids = []
-            friend_id_to_name = {}
+            friend_ids: List[str] = []
+            friend_id_to_name: Dict[str, str] = {}
             
             if selected_friend_ids:
                 logger.info(f"사용자가 선택한 친구 ID 사용: {selected_friend_ids}")
@@ -338,60 +348,63 @@ class ChatService:
                 ai_response = None
 
                 # 3. 친구 ID 찾기 (위에서 처리되지 않은 경우)
-            if not friend_ids:
-                if recoordination_needed:
-                    # [✅ 수정 2] 재조율 시 친구 정보 복구 확실하게 처리
-                    from src.a2a.a2a_repository import A2ARepository
-                    # session_ids가 있으면 그것으로, 없으면 thread_id로 찾기
-                    target_sessions = []
-                    # 1. session_ids로 조회 시도
-                    if session_ids_for_recoordination:
-                        for sid in session_ids_for_recoordination:
-                            sess = await A2ARepository.get_session(sid)
-                            if sess: target_sessions.append(sess)
+                if not friend_ids:
+                    if recoordination_needed:
+                        # [✅ 수정 2] 재조율 시 친구 정보 복구 확실하게 처리
+                        from src.a2a.a2a_repository import A2ARepository
+                        # session_ids가 있으면 그것으로, 없으면 thread_id로 찾기
+                        target_sessions: List[Dict[str, Any]] = []
+                        # 1. session_ids로 조회 시도
+                        if session_ids_for_recoordination:
+                            for sid in session_ids_for_recoordination:
+                                sess = await A2ARepository.get_session(sid)
+                                if sess:
+                                    target_sessions.append(sess)
 
-                    # 2. 실패 시 thread_id로 조회 시도
-                    if not target_sessions and thread_id_for_recoordination:
-                        target_sessions = await A2ARepository.get_thread_sessions(thread_id_for_recoordination)
+                        # 2. 실패 시 thread_id로 조회 시도
+                        if not target_sessions and thread_id_for_recoordination:
+                            target_sessions = await A2ARepository.get_thread_sessions(thread_id_for_recoordination)
 
-                    if target_sessions:
-                        # 모든 참여자 ID 수집 (나 제외)
-                        all_pids = set()
-                        for s in target_sessions:
-                            # place_pref의 participants가 가장 정확함
-                            place_pref = s.get('place_pref') or {}
-                            if isinstance(place_pref, dict) and place_pref.get('participants'):
-                                for p in place_pref['participants']:
-                                    all_pids.add(p)
+                        if target_sessions:
+                            # 모든 참여자 ID 수집 (나 제외)
+                            all_pids = set()
+                            for s in target_sessions:
+                                # place_pref의 participants가 가장 정확함
+                                place_pref = s.get('place_pref') or {}
+                                if isinstance(place_pref, dict) and place_pref.get('participants'):
+                                    for p in place_pref['participants']:
+                                        all_pids.add(p)
 
-                            # initiator/target 확인
-                            if s.get('initiator_user_id'): all_pids.add(s['initiator_user_id'])
-                            if s.get('target_user_id'): all_pids.add(s['target_user_id'])
+                                # initiator/target 확인
+                                if s.get('initiator_user_id'):
+                                    all_pids.add(s['initiator_user_id'])
+                                if s.get('target_user_id'):
+                                    all_pids.add(s['target_user_id'])
 
-                        # 나(user_id) 제외
-                        if user_id in all_pids:
-                            all_pids.remove(user_id)
+                            # 나(user_id) 제외
+                            if user_id in all_pids:
+                                all_pids.remove(user_id)
 
-                        friend_ids = list(all_pids)
+                            friend_ids = list(all_pids)
 
-                        if friend_ids:
-                            # 이름 조회
-                            user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
-                            friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
-                            friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
-                            logger.info(f"재조율 참여자 복구 성공: {friend_names} (IDs: {friend_ids})")
+                            if friend_ids:
+                                # 이름 조회
+                                user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
+                                friend_id_to_name = {fid: user_names.get(fid, '사용자') for fid in friend_ids}
+                                friend_names = [friend_id_to_name.get(fid, '사용자') for fid in friend_ids]
+                                logger.info(f"재조율 참여자 복구 성공: {friend_names} (IDs: {friend_ids})")
+                            else:
+                                logger.error("재조율 참여자 복구 실패: 친구 ID를 찾을 수 없음")
                         else:
-                            logger.error("재조율 참여자 복구 실패: 친구 ID를 찾을 수 없음")
-                    else:
-                        logger.error("재조율 세션 정보를 찾을 수 없습니다.")
+                            logger.error("재조율 세션 정보를 찾을 수 없습니다.")
 
-                else:
-                    # 신규 요청 (기존 유지)
-                    for name in friend_names:
-                        fid = await ChatService._find_friend_id_by_name(user_id, name)
-                        if fid:
-                            friend_ids.append(fid)
-                            friend_id_to_name[fid] = name
+                    else:
+                        # 신규 요청 (기존 유지)
+                        for name in friend_names:
+                            fid = await ChatService._find_friend_id_by_name(user_id, name)
+                            if fid:
+                                friend_ids.append(fid)
+                                friend_id_to_name[fid] = name
 
             # -------------------------------------------------------
             # A2A 세션 시작
@@ -407,6 +420,8 @@ class ChatService:
             elif is_schedule_related and friend_ids:
                 try:
                     from src.a2a.a2a_service import A2AService
+                    from src.a2a.a2a_repository import A2ARepository
+                    from src.auth.auth_repository import AuthRepository
 
                     # "조율 중" 메시지
                     if len(friend_names) > 1:
@@ -420,7 +435,8 @@ class ChatService:
                         request_text=None,
                         response_text=wait_msg,
                         friend_id=first_friend_id if len(friend_ids) == 1 else None,
-                        message_type="ai_response"
+                        message_type="ai_response",
+                        session_id=session_id,  # ✅ 세션 연결
                     )
                     response_sent_to_db = True
                     ai_response = wait_msg
@@ -429,24 +445,25 @@ class ChatService:
                     summary_parts = []
                     if friend_names:
                         summary_parts.append(", ".join(friend_names))
-                    if schedule_info.get("date"): summary_parts.append(schedule_info.get("date"))
-                    if schedule_info.get("time"): summary_parts.append(schedule_info.get("time"))
+                    if schedule_info.get("date"):
+                        summary_parts.append(schedule_info.get("date"))
+                    if schedule_info.get("time"):
+                        summary_parts.append(schedule_info.get("time"))
                     summary = " ".join(summary_parts) if summary_parts else "약속"
 
                     if recoordination_needed:
                         # [재조율 로직]
-                        from src.auth.auth_repository import AuthRepository
                         user_info = await AuthRepository.find_user_by_id(user_id)
                         initiator_name = user_info.get("name", "사용자") if user_info else "사용자"
 
                         # 세션 상태 업데이트
-                        for session_id in session_ids_for_recoordination:
-                            await A2ARepository.update_session_status(session_id, "in_progress")
+                        for session_id_for_update in session_ids_for_recoordination:
+                            await A2ARepository.update_session_status(session_id_for_update, "in_progress")
 
                         sessions_info = []
-                        for session_id, friend_id in zip(session_ids_for_recoordination, friend_ids):
+                        for session_id_for_update, friend_id in zip(session_ids_for_recoordination, friend_ids):
                             sessions_info.append({
-                                "session_id": session_id,
+                                "session_id": session_id_for_update,
                                 "target_id": friend_id,
                                 "target_name": friend_id_to_name.get(friend_id, "사용자")
                             })
@@ -501,7 +518,14 @@ class ChatService:
                     logger.error(f"A2A 세션 시작 중 오류: {str(e)}")
                     ai_response = "일정 조율을 시도했지만 문제가 발생했습니다."
                     if response_sent_to_db:
-                        await ChatRepository.create_chat_log(user_id=user_id, response_text=ai_response, message_type="ai_response")
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=ai_response,
+                            friend_id=None,
+                            message_type="ai_response",
+                            session_id=session_id,  # ✅ 세션 연결
+                        )
                     else:
                         response_sent_to_db = False
 
@@ -514,13 +538,14 @@ class ChatService:
                     if calendar_event:
                         ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
 
-            # 6. 응답이 없는 경우 (스케줄 정보 부족 또는 일반 대화) -> OpenAI Fallback
+                        # 6. 응답이 없는 경우 (스케줄 정보 부족 또는 일반 대화) -> OpenAI Fallback
             if ai_response is None and not response_sent_to_db:
-                conversation_history = await ChatService._get_conversation_history(user_id)
+                conversation_history = await ChatService._get_conversation_history(
+                    user_id,
+                    session_id=session_id,   # ✅ 이 세션 히스토리만 사용
+                )
                 ai_result = await openai_service.generate_response(message, conversation_history)
-                if ai_result["status"] == "error":
-                    return {"status": 500, "error": ai_result["message"]}
-                ai_response = ai_result["message"]
+
 
             # 7. 일반 대화 저장
             if not response_sent_to_db and ai_response:
@@ -530,7 +555,8 @@ class ChatService:
                     request_text=None,
                     response_text=ai_response,
                     friend_id=first_friend_id if len(friend_ids) == 1 else None,
-                    message_type="ai_response"
+                    message_type="ai_response",
+                    session_id=session_id,  # ✅ 세션 연결
                 )
 
             logger.info(f"AI 대화 완료 - 사용자: {user_id}")
@@ -588,13 +614,20 @@ class ChatService:
             }
 
     @staticmethod
-    async def _get_conversation_history(user_id: str) -> List[Dict[str, str]]:
-        """사용자의 최근 대화 히스토리 가져오기"""
+    async def _get_conversation_history(
+        user_id: str,
+        session_id: Optional[str] = None,        # ✅ 세션 옵션 추가
+    ) -> List[Dict[str, str]]:
+        """사용자의 최근 대화 히스토리 가져오기 (옵션: 특정 세션만)"""
         try:
             # 최근 30개의 대화 로그 가져오기 (거절 맥락 포함을 위해 증가)
-            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=30)
+            recent_logs = await ChatRepository.get_recent_chat_logs(
+                user_id,
+                limit=30,
+                session_id=session_id,            # ✅ 세션 기준으로 조회
+            )
 
-            conversation_history = []
+            conversation_history: List[Dict[str, str]] = []
             for log in recent_logs:
                 # 사용자 메시지
                 if log.get("request_text"):
@@ -605,16 +638,18 @@ class ChatService:
                         proposal = metadata.get("proposal", {})
 
                         if approved:
-                            # 승인한 경우
                             conversation_history.append({
                                 "type": "user",
                                 "message": f"일정을 승인했습니다: {proposal.get('date', '')} {proposal.get('time', '')}"
                             })
                         else:
-                            # 거절한 경우 - 재조율 맥락 포함
                             conversation_history.append({
                                 "type": "user",
-                                "message": f"일정을 거절했습니다: {proposal.get('date', '')} {proposal.get('time', '')}. 다른 시간으로 재조율을 원합니다."
+                                "message": (
+                                    f"일정을 거절했습니다: "
+                                    f"{proposal.get('date', '')} {proposal.get('time', '')}. "
+                                    "다른 시간으로 재조율을 원합니다."
+                                )
                             })
                     else:
                         # 일반 사용자 메시지
@@ -635,6 +670,7 @@ class ChatService:
         except Exception as e:
             logger.error(f"대화 히스토리 조회 실패: {str(e)}")
             return []
+
 
     @staticmethod
     async def _find_friend_id_by_name(user_id: str, friend_name: str) -> str:
@@ -764,19 +800,62 @@ class ChatService:
             location = schedule_info.get("location", "")
             friend_name = schedule_info.get("friend_name", "")
 
+            # [Safety Check] IntentService가 실패했을 경우를 대비해 여기서도 체크
+            if "내일" in original_text and "내일" not in date_str:
+                date_str = "내일"
+                schedule_info["date"] = "내일"
+
+            # [DEBUG] 날짜/시간 파싱 상세 로깅
+            try:
+                with open("debug_log.txt", "a") as f:
+                    f.write(f"\n[DEBUG] === Schedule Creation Start ===\n")
+                    f.write(f"[DEBUG] original_text: {original_text}\n")
+                    f.write(f"[DEBUG] initial date_str: {schedule_info.get('date')}\n")
+                    f.write(f"[DEBUG] resolved date_str: {date_str}\n")
+            except:
+                pass
+
             # 날짜 계산
-            start_date = ChatService._parse_date(schedule_info.get("date"))
+            start_date = ChatService._parse_date(date_str)
+            
+            try:
+                with open("debug_log.txt", "a") as f:
+                    f.write(f"[DEBUG] parsed start_date: {start_date}\n")
+            except:
+                pass
+
             if not start_date:
                 return None
 
             # 시간 계산
-            logger.info(f"시간 파싱 시작: time_str='{schedule_info.get('time')}', context='{original_text}'")
             start_time, end_time = ChatService._parse_time(schedule_info.get("time"), start_date, context_text=original_text)
-            logger.info(f"시간 파싱 결과: start_time={start_time}, end_time={end_time}")
+            
+            try:
+                with open("debug_log.txt", "a") as f:
+                    f.write(f"[DEBUG] parsed start_time: {start_time}\n")
+                    f.write(f"[DEBUG] parsed end_time: {end_time}\n")
+            except:
+                pass
 
-            # [수정] 일정 제목 생성 로직 개선 (summary가 None이 되지 않도록 처리)
-            # activity가 있으면 우선 사용, 없으면 사용자 입력 텍스트(original_text) 사용
-            if activity:
+            # [수정] 일정 제목 생성 로직 개선 (title -> activity -> original_text)
+            title = schedule_info.get("title")
+            
+            # [Safety Check] Title이 없는 경우 여기서 다시 추출 시도
+            if not title:
+                # 패턴 기반 추출 (하드코딩 제거)
+                title_pattern = r"([가-힣A-Za-z0-9]+)\s*(예약|약속|미팅|모임|회식|진료|방문)"
+                matches = re.finditer(title_pattern, original_text)
+                for m in matches:
+                    word = m.group(1)
+                    type_ = m.group(2)
+                    if word in ["오늘", "내일", "모레", "이번주", "다음주", "점심", "저녁", "아침", "새벽", "오후", "오전"]:
+                        continue
+                    title = f"{word} {type_}"
+                    logger.info(f"ChatService Safety: Title 추출 성공 '{title}'")
+                    break
+            if title:
+                summary = title
+            elif activity:
                 if friend_name:
                     summary = f"{friend_name}와 {activity}"
                 else:
@@ -828,10 +907,14 @@ class ChatService:
         s = date_str.strip()
 
         # 상대 날짜
-        if "오늘" in s: return today
-        if "내일" in s: return today + timedelta(days=1)
-        if "모레" in s: return today + timedelta(days=2)
-        if "다음주" in s: return today + timedelta(days=7)
+        if "오늘" in s:
+            return today
+        if "내일" in s:
+            return today + timedelta(days=1)
+        if "모레" in s:
+            return today + timedelta(days=2)
+        if "다음주" in s:
+            return today + timedelta(days=7)
         if "이번주" in s:
             # 이번 주 토요일(또는 요구사항에 맞게 특정 요일)
             days_until_sat = (5 - today.weekday()) % 7
@@ -844,7 +927,8 @@ class ChatService:
             year = today.year
             candidate = datetime(year, month, day, tzinfo=KST)
             # 과거면 내년으로 롤오버
-            if candidate < today: candidate = datetime(year + 1, month, day, tzinfo=KST)
+            if candidate < today:
+                candidate = datetime(year + 1, month, day, tzinfo=KST)
             return candidate
 
         m_d = re.search(r'(\d{1,2})\s*일', s)
