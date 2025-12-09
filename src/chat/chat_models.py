@@ -35,6 +35,7 @@ class ChatLogBase(BaseModel):
     user_id: uuid.UUID
     request_text: Optional[str] = None
     response_text: Optional[str] = None
+    session_id: Optional[uuid.UUID] = None
 
 class ChatLogCreate(ChatLogBase):
     pass
