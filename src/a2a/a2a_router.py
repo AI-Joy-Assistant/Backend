@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from typing import Optional
 import jwt
+import json
+import asyncio
 from config.settings import settings
 from .a2a_service import A2AService
 from .a2a_repository import A2ARepository
 from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
+from .negotiation_engine import NegotiationEngine
+from .a2a_protocol import NegotiationStatus
 from src.auth.auth_service import AuthService
 from src.auth.auth_repository import AuthRepository
 from src.chat.chat_repository import ChatRepository
@@ -76,12 +81,47 @@ async def get_a2a_session(
         # Details 구성
         # 1. 메시지 조회하여 Process 구성
         messages = await A2ARepository.get_session_messages(session_id)
+        
+        # 발신자 이름 조회를 위한 사용자 정보 캐시
+        user_names_cache = {}
+        all_user_ids = set()
+        for msg in messages:
+            sender_id = msg.get("sender_user_id")
+            if sender_id:
+                all_user_ids.add(sender_id)
+        
+        if all_user_ids:
+            from src.chat.chat_repository import ChatRepository
+            user_names_cache = await ChatRepository.get_user_names_by_ids(list(all_user_ids))
+        
         process = []
         for msg in messages:
-            step = msg.get("message", {}).get("step")
-            text = msg.get("message", {}).get("text")
+            msg_data = msg.get("message", {}) or {}
+            
+            # 발신자 정보
+            sender_id = msg.get("sender_user_id")
+            sender_name = user_names_cache.get(sender_id, "AI") if sender_id else "시스템"
+            
+            # 기존 형식: step + text
+            step = msg_data.get("step")
+            text = msg_data.get("text")
+            
+            # True A2A 형식: round + text + proposal
+            round_num = msg_data.get("round")
+            proposal = msg_data.get("proposal")
+            
             if step and text:
+                # 기존 형식
                 process.append({"step": str(step), "description": text})
+            elif text:
+                # True A2A 형식 - 발신자 표시 추가
+                step_label = f"[{sender_name}의 AI] Round {round_num}" if round_num else f"[{sender_name}의 AI]"
+                description = text
+                # proposal이 있을 때만 날짜/시간 표시
+                if proposal and (proposal.get('date') or proposal.get('time')):
+                    proposal_info = f" ({proposal.get('date', '')} {proposal.get('time', '')})"
+                    description += proposal_info
+                process.append({"step": step_label, "description": description})
         
         # 2. 기본 정보
         place_pref = session.get("place_pref", {}) or {}
@@ -130,11 +170,79 @@ async def get_a2a_session(
             "proposedDate": place_pref.get("proposedDate") or place_pref.get("date") or time_window.get("date") or "",
             "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or time_window.get("time") or "미정",
             "location": place_pref.get("location") or "미정",
-            "process": process
+            "process": process,
+            "has_conflict": False,
+            "conflicting_event": None
         }
         
+        # 캘린더 충돌 확인 (현재 사용자의 캘린더)
+        try:
+            proposed_date = details.get("proposedDate")
+            proposed_time = details.get("proposedTime")
+            
+            if proposed_date and proposed_time and proposed_time != "미정":
+                from src.calendar.google_calendar_service import GoogleCalendarService
+                from src.auth.auth_service import AuthService
+                from datetime import datetime, timedelta
+                from zoneinfo import ZoneInfo
+                
+                KST = ZoneInfo("Asia/Seoul")
+                
+                # 액세스 토큰 획득
+                access_token = await AuthService.get_valid_access_token_by_user_id(current_user_id)
+                
+                if access_token:
+                    calendar_service = GoogleCalendarService()
+                    
+                    # 제안 시간 파싱
+                    try:
+                        if ":" in proposed_time:
+                            hour, minute = proposed_time.split(":")[:2]
+                            dt_str = f"{proposed_date}T{int(hour):02d}:{int(minute):02d}:00"
+                        else:
+                            dt_str = f"{proposed_date}T12:00:00"
+                        
+                        proposed_dt = datetime.fromisoformat(dt_str).replace(tzinfo=KST)
+                        
+                        # 제안 시간 전후 1시간 범위에서 기존 일정 확인
+                        start_check = proposed_dt - timedelta(hours=1)
+                        end_check = proposed_dt + timedelta(hours=2)
+                        
+                        events = await calendar_service.get_calendar_events(
+                            access_token=access_token,
+                            time_min=start_check,
+                            time_max=end_check
+                        )
+                        
+                        # 충돌 확인 (CalendarEvent 객체 처리)
+                        for event in events:
+                            # CalendarEvent는 Pydantic 모델, start/end가 dict
+                            event_start_dict = event.start if hasattr(event, 'start') else {}
+                            event_end_dict = event.end if hasattr(event, 'end') else {}
+                            
+                            event_start_str = event_start_dict.get("dateTime") or event_start_dict.get("date")
+                            event_end_str = event_end_dict.get("dateTime") or event_end_dict.get("date")
+                            
+                            if event_start_str and event_end_str:
+                                event_start = datetime.fromisoformat(event_start_str.replace("Z", "+00:00"))
+                                event_end = datetime.fromisoformat(event_end_str.replace("Z", "+00:00"))
+                                
+                                # 제안 시간이 기존 일정과 겹치는지 확인
+                                if event_start <= proposed_dt < event_end:
+                                    details["has_conflict"] = True
+                                    details["conflicting_event"] = {
+                                        "title": event.summary if hasattr(event, 'summary') else "제목 없음",
+                                        "start": event_start.astimezone(KST).strftime("%H:%M"),
+                                        "end": event_end.astimezone(KST).strftime("%H:%M")
+                                    }
+                                    break
+                    except Exception as parse_error:
+                        print(f"시간 파싱 오류: {parse_error}")
+        except Exception as conflict_error:
+            print(f"충돌 확인 오류: {conflict_error}")
+        
         # 디버깅: 추출된 날짜 확인
-        print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}")
+        print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
 
         session["details"] = details
         session["title"] = summary if summary else "일정 조율"
@@ -394,15 +502,29 @@ async def get_pending_requests(
             participants = place_pref.get("participants", []) if isinstance(place_pref, dict) else []
             participant_count = len(participants) if participants else 1
             
-            # 날짜/시간 정보 (place_pref에 저장됨)
-            # 재조율 시 proposedDate/proposedTime 키로 저장, 초기 생성 시 date/time 키로 저장
+            # 날짜/시간 정보 (협상 완료 시 details에 저장, 초기 요청 시 place_pref에 저장)
+            # 우선순위: details (협상 결과) > place_pref (초기 요청)
             proposed_date = None
             proposed_time = None
             
-            if isinstance(place_pref, dict):
-                # 재조율된 경우 proposedDate/proposedTime 키 사용
-                proposed_date = place_pref.get("proposedDate") or place_pref.get("date")
-                proposed_time = place_pref.get("proposedTime") or place_pref.get("time")
+            # details에서 협상 완료된 날짜/시간 먼저 확인
+            details = session.get("details", {}) or {}
+            if isinstance(details, str):
+                try:
+                    import json
+                    details = json.loads(details)
+                except:
+                    details = {}
+            
+            if isinstance(details, dict):
+                proposed_date = details.get("proposedDate")
+                proposed_time = details.get("proposedTime")
+            
+            # details에 없으면 place_pref에서 가져옴 (초기 요청)
+            if not proposed_date or not proposed_time:
+                if isinstance(place_pref, dict):
+                    proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
+                    proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
             
             requests.append({
                 "id": session.get("id"),
@@ -583,3 +705,166 @@ async def get_session_availability(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"가용 날짜 조회 실패: {str(e)}")
+
+
+# ============================================================================
+# True A2A: Real-time Negotiation Endpoints
+# ============================================================================
+
+@router.post("/session/start-true-a2a", summary="True A2A 세션 시작 (실시간 협상)")
+async def start_true_a2a_session(
+    request: A2ASessionCreate,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    True A2A 세션을 시작합니다.
+    - 세션 생성 후 세션 ID 반환
+    - 실시간 협상은 별도 SSE 엔드포인트로 진행
+    """
+    try:
+        # 세션 생성
+        session = await A2ARepository.create_session(
+            initiator_user_id=current_user_id,
+            target_user_id=request.target_user_id,
+            intent="schedule",
+            place_pref={
+                "summary": request.summary,
+                "activity": request.summary,
+                "location": request.place_pref.get("location") if request.place_pref else None,
+                "date": request.time_window.get("date") if request.time_window else None,
+                "time": request.time_window.get("time") if request.time_window else None
+            } if request.summary else None
+        )
+        
+        return {
+            "status": 200,
+            "session_id": session["id"],
+            "message": "세션이 생성되었습니다. SSE 스트림에 연결하여 협상을 시작하세요."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"세션 생성 실패: {str(e)}")
+
+
+@router.get("/session/{session_id}/negotiate/stream", summary="실시간 A2A 협상 스트림")
+async def stream_negotiation(
+    session_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    실시간 A2A 협상을 SSE 스트림으로 제공합니다.
+    - 에이전트 간 대화가 실시간으로 전송됩니다.
+    - 최대 5라운드까지 협상합니다.
+    - 합의 또는 사용자 개입 필요 시 스트림이 종료됩니다.
+    """
+    # 세션 조회 및 권한 확인
+    session = await A2ARepository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+    
+    initiator_id = session["initiator_user_id"]
+    target_id = session["target_user_id"]
+    
+    if current_user_id != initiator_id and current_user_id != target_id:
+        raise HTTPException(status_code=403, detail="세션 접근 권한이 없습니다.")
+    
+    # 참여자 목록 구성
+    place_pref = session.get("place_pref", {}) or {}
+    if isinstance(place_pref, str):
+        try:
+            place_pref = json.loads(place_pref)
+        except:
+            place_pref = {}
+    
+    participant_ids = [target_id]
+    
+    # 추가 참여자가 있으면 포함
+    if place_pref.get("participants"):
+        for p in place_pref["participants"]:
+            if p != initiator_id and p not in participant_ids:
+                participant_ids.append(p)
+    
+    async def event_generator():
+        """SSE 이벤트 생성기"""
+        try:
+            # NegotiationEngine 초기화
+            engine = NegotiationEngine(
+                session_id=session_id,
+                initiator_user_id=initiator_id,
+                participant_user_ids=participant_ids,
+                activity=place_pref.get("activity") or place_pref.get("summary"),
+                location=place_pref.get("location"),
+                target_date=place_pref.get("date"),
+                target_time=place_pref.get("time")
+            )
+            
+            # 협상 시작 알림
+            yield f"data: {json.dumps({'type': 'START', 'message': '🤖 AI 에이전트들이 협상을 시작합니다...'})}\n\n"
+            
+            # 협상 진행 (각 메시지를 실시간으로 전송)
+            async for message in engine.run_negotiation():
+                yield f"data: {json.dumps(message.to_sse_data())}\n\n"
+                await asyncio.sleep(0.1)  # SSE 버퍼링 방지
+            
+            # 협상 결과
+            result = engine.get_result()
+            yield f"data: {json.dumps({'type': 'END', 'status': result.status.value, 'total_rounds': result.total_rounds})}\n\n"
+            
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'ERROR', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.post("/session/{session_id}/human-decision", summary="사용자 최종 결정")
+async def submit_human_decision(
+    session_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    AI 협상 실패 시 사용자가 최종 결정을 내립니다.
+    - approved: true면 마지막 제안으로 확정
+    - approved: false + counter_proposal이면 새로운 제안으로 재협상
+    """
+    try:
+        body = await request.json()
+        approved = body.get("approved", False)
+        counter_proposal = body.get("counter_proposal")  # {date, time, location}
+        
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        if current_user_id != session["initiator_user_id"] and current_user_id != session["target_user_id"]:
+            raise HTTPException(status_code=403, detail="결정 권한이 없습니다.")
+        
+        if approved:
+            # 마지막 제안으로 확정
+            result = await A2AService.approve_session(session_id, current_user_id)
+            return result
+        elif counter_proposal:
+            # 새로운 제안으로 재협상
+            result = await A2AService.reschedule_session(
+                session_id=session_id,
+                user_id=current_user_id,
+                reason="사용자 직접 결정",
+                new_date=counter_proposal.get("date"),
+                new_time=counter_proposal.get("time")
+            )
+            return result
+        else:
+            raise HTTPException(status_code=400, detail="approved 또는 counter_proposal이 필요합니다.")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"결정 처리 실패: {str(e)}")

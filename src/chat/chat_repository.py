@@ -114,7 +114,6 @@ class ChatRepository:
         except Exception as e:
             raise Exception(f"친구 목록 조회 오류: {str(e)}")
 
-    # ❗ 여기서부터 문제가 있었던 함수
     @staticmethod
     async def create_chat_log(
         user_id: str,
@@ -140,7 +139,7 @@ class ChatRepository:
             "message_type": message_type,
         }
 
-        # 🔹 session_id 컬럼이 uuid 타입이라, uuid 형식일 때만 넣어주기
+        # session_id 컬럼이 uuid 타입이라, uuid 형식일 때만 넣어주기
         if session_id:
             try:
                 uuid.UUID(str(session_id))

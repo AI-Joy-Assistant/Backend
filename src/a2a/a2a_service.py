@@ -5,6 +5,8 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from .a2a_repository import A2ARepository
+from .negotiation_engine import NegotiationEngine
+from .a2a_protocol import NegotiationStatus
 from src.auth.auth_repository import AuthRepository
 from src.calendar.calender_service import GoogleCalendarService
 from src.auth.auth_service import AuthService
@@ -26,11 +28,15 @@ class A2AService:
         initiator_user_id: str,
         target_user_id: str,
         summary: Optional[str] = None,
-        duration_minutes: int = 60
+        duration_minutes: int = 60,
+        use_true_a2a: bool = True
     ) -> Dict[str, Any]:
         """
         A2A 세션 시작 및 전체 시뮬레이션 자동 진행
         백엔드에서 모든 단계를 자동으로 처리
+        
+        Args:
+            use_true_a2a: True면 새로운 NegotiationEngine 사용, False면 기존 시뮬레이션 방식
         """
         try:
             # 1) 세션 생성 (summary는 place_pref에 포함)
@@ -55,16 +61,27 @@ class A2AService:
             initiator_name = initiator.get("name", "사용자")
             target_name = target.get("name", "상대방")
             
-            # 3) 단계별 시뮬레이션 실행
-            result = await A2AService._execute_a2a_simulation(
-                session_id=session_id,
-                initiator_user_id=initiator_user_id,
-                target_user_id=target_user_id,
-                initiator_name=initiator_name,
-                target_name=target_name,
-                summary=summary or f"{target_name}와 약속",
-                duration_minutes=duration_minutes
-            )
+            # 3) True A2A 또는 기존 시뮬레이션 실행
+            if use_true_a2a:
+                # 새로운 NegotiationEngine 사용
+                result = await A2AService._execute_true_a2a_negotiation(
+                    session_id=session_id,
+                    initiator_user_id=initiator_user_id,
+                    target_user_id=target_user_id,
+                    summary=summary,
+                    duration_minutes=duration_minutes
+                )
+            else:
+                # 기존 시뮬레이션 방식 (하위 호환)
+                result = await A2AService._execute_a2a_simulation(
+                    session_id=session_id,
+                    initiator_user_id=initiator_user_id,
+                    target_user_id=target_user_id,
+                    initiator_name=initiator_name,
+                    target_name=target_name,
+                    summary=summary or f"{target_name}와 약속",
+                    duration_minutes=duration_minutes
+                )
             
             # 4) 승인 필요 시 chat_log에 승인 요청 메시지 추가
             if result.get("needs_approval") and result.get("proposal"):
@@ -177,14 +194,18 @@ class A2AService:
             
             logger.info(f"세션 정보 확인 - details: {details}, place_pref: {place_pref}, time_window: {time_window}")
             
-            # 날짜/시간 정보를 여러 소스에서 찾기 (우선순위: details > time_window > place_pref)
-            date_str = (details.get("proposed_date") or details.get("date") or 
+            # 날짜/시간 정보를 여러 소스에서 찾기
+            # 협상 완료 시 place_pref에 proposedDate/proposedTime으로 저장됨
+            # 우선순위: place_pref.proposedDate > details > time_window > place_pref.date
+            date_str = (place_pref.get("proposedDate") or 
+                       details.get("proposedDate") or details.get("proposed_date") or details.get("date") or 
                        time_window.get("date") or place_pref.get("date") or "")
-            time_str = (details.get("proposed_time") or details.get("time") or 
+            time_str = (place_pref.get("proposedTime") or 
+                       details.get("proposedTime") or details.get("proposed_time") or details.get("time") or 
                        time_window.get("time") or place_pref.get("time") or "")
-            location = details.get("location") or place_pref.get("location") or ""
-            activity = (details.get("purpose") or place_pref.get("summary") or 
-                       place_pref.get("activity") or "약속")
+            location = place_pref.get("location") or details.get("location") or ""
+            activity = (place_pref.get("purpose") or details.get("purpose") or 
+                       place_pref.get("summary") or place_pref.get("activity") or "약속")
             
             logger.info(f"추출된 정보 - date: {date_str}, time: {time_str}, location: {location}, activity: {activity}")
             
@@ -217,13 +238,28 @@ class A2AService:
             if details.get("start_time"):
                 start_time = datetime.fromisoformat(details["start_time"].replace("Z", "+00:00")).astimezone(KST)
                 end_time = datetime.fromisoformat(details["end_time"].replace("Z", "+00:00")).astimezone(KST)
-            elif date_str or time_str:
-                from src.chat.chat_service import ChatService
-                combined = f"{date_str} {time_str}".strip()
-                parsed = await ChatService.parse_time_string(time_str, combined)
-                if parsed:
-                    start_time = parsed['start_time']
-                    end_time = parsed['end_time']
+            elif date_str and time_str:
+                # 표준 형식 (YYYY-MM-DD HH:MM 또는 YYYY-MM-DD + HH:MM) 먼저 시도
+                try:
+                    # time_str이 HH:MM 형식인지 확인
+                    if re.match(r'^\d{1,2}:\d{2}$', time_str):
+                        # date_str이 YYYY-MM-DD 형식인지 확인
+                        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                            combined_iso = f"{date_str}T{time_str}:00"
+                            start_time = datetime.fromisoformat(combined_iso).replace(tzinfo=KST)
+                            end_time = start_time + timedelta(hours=1)
+                            logger.info(f"표준 형식 파싱 성공: {start_time}")
+                except Exception as e:
+                    logger.warning(f"표준 형식 파싱 실패: {e}")
+                
+                # 표준 형식 파싱 실패 시 ChatService 사용
+                if not start_time:
+                    from src.chat.chat_service import ChatService
+                    combined = f"{date_str} {time_str}".strip()
+                    parsed = await ChatService.parse_time_string(time_str, combined)
+                    if parsed:
+                        start_time = parsed['start_time']
+                        end_time = parsed['end_time']
             
             # 시간 정보가 없으면 기본값 (내일 오후 2시)
             if not start_time:
@@ -495,6 +531,80 @@ class A2AService:
         except Exception as e:
             logger.error(f"가용 날짜 조회 실패: {str(e)}")
             return {"status": 500, "error": str(e)}
+    
+    @staticmethod
+    async def _execute_true_a2a_negotiation(
+        session_id: str,
+        initiator_user_id: str,
+        target_user_id: str,
+        summary: Optional[str] = None,
+        duration_minutes: int = 60,
+        target_date: Optional[str] = None,
+        target_time: Optional[str] = None,
+        location: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        True A2A: NegotiationEngine을 사용한 실제 에이전트 간 협상
+        각 에이전트가 독립적으로 자신의 캘린더만 접근하며 협상
+        """
+        try:
+            from zoneinfo import ZoneInfo
+            KST = ZoneInfo("Asia/Seoul")
+            
+            logger.info(f"True A2A 협상 시작: date={target_date}, time={target_time}")
+            
+            # NegotiationEngine 초기화
+            engine = NegotiationEngine(
+                session_id=session_id,
+                initiator_user_id=initiator_user_id,
+                participant_user_ids=[target_user_id],
+                activity=summary,
+                location=location,
+                target_date=target_date,
+                target_time=target_time
+            )
+            
+            messages_log = []
+            final_proposal = None
+            
+            # 협상 실행 (비동기 제너레이터에서 모든 메시지 수집)
+            async for message in engine.run_negotiation():
+                messages_log.append(message.message)
+                if message.proposal:
+                    final_proposal = message.proposal.to_dict()
+            
+            # 협상 결과 확인
+            result = engine.get_result()
+            
+            if result.status == NegotiationStatus.AGREED:
+                # 합의 완료 - 캘린더 등록은 approve_session에서 처리
+                return {
+                    "status": "pending_approval",
+                    "messages": messages_log,
+                    "needs_approval": True,
+                    "proposal": final_proposal
+                }
+            elif result.status == NegotiationStatus.NEED_HUMAN:
+                # 사용자 개입 필요
+                return {
+                    "status": "need_human",
+                    "messages": messages_log,
+                    "needs_approval": False,
+                    "needs_human_decision": True,
+                    "last_proposal": final_proposal,
+                    "intervention_reason": result.intervention_reason.value if result.intervention_reason else "unknown"
+                }
+            else:
+                # 협상 실패
+                return {
+                    "status": "failed",
+                    "messages": messages_log,
+                    "needs_approval": False
+                }
+                
+        except Exception as e:
+            logger.error(f"True A2A 협상 실패: {str(e)}")
+            raise e
     
     @staticmethod
     async def _execute_a2a_simulation(
@@ -1113,11 +1223,13 @@ class A2AService:
         location: Optional[str] = None,
         activity: Optional[str] = None,
         duration_minutes: int = 60,
-        force_new: bool = False
+        force_new: bool = False,
+        use_true_a2a: bool = True
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 세션 시작
         - force_new: True이면 기존 세션을 재사용하지 않고 무조건 새로 생성
+        - use_true_a2a: True이면 NegotiationEngine 사용, False이면 기존 시뮬레이션
         여러 참여자와 동시에 일정을 조율합니다.
         기존 세션이 있으면 재사용합니다.
         """
@@ -1305,18 +1417,37 @@ class A2AService:
                 first_existing = list(existing_session_map.values())[0]
                 final_location = first_existing.get("place_pref", {}).get("location")
 
-            result = await A2AService._execute_multi_user_coordination(
-                thread_id=thread_id,
-                sessions=sessions,
-                initiator_user_id=initiator_user_id,
-                initiator_name=initiator_name,
-                date=date,
-                time=time,
-                location=final_location, # 수정된 location 전달
-                activity=activity,
-                duration_minutes=duration_minutes,
-                reuse_existing=reuse_existing  # 기존 세션 재사용 여부 전달
-            )
+            # True A2A 또는 기존 시뮬레이션 실행
+            if use_true_a2a:
+                # NegotiationEngine 사용 (첫 번째 세션 기준)
+                first_session = sessions[0] if sessions else None
+                if first_session:
+                    result = await A2AService._execute_true_a2a_negotiation(
+                        session_id=first_session["session_id"],
+                        initiator_user_id=initiator_user_id,
+                        target_user_id=first_session["target_id"],
+                        summary=summary,
+                        duration_minutes=duration_minutes,
+                        target_date=date,
+                        target_time=time,
+                        location=final_location
+                    )
+                else:
+                    result = {"status": "failed", "messages": [], "needs_approval": False}
+            else:
+                # 기존 시뮬레이션 방식
+                result = await A2AService._execute_multi_user_coordination(
+                    thread_id=thread_id,
+                    sessions=sessions,
+                    initiator_user_id=initiator_user_id,
+                    initiator_name=initiator_name,
+                    date=date,
+                    time=time,
+                    location=final_location,
+                    activity=activity,
+                    duration_minutes=duration_minutes,
+                    reuse_existing=reuse_existing
+                )
             
             # 4) 모든 세션 완료 처리 (기존 세션 재사용 시에도 상태 업데이트)
             for session_info in sessions:
