@@ -148,6 +148,33 @@ async def get_chat_history(
 
 
 
+
+@router.get("/sessions", summary="채팅 세션 목록 조회")
+async def get_chat_sessions(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    사용자의 채팅 세션 목록을 조회합니다.
+    최신순으로 정렬되어 반환됩니다.
+    """
+    try:
+        res = supabase.table("chat_sessions").select("*").eq(
+            "user_id", current_user_id
+        ).order("updated_at", desc=True).execute()
+        
+        sessions = []
+        for session in (res.data or []):
+            sessions.append({
+                "id": session["id"],
+                "title": session.get("title", "새 채팅"),
+                "created_at": session.get("created_at"),
+                "updated_at": session.get("updated_at"),
+            })
+        
+        return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅 세션 목록 조회 실패: {str(e)}")
+
 @router.post("/sessions", summary="새 채팅 세션 생성")
 async def create_chat_session(
     current_user_id: str = Depends(get_current_user_id)
@@ -176,6 +203,69 @@ async def create_chat_session(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"채팅 세션 생성 실패: {str(e)}")
 
+
+@router.delete("/sessions/{session_id}", summary="채팅 세션 삭제")
+async def delete_chat_session(
+    session_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    채팅 세션과 관련 메시지를 삭제합니다.
+    """
+    try:
+        # 세션이 현재 사용자의 것인지 확인
+        check = supabase.table("chat_sessions").select("id").eq(
+            "id", session_id
+        ).eq("user_id", current_user_id).execute()
+        
+        if not check.data:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        # 관련 채팅 로그 삭제
+        supabase.table("chat_log").delete().eq("session_id", session_id).execute()
+        
+        # 세션 삭제
+        supabase.table("chat_sessions").delete().eq("id", session_id).execute()
+        
+        return {"status": "ok", "message": "세션이 삭제되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅 세션 삭제 실패: {str(e)}")
+
+
+@router.put("/sessions/{session_id}", summary="채팅 세션 이름 변경")
+async def update_chat_session(
+    session_id: str,
+    request: dict,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    채팅 세션의 제목을 변경합니다.
+    """
+    try:
+        title = request.get("title", "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="제목을 입력해주세요.")
+        
+        # 세션이 현재 사용자의 것인지 확인
+        check = supabase.table("chat_sessions").select("id").eq(
+            "id", session_id
+        ).eq("user_id", current_user_id).execute()
+        
+        if not check.data:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        # 세션 제목 업데이트
+        supabase.table("chat_sessions").update({
+            "title": title
+        }).eq("id", session_id).execute()
+        
+        return {"status": "ok", "message": "세션 이름이 변경되었습니다.", "title": title}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"채팅 세션 이름 변경 실패: {str(e)}")
 
 @router.get("/friend/{friend_id}", summary="특정 친구와의 대화 내용 조회")
 async def get_friend_messages(

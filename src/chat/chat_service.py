@@ -545,6 +545,9 @@ class ChatService:
                     session_id=session_id,   # ✅ 이 세션 히스토리만 사용
                 )
                 ai_result = await openai_service.generate_response(message, conversation_history)
+                # ✅ OpenAI의 응답 메시지를 ai_response에 할당
+                if ai_result and ai_result.get("message"):
+                    ai_response = ai_result["message"]
 
 
             # 7. 일반 대화 저장
