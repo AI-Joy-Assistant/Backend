@@ -147,6 +147,59 @@ async def get_chat_history(
         raise HTTPException(status_code=500, detail=f"채팅 기록 조회 실패: {str(e)}")
 
 
+@router.get("/default-session", summary="기본 채팅 세션 조회/생성")
+async def get_or_create_default_session(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    사용자의 기본 채팅 세션을 조회하거나 없으면 생성합니다.
+    기존 session_id가 NULL인 메시지들을 이 세션으로 마이그레이션합니다.
+    """
+    try:
+        # 1. "기본 채팅" 제목의 세션이 있는지 확인
+        existing = supabase.table("chat_sessions").select("*").eq(
+            "user_id", current_user_id
+        ).eq("title", "기본 채팅").execute()
+        
+        if existing.data and len(existing.data) > 0:
+            # 이미 기본 채팅 세션이 있음
+            session = existing.data[0]
+            return {
+                "id": session["id"],
+                "title": session.get("title", "기본 채팅"),
+                "created_at": session.get("created_at"),
+                "updated_at": session.get("updated_at"),
+                "is_new": False
+            }
+        
+        # 2. 기본 채팅 세션 생성
+        new_session = supabase.table("chat_sessions").insert({
+            "user_id": current_user_id,
+            "title": "기본 채팅",
+        }).execute()
+        
+        if not new_session.data:
+            raise HTTPException(status_code=500, detail="기본 채팅 세션 생성 실패")
+        
+        session = new_session.data[0]
+        session_id = session["id"]
+        
+        # 3. 기존 session_id가 NULL인 메시지들을 새 세션으로 마이그레이션
+        supabase.table("chat_log").update({
+            "session_id": session_id
+        }).eq("user_id", current_user_id).is_("session_id", "null").execute()
+        
+        return {
+            "id": session_id,
+            "title": session.get("title", "기본 채팅"),
+            "created_at": session.get("created_at"),
+            "updated_at": session.get("updated_at"),
+            "is_new": True
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"기본 채팅 세션 조회/생성 실패: {str(e)}")
 
 
 @router.get("/sessions", summary="채팅 세션 목록 조회")
@@ -169,6 +222,7 @@ async def get_chat_sessions(
                 "title": session.get("title", "새 채팅"),
                 "created_at": session.get("created_at"),
                 "updated_at": session.get("updated_at"),
+                "is_default": session.get("title") == "기본 채팅",  # 기본 채팅 여부 표시
             })
         
         return {"sessions": sessions}
