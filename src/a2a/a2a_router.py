@@ -181,7 +181,7 @@ async def get_a2a_session(
             proposed_time = details.get("proposedTime")
             
             if proposed_date and proposed_time and proposed_time != "미정":
-                from src.calendar.google_calendar_service import GoogleCalendarService
+                from src.calendar.calender_service import GoogleCalendarService
                 from src.auth.auth_service import AuthService
                 from datetime import datetime, timedelta
                 from zoneinfo import ZoneInfo
