@@ -1,0 +1,469 @@
+"""
+PersonalAgent - 각 사용자별 독립 AI 에이전트
+"""
+import logging
+import json
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from src.chat.chat_openai_service import OpenAIService
+from src.auth.auth_repository import AuthRepository
+from src.auth.auth_service import AuthService
+from src.calendar.calender_service import GoogleCalendarService
+from .a2a_protocol import (
+    MessageType, TimeSlot, Proposal, AgentDecision, A2AMessage
+)
+
+logger = logging.getLogger(__name__)
+KST = ZoneInfo("Asia/Seoul")
+
+
+class PersonalAgent:
+    """
+    개인 AI 에이전트
+    - 자신의 캘린더만 접근
+    - GPT를 사용한 협상 로직
+    - 유연한 협상 스타일
+    """
+    
+    def __init__(self, user_id: str, user_name: str):
+        self.user_id = user_id
+        self.user_name = user_name
+        self.openai = OpenAIService()
+        self.style = "flexible"  # 유연한 협상 스타일
+        self._cached_availability: Optional[List[TimeSlot]] = None
+    
+    async def get_availability(
+        self,
+        date_range_start: datetime,
+        date_range_end: datetime,
+        duration_minutes: int = 60
+    ) -> List[TimeSlot]:
+        """
+        내 캘린더에서 가용 시간 슬롯 조회
+        """
+        try:
+            # 캘린더 토큰 확보
+            access_token = await AuthService.get_valid_access_token_by_user_id(self.user_id)
+            if not access_token:
+                logger.warning(f"[{self.user_name}] 캘린더 토큰 없음")
+                return []
+            
+            service = GoogleCalendarService()
+            events = await service.get_calendar_events(
+                access_token=access_token,
+                time_min=date_range_start.isoformat(),
+                time_max=date_range_end.isoformat()
+            )
+            
+            # 바쁜 시간 추출
+            busy_intervals = []
+            for e in events:
+                try:
+                    start_str = e.start.get("dateTime")
+                    end_str = e.end.get("dateTime")
+                    if start_str and end_str:
+                        start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                        end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                        busy_intervals.append((start, end))
+                except Exception:
+                    continue
+            
+            # 병합
+            busy_intervals.sort(key=lambda x: x[0])
+            merged = []
+            for s, e in busy_intervals:
+                if not merged or s > merged[-1][1]:
+                    merged.append([s, e])
+                else:
+                    merged[-1][1] = max(merged[-1][1], e)
+            
+            # 가용 시간 계산 (9시 ~ 22시 사이)
+            available_slots = []
+            current_date = date_range_start.date()
+            end_date = date_range_end.date()
+            
+            while current_date <= end_date:
+                day_start = datetime(
+                    current_date.year, current_date.month, current_date.day,
+                    9, 0, 0, tzinfo=KST
+                )
+                day_end = datetime(
+                    current_date.year, current_date.month, current_date.day,
+                    22, 0, 0, tzinfo=KST
+                )
+                
+                # 해당 날짜의 바쁜 시간 필터링
+                day_busy = [
+                    (max(s, day_start), min(e, day_end))
+                    for s, e in merged
+                    if s < day_end and e > day_start
+                ]
+                day_busy.sort(key=lambda x: x[0])
+                
+                # 빈 슬롯 찾기
+                cursor = day_start
+                for busy_start, busy_end in day_busy:
+                    if cursor < busy_start:
+                        slot_duration = (busy_start - cursor).total_seconds() / 60
+                        if slot_duration >= duration_minutes:
+                            available_slots.append(TimeSlot(start=cursor, end=busy_start))
+                    cursor = max(cursor, busy_end)
+                
+                # 마지막 슬롯
+                if cursor < day_end:
+                    slot_duration = (day_end - cursor).total_seconds() / 60
+                    if slot_duration >= duration_minutes:
+                        available_slots.append(TimeSlot(start=cursor, end=day_end))
+                
+                current_date += timedelta(days=1)
+            
+            self._cached_availability = available_slots
+            logger.info(f"[{self.user_name}] 가용 슬롯 {len(available_slots)}개 발견")
+            return available_slots
+            
+        except Exception as e:
+            logger.error(f"[{self.user_name}] 가용 시간 조회 실패: {e}")
+            return []
+    
+    async def evaluate_proposal(
+        self,
+        proposal: Proposal,
+        context: Dict[str, Any]
+    ) -> AgentDecision:
+        """
+        제안을 평가하고 GPT로 응답 결정
+        """
+        try:
+            # 내 가용 시간 확인
+            now = datetime.now(KST)
+            availability = self._cached_availability or await self.get_availability(
+                now, now + timedelta(days=14)
+            )
+            
+            # 제안 시간이 내 가용 시간 안에 있는지 확인
+            proposed_dt = self._parse_proposal_datetime(proposal)
+            is_available = False
+            
+            if proposed_dt:
+                for slot in availability:
+                    if slot.start <= proposed_dt < slot.end:
+                        is_available = True
+                        break
+            
+            # 현재 연도 가져오기
+            current_year = now.year
+            
+            # 라운드가 3 이상이면 ACCEPT하도록 강력 유도
+            round_num = context.get('round', 1)
+            accept_instruction = ""
+            if round_num >= 3:
+                accept_instruction = "\n⚠️ 중요: 이미 3라운드 이상 진행되었습니다. 가능하면 반드시 ACCEPT하세요!"
+            elif round_num >= 4:
+                accept_instruction = "\n🚨 경고: 협상이 거의 끝났습니다. 무조건 ACCEPT하세요!"
+            
+            # 가용 시간 슬롯 문자열 생성 (최대 5개)
+            available_slots_str = ""
+            if availability:
+                slot_examples = []
+                for slot in availability[:5]:
+                    slot_examples.append(f"  - {slot.start.strftime('%Y-%m-%d %H:%M')} ~ {slot.end.strftime('%H:%M')}")
+                available_slots_str = "\n".join(slot_examples)
+            
+            # GPT로 결정
+            prompt = f"""당신은 '{self.user_name}'의 AI 비서입니다. 유연하고 협조적인 스타일로 협상합니다.
+
+상대방 제안:
+- 날짜: {proposal.date}
+- 시간: {proposal.time}
+- 장소: {proposal.location or '미정'}
+- 활동: {proposal.activity or '약속'}
+
+나의 상태:
+- 해당 시간 가능 여부: {'✅ 가능' if is_available else '❌ 불가능'}
+- 내 가용 시간 슬롯:
+{available_slots_str if available_slots_str else '  (가용 시간 없음)'}
+
+협상 컨텍스트:
+- 현재 라운드: {round_num}/5
+- 참여자 수: {context.get('participant_count', 2)}명
+{accept_instruction}
+
+⚠️ 중요 규칙:
+1. 해당 시간이 가능하면 반드시 "action": "ACCEPT"를 선택하세요.
+2. 라운드 3 이상에서는 무조건 ACCEPT하세요 (시간 협의보다 약속이 중요).
+3. COUNTER할 경우, 반드시 위의 '내 가용 시간 슬롯'에서 하나를 선택하여 counter_date와 counter_time을 채우세요.
+4. counter_date는 YYYY-MM-DD 형식 (예: {current_year}-12-12), counter_time은 HH:MM 형식 (예: 15:00).
+
+반드시 JSON 형식으로만 응답하세요:
+{{
+    "action": "ACCEPT" 또는 "COUNTER",
+    "reason": "짧은 이유",
+    "message": "상대방에게 보낼 메시지 (이모지 포함, 20자 이내)",
+    "counter_date": "YYYY-MM-DD (COUNTER 시 필수, 위 가용 시간에서 선택)",
+    "counter_time": "HH:MM (COUNTER 시 필수, 위 가용 시간에서 선택)"
+}}"""
+
+            response = self.openai.client.chat.completions.create(
+                model=self.openai.model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "제안을 평가하고 결정해주세요."}
+                ],
+                max_tokens=200,
+                temperature=0.7
+            )
+            
+            content = response.choices[0].message.content.strip()
+            # JSON 파싱
+            if content.startswith("```"):
+                lines = content.split("\n")[1:-1]
+                content = "\n".join(lines)
+            
+            result = json.loads(content)
+            
+            action = MessageType.ACCEPT if result["action"] == "ACCEPT" else MessageType.COUNTER
+            counter_proposal = None
+            
+            if action == MessageType.COUNTER:
+                counter_proposal = Proposal(
+                    date=result.get("counter_date", proposal.date),
+                    time=result.get("counter_time", proposal.time),
+                    location=proposal.location,
+                    activity=proposal.activity,
+                    duration_minutes=proposal.duration_minutes
+                )
+            
+            return AgentDecision(
+                action=action,
+                proposal=counter_proposal if action == MessageType.COUNTER else proposal,
+                reason=result.get("reason"),
+                message=result.get("message", "확인했어요! 👍")
+            )
+            
+        except Exception as e:
+            logger.error(f"[{self.user_name}] 제안 평가 실패: {e}")
+            # 실패 시 기본적으로 수락
+            return AgentDecision(
+                action=MessageType.ACCEPT,
+                proposal=proposal,
+                message="네, 좋아요! 👍"
+            )
+    
+    async def make_initial_proposal(
+        self,
+        target_date: Optional[str],
+        target_time: Optional[str],
+        activity: Optional[str],
+        location: Optional[str],
+        context: Dict[str, Any]
+    ) -> AgentDecision:
+        """
+        초기 제안 생성
+        """
+        try:
+            now = datetime.now(KST)
+            availability = await self.get_availability(
+                now, now + timedelta(days=14)
+            )
+            
+            if not availability:
+                return AgentDecision(
+                    action=MessageType.NEED_HUMAN,
+                    message="앗, 2주 내 가용 시간이 없어요 😅",
+                    reason="no_availability"
+                )
+            
+            # 상대 날짜/시간을 실제 날짜/시간으로 변환
+            actual_date = self._convert_relative_date(target_date, now) if target_date else None
+            actual_time = self._convert_relative_time(target_time) if target_time else None
+            
+            logger.info(f"[{self.user_name}] 초기 제안 - 원본: {target_date} {target_time} → 변환: {actual_date} {actual_time}")
+            
+            # 사용자가 지정한 날짜/시간이 있으면 우선 사용
+            if actual_date and actual_time:
+                proposal = Proposal(
+                    date=actual_date,
+                    time=actual_time,
+                    activity=activity,
+                    location=location
+                )
+            else:
+                # 첫 번째 가용 슬롯으로 제안
+                first_slot = availability[0]
+                proposal = Proposal(
+                    date=first_slot.start.strftime("%Y-%m-%d"),
+                    time=first_slot.start.strftime("%H:%M"),
+                    activity=activity,
+                    location=location
+                )
+            
+            # GPT로 메시지 생성
+            message = await self.openai.generate_a2a_message(
+                agent_name=f"{self.user_name}의 비서",
+                receiver_name=context.get("other_names", "상대방"),
+                context=f"{proposal.date} {proposal.time}에 {activity or '약속'}을 제안하려고 함",
+                tone="friendly"
+            )
+            
+            return AgentDecision(
+                action=MessageType.PROPOSE,
+                proposal=proposal,
+                message=message
+            )
+            
+        except Exception as e:
+            logger.error(f"[{self.user_name}] 초기 제안 생성 실패: {e}")
+            return AgentDecision(
+                action=MessageType.NEED_HUMAN,
+                message="제안 생성 중 오류가 발생했어요 😥"
+            )
+    
+    def _convert_relative_date(self, date_str: str, now: datetime) -> Optional[str]:
+        """상대 날짜를 YYYY-MM-DD 형식으로 변환"""
+        import re
+        
+        if not date_str:
+            return None
+        
+        # 이미 YYYY-MM-DD 형식이면 그대로 반환
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
+        
+        # 상대 날짜 변환
+        if "오늘" in date_str:
+            target_date = now.date()
+        elif "내일" in date_str:
+            target_date = (now + timedelta(days=1)).date()
+        elif "모레" in date_str:
+            target_date = (now + timedelta(days=2)).date()
+        elif "다음주" in date_str or "다음 주" in date_str:
+            # 다음주 월요일 기준
+            days_until_monday = (7 - now.weekday()) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7
+            target_date = (now + timedelta(days=days_until_monday)).date()
+        elif "이번주" in date_str or "이번 주" in date_str:
+            target_date = now.date()
+        else:
+            # "12월 12일" 형식
+            match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+            if match:
+                month = int(match.group(1))
+                day = int(match.group(2))
+                year = now.year
+                # 이미 지난 날짜면 내년으로
+                if month < now.month or (month == now.month and day < now.day):
+                    year += 1
+                try:
+                    target_date = datetime(year, month, day).date()
+                except ValueError:
+                    return None
+            else:
+                return None
+        
+        return target_date.strftime("%Y-%m-%d")
+    
+    def _convert_relative_time(self, time_str: str) -> Optional[str]:
+        """상대 시간을 HH:MM 형식으로 변환"""
+        import re
+        
+        if not time_str:
+            return None
+        
+        # 이미 HH:MM 형식이면 그대로 반환
+        if re.match(r'^\d{1,2}:\d{2}$', time_str):
+            return time_str
+        
+        # 한국어 시간 파싱
+        hour = None
+        minute = 0
+        
+        # "오후 3시", "오전 10시 30분" 등
+        hour_match = re.search(r'(\d{1,2})\s*시', time_str)
+        if hour_match:
+            hour = int(hour_match.group(1))
+            
+            # 오후/오전 처리
+            if "오후" in time_str and hour < 12:
+                hour += 12
+            elif "오전" in time_str and hour == 12:
+                hour = 0
+            
+            # 분 처리
+            min_match = re.search(r'(\d{1,2})\s*분', time_str)
+            if min_match:
+                minute = int(min_match.group(1))
+        
+        if hour is not None:
+            return f"{hour:02d}:{minute:02d}"
+        
+        # "점심", "저녁" 등 대략적인 시간
+        if "점심" in time_str:
+            return "12:00"
+        elif "저녁" in time_str:
+            return "18:00"
+        elif "아침" in time_str:
+            return "09:00"
+        
+        return None
+    
+    def _parse_proposal_datetime(self, proposal: Proposal) -> Optional[datetime]:
+        """제안의 날짜/시간을 datetime으로 변환"""
+        import re
+        try:
+            date_str = proposal.date
+            time_str = proposal.time
+            
+            # 현재 연도
+            current_year = datetime.now(KST).year
+            
+            # 날짜 파싱 시도 (여러 형식 지원)
+            parsed_date = None
+            
+            # 1. YYYY-MM-DD 형식
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            # 2. MM-DD 형식 (연도 없음)
+            elif re.match(r'^\d{2}-\d{2}$', date_str):
+                parsed_date = datetime.strptime(f"{current_year}-{date_str}", "%Y-%m-%d").date()
+            # 3. 한국어 형식 "12월 12일"
+            elif "월" in date_str and "일" in date_str:
+                match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+                if match:
+                    month = int(match.group(1))
+                    day = int(match.group(2))
+                    parsed_date = datetime(current_year, month, day).date()
+            
+            if not parsed_date:
+                return None
+            
+            # 시간 파싱 (HH:MM 또는 한국어)
+            parsed_time = None
+            
+            # 1. HH:MM 형식
+            if re.match(r'^\d{1,2}:\d{2}$', time_str):
+                parts = time_str.split(':')
+                parsed_time = (int(parts[0]), int(parts[1]))
+            # 2. 한국어 형식 "오후 3시", "오전 10시"
+            elif "시" in time_str:
+                match = re.search(r'(\d{1,2})\s*시', time_str)
+                if match:
+                    hour = int(match.group(1))
+                    if "오후" in time_str and hour < 12:
+                        hour += 12
+                    elif "오전" in time_str and hour == 12:
+                        hour = 0
+                    parsed_time = (hour, 0)
+            
+            if not parsed_time:
+                return None
+            
+            dt = datetime(parsed_date.year, parsed_date.month, parsed_date.day, 
+                         parsed_time[0], parsed_time[1], tzinfo=KST)
+            return dt
+            
+        except Exception as e:
+            logger.error(f"날짜 파싱 실패: {e}")
+            return None

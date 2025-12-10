@@ -62,12 +62,33 @@ class A2ARepository:
     @staticmethod
     async def update_session_status(session_id: str, status: str, details: Optional[Dict[str, Any]] = None) -> bool:
         """세션 상태 업데이트"""
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
             update_data = {
                 "status": status,
                 "updated_at": datetime.utcnow().isoformat()
             }
-            # details는 무시 (details 컬럼이 테이블에 없음)
+            
+            # details가 있으면 place_pref에 병합하여 저장 (협상 결과 저장)
+            if details:
+                # 기존 place_pref 조회
+                existing = supabase.table('a2a_session').select('place_pref').eq('id', session_id).execute()
+                existing_place_pref = {}
+                if existing.data and existing.data[0].get('place_pref'):
+                    existing_place_pref = existing.data[0]['place_pref']
+                    if isinstance(existing_place_pref, str):
+                        try:
+                            existing_place_pref = json.loads(existing_place_pref)
+                        except:
+                            existing_place_pref = {}
+                
+                # 기존 값에 새 details 병합 (새 값이 우선)
+                merged = {**existing_place_pref, **details}
+                update_data["place_pref"] = merged  # JSONB 컬럼에는 dict 직접 저장
+                logger.info(f"세션 {session_id} - details 저장: {details}, merged: {merged}")
             
             response = supabase.table('a2a_session').update(update_data).eq('id', session_id).execute()
             return len(response.data) > 0
@@ -152,22 +173,25 @@ class A2ARepository:
     async def get_pending_requests_for_user(user_id: str) -> List[Dict[str, Any]]:
         """
         사용자에게 온 pending 상태의 일정 요청 조회
-        - target_user_id가 현재 사용자인 세션
-        - status가 'pending', 'pending_approval', 'in_progress'인 세션
+        - target_user_id나 initiator_user_id가 현재 사용자인 세션
+        - pending_approval 상태: 협상 완료 후 사용자 승인 대기
+        - pending, in_progress 상태: 진행 중인 세션
         """
         try:
             import logging
             logger = logging.getLogger(__name__)
             logger.info(f"🔍 Pending 요청 조회 시작 - user_id: {user_id}")
             
-            response = supabase.table('a2a_session').select('*').eq(
-                'target_user_id', user_id
+            # initiator 또는 target으로 참여한 pending_approval 세션 조회
+            # Supabase에서 OR 조건 사용: or_(target_user_id.eq.{user_id}, initiator_user_id.eq.{user_id})
+            response = supabase.table('a2a_session').select('*').or_(
+                f"target_user_id.eq.{user_id},initiator_user_id.eq.{user_id}"
             ).in_('status', ['pending', 'pending_approval', 'in_progress']).order('created_at', desc=True).execute()
             
             logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
             if response.data:
                 for s in response.data:
-                    logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}")
+                    logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
             
             return response.data if response.data else []
         except Exception as e:
