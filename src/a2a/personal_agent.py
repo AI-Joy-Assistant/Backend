@@ -134,6 +134,7 @@ class PersonalAgent:
     ) -> AgentDecision:
         """
         제안을 평가하고 GPT로 응답 결정
+        ⚠️ 캘린더 충돌 시 GPT 호출 없이 강제 COUNTER
         """
         try:
             # 내 가용 시간 확인
@@ -152,6 +153,39 @@ class PersonalAgent:
                         is_available = True
                         break
             
+            # 🚨 강제 차단: 캘린더 충돌 시 GPT 호출 없이 즉시 COUNTER
+            if not is_available and availability:
+                # 제안 시간과 가장 가까운 가용 슬롯 찾기
+                best_slot = self._find_best_alternative_slot(proposed_dt, availability)
+                
+                if best_slot:
+                    counter_proposal = Proposal(
+                        date=best_slot.start.strftime("%Y-%m-%d"),
+                        time=best_slot.start.strftime("%H:%M"),
+                        location=proposal.location,
+                        activity=proposal.activity,
+                        duration_minutes=proposal.duration_minutes
+                    )
+                    
+                    logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! 강제 COUNTER - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
+                    
+                    return AgentDecision(
+                        action=MessageType.COUNTER,
+                        proposal=counter_proposal,
+                        reason="캘린더 충돌",
+                        message=f"그 시간은 일정이 있어요 😅 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
+                    )
+            
+            # 가용 시간이 전혀 없는 경우
+            if not is_available and not availability:
+                logger.warning(f"[{self.user_name}] 2주 내 가용 시간 없음")
+                return AgentDecision(
+                    action=MessageType.NEED_HUMAN,
+                    message="앗, 2주 내에 가능한 시간이 없어요 😥 직접 확인해주세요!",
+                    reason="no_availability"
+                )
+            
+            # ✅ 가용 시간 내 제안 → GPT로 최종 결정 (대부분 ACCEPT)
             # 현재 연도 가져오기
             current_year = now.year
             
@@ -319,6 +353,32 @@ class PersonalAgent:
                 action=MessageType.NEED_HUMAN,
                 message="제안 생성 중 오류가 발생했어요 😥"
             )
+    
+    def _find_best_alternative_slot(self, proposed_dt: Optional[datetime], availability: List[TimeSlot]) -> Optional[TimeSlot]:
+        """
+        제안 시간과 가장 가까운 가용 슬롯 찾기
+        - 같은 날짜 슬롯 우선
+        - 없으면 시간 차이가 가장 작은 슬롯
+        """
+        if not availability:
+            return None
+        
+        if not proposed_dt:
+            # 제안 시간을 파싱할 수 없으면 첫 번째 가용 슬롯 반환
+            return availability[0]
+        
+        # 같은 날짜의 슬롯 찾기
+        same_day_slots = [
+            slot for slot in availability 
+            if slot.start.date() == proposed_dt.date()
+        ]
+        
+        if same_day_slots:
+            # 같은 날짜 중 제안 시간과 가장 가까운 슬롯
+            return min(same_day_slots, key=lambda s: abs((s.start - proposed_dt).total_seconds()))
+        
+        # 같은 날짜 슬롯이 없으면 전체에서 가장 가까운 슬롯
+        return min(availability, key=lambda s: abs((s.start - proposed_dt).total_seconds()))
     
     def _convert_relative_date(self, date_str: str, now: datetime) -> Optional[str]:
         """상대 날짜를 YYYY-MM-DD 형식으로 변환"""
