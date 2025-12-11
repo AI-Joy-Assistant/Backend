@@ -243,6 +243,45 @@ async def get_a2a_session(
         
         # 디버깅: 추출된 날짜 확인
         print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
+        
+        # 참여자 정보 추가 (Attendees) - 다중 참여자 지원
+        attendees = []
+        added_ids = set()  # 중복 방지
+        
+        try:
+            # 1. participant_user_ids 컬럼 우선 사용 (새 방식)
+            participant_ids = session.get("participant_user_ids") or []
+            
+            # 2. 없으면 initiator + target fallback (기존 세션 호환)
+            if not participant_ids:
+                if initiator_id:
+                    participant_ids.append(initiator_id)
+                target_id = session.get("target_user_id")
+                if target_id and target_id != initiator_id:
+                    participant_ids.append(target_id)
+            
+            print(f"🔍 [Attendees] participant_user_ids: {participant_ids}")
+            
+            # 3. 모든 참여자 정보 조회
+            for participant_id in participant_ids:
+                if participant_id and participant_id not in added_ids:
+                    try:
+                        participant_info = await AuthRepository.find_user_by_id(participant_id)
+                        if participant_info:
+                            attendees.append({
+                                "id": participant_id,
+                                "name": participant_info.get("name") or "알 수 없음",
+                                "avatar": participant_info.get("profile_image") or "https://picsum.photos/150",
+                                "isCurrentUser": participant_id == current_user_id
+                            })
+                            added_ids.add(participant_id)
+                    except Exception as e:
+                        print(f"참여자 조회 실패 ({participant_id}): {e}")
+        except Exception as e:
+            print(f"참여자 정보 조회 오류: {e}")
+        
+        print(f"📋 [Attendees Final] Total: {len(attendees)}, IDs: {added_ids}")
+        details["attendees"] = attendees
 
         session["details"] = details
         session["title"] = summary if summary else "일정 조율"
@@ -733,7 +772,8 @@ async def start_true_a2a_session(
                 "location": request.place_pref.get("location") if request.place_pref else None,
                 "date": request.time_window.get("date") if request.time_window else None,
                 "time": request.time_window.get("time") if request.time_window else None
-            } if request.summary else None
+            } if request.summary else None,
+            participant_user_ids=[current_user_id, request.target_user_id]  # 다중 참여자 지원
         )
         
         return {

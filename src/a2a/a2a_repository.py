@@ -15,13 +15,13 @@ class A2ARepository:
         intent: str = "schedule",
         time_window: Optional[Dict[str, Any]] = None,
         place_pref: Optional[Dict[str, Any]] = None,
-        summary: Optional[str] = None
+        summary: Optional[str] = None,
+        participant_user_ids: Optional[List[str]] = None  # 다중 참여자 지원
     ) -> Dict[str, Any]:
         """A2A 세션 생성"""
         try:
             session_id = str(uuid.uuid4())
             # a2a_session 테이블의 실제 컬럼 구조에 맞춰 생성
-            # 필수 필드만 포함 (summary, time_window, place_pref는 선택적)
             session_data = {
                 "id": session_id,
                 "initiator_user_id": initiator_user_id,
@@ -30,8 +30,13 @@ class A2ARepository:
                 "status": "pending",
             }
             
+            # participant_user_ids 설정 (없으면 initiator + target으로 기본 생성)
+            if participant_user_ids:
+                session_data["participant_user_ids"] = participant_user_ids
+            else:
+                session_data["participant_user_ids"] = [initiator_user_id, target_user_id]
+            
             # time_window와 place_pref는 JSONB 필드일 수 있으므로 조건부로 추가
-            # summary는 place_pref에 포함시키거나 제외
             if place_pref is not None:
                 session_data["place_pref"] = place_pref
             elif summary is not None:

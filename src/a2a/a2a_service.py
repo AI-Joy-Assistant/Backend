@@ -44,7 +44,8 @@ class A2AService:
                 initiator_user_id=initiator_user_id,
                 target_user_id=target_user_id,
                 intent="schedule",
-                place_pref={"summary": summary or f"일정 조율"} if summary else None
+                place_pref={"summary": summary or f"일정 조율"} if summary else None,
+                participant_user_ids=[initiator_user_id, target_user_id]  # 다중 참여자 지원
             )
             session_id = session["id"]
             
@@ -1332,7 +1333,8 @@ class A2AService:
                             target_user_id=target_id,
                             intent="schedule",
                             place_pref=place_pref,
-                            time_window={"date": date, "time": time, "duration_minutes": duration_minutes} if date or time else None
+                            time_window={"date": date, "time": time, "duration_minutes": duration_minutes} if date or time else None,
+                            participant_user_ids=[initiator_user_id] + target_user_ids  # 다중 참여자 지원
                         )
                         sessions.append({
                             "session_id": session["id"],
@@ -1381,7 +1383,8 @@ class A2AService:
                         target_user_id=target_id,
                         intent="schedule",
                         place_pref=place_pref,
-                        time_window={"date": date, "time": time, "duration_minutes": duration_minutes} if date or time else None
+                        time_window={"date": date, "time": time, "duration_minutes": duration_minutes} if date or time else None,
+                        participant_user_ids=[initiator_user_id] + target_user_ids  # 다중 참여자 지원
                     )
                     sessions.append({
                         "session_id": session["id"],
