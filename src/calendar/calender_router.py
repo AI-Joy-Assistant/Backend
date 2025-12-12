@@ -208,6 +208,62 @@ async def get_calendar_events(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
 
+@router.get("/busy-times", summary="특정 날짜의 바쁜 시간대 조회")
+async def get_busy_times(
+        date: str = Query(..., description="날짜 (YYYY-MM-DD 형식)"),
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID"),
+):
+    """
+    특정 날짜에 일정이 있는 시간대를 30분 단위로 반환합니다.
+    재조율 시간 선택에서 비활성화할 시간대를 결정하는 데 사용됩니다.
+    """
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        service = GoogleCalendarService()
+        
+        # 해당 날짜의 시작/끝 시간 계산
+        kst = dt.timezone(dt.timedelta(hours=9))
+        date_obj = dt.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=kst)
+        time_min = date_obj.replace(hour=0, minute=0, second=0).isoformat()
+        time_max = date_obj.replace(hour=23, minute=59, second=59).isoformat()
+        
+        events = await service.get_calendar_events(
+            access_token=google_access_token,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        
+        # 바쁜 시간대 추출 (30분 단위)
+        busy_slots = set()
+        for event in events:
+            start_str = event.start.get("dateTime") if hasattr(event, 'start') and event.start else None
+            end_str = event.end.get("dateTime") if hasattr(event, 'end') and event.end else None
+            
+            if not start_str or not end_str:
+                continue
+            
+            try:
+                start = dt.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end = dt.datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                
+                # 30분 단위로 바쁜 시간 추가
+                current = start
+                while current < end:
+                    time_slot = current.astimezone(kst).strftime("%H:%M")
+                    busy_slots.add(time_slot)
+                    current += dt.timedelta(minutes=30)
+            except Exception:
+                continue
+        
+        return {"busy_times": sorted(list(busy_slots))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[BUSY-TIMES] 조회 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"바쁜 시간대 조회 실패: {str(e)}")
+
 @router.get("/events/legacy")
 async def get_calendar_events_legacy(
         access_token: str = Query(..., description="Google OAuth access token"),

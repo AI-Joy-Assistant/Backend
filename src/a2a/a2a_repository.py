@@ -201,9 +201,9 @@ class A2ARepository:
             ).in_('status', ['pending', 'pending_approval', 'in_progress']).order('created_at', desc=True).execute()
             
             logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
-            if response.data:
-                for s in response.data:
-                    logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
+            # if response.data:
+            #     for s in response.data:
+            #         logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
             
             return response.data if response.data else []
         except Exception as e:

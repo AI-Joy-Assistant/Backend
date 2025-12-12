@@ -97,10 +97,23 @@ async def get_a2a_session(
         process = []
         for msg in messages:
             msg_data = msg.get("message", {}) or {}
+            created_at = msg.get("created_at")  # 메시지 생성 시간
             
             # 발신자 정보
             sender_id = msg.get("sender_user_id")
             sender_name = user_names_cache.get(sender_id, "AI") if sender_id else "시스템"
+            
+            # 메시지 타입 확인
+            msg_type = msg_data.get("type") or msg.get("type")
+            
+            # 재조율 요청 메시지 처리
+            if msg_type == "reschedule_request":
+                process.append({
+                    "step": "🔄 재조율 요청",
+                    "description": f"{sender_name}님이 재조율을 요청했습니다. ({msg_data.get('reason', '')})",
+                    "created_at": created_at
+                })
+                continue
             
             # 기존 형식: step + text
             step = msg_data.get("step")
@@ -112,7 +125,7 @@ async def get_a2a_session(
             
             if step and text:
                 # 기존 형식
-                process.append({"step": str(step), "description": text})
+                process.append({"step": str(step), "description": text, "created_at": created_at})
             elif text:
                 # True A2A 형식 - 발신자 표시 추가
                 step_label = f"[{sender_name}의 AI] Round {round_num}" if round_num else f"[{sender_name}의 AI]"
@@ -121,7 +134,7 @@ async def get_a2a_session(
                 if proposal and (proposal.get('date') or proposal.get('time')):
                     proposal_info = f" ({proposal.get('date', '')} {proposal.get('time', '')})"
                     description += proposal_info
-                process.append({"step": step_label, "description": description})
+                process.append({"step": step_label, "description": description, "created_at": created_at})
         
         # 2. 기본 정보
         place_pref = session.get("place_pref", {}) or {}
@@ -178,7 +191,15 @@ async def get_a2a_session(
             "location": place_pref.get("location") or "미정",
             "process": process,
             "has_conflict": False,
-            "conflicting_event": None
+            "conflicting_event": None,
+            # 종료 시간 (시간 범위 지원)
+            "proposedEndDate": place_pref.get("proposedEndDate") or "",
+            "proposedEndTime": place_pref.get("proposedEndTime") or "",
+            "agreedEndDate": place_pref.get("agreedEndDate") or "",
+            "agreedEndTime": place_pref.get("agreedEndTime") or "",
+            # 재조율 요청 정보
+            "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
+            "rescheduleReason": place_pref.get("rescheduleReason")
         }
         
         # 캘린더 충돌 확인 (현재 사용자의 캘린더)
@@ -451,7 +472,7 @@ async def get_user_sessions(
             if not isinstance(place_pref, dict):
                 place_pref = {}
                 
-            print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
+            # print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
             
             summary = place_pref.get("summary") or session.get("summary")
             
@@ -518,9 +539,9 @@ async def get_pending_requests(
         print(f"🔍 [Pending Requests] Fetching for user: {current_user_id}")
         sessions = await A2ARepository.get_pending_requests_for_user(current_user_id)
         print(f"🔍 [Pending Requests] Found {len(sessions) if sessions else 0} sessions")
-        if sessions:
-            for s in sessions:
-                print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
+        # if sessions:
+        #     for s in sessions:
+                # print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
         
         if not sessions:
             return {"requests": []}
@@ -696,8 +717,10 @@ async def reschedule_session(
         reason = body.get("reason")
         preferred_time = body.get("preferred_time")
         manual_input = body.get("manual_input") or body.get("note")
-        new_date = body.get("date")  # 새로 선택한 날짜
-        new_time = body.get("time")  # 새로 선택한 시간
+        new_date = body.get("date")  # 새로 선택한 시작 날짜
+        new_time = body.get("time")  # 새로 선택한 시작 시간
+        end_date = body.get("endDate")  # 종료 날짜
+        end_time = body.get("endTime")  # 종료 시간
 
         # 권한 확인 및 세션 조회
         session = await A2ARepository.get_session(session_id)
@@ -715,7 +738,9 @@ async def reschedule_session(
             preferred_time=preferred_time,
             manual_input=manual_input,
             new_date=new_date,
-            new_time=new_time
+            new_time=new_time,
+            end_date=end_date,
+            end_time=end_time
         )
         
         return result

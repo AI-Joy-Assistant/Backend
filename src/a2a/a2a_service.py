@@ -480,10 +480,13 @@ class A2AService:
         preferred_time: Optional[str] = None,
         manual_input: Optional[str] = None,
         new_date: Optional[str] = None,
-        new_time: Optional[str] = None
+        new_time: Optional[str] = None,
+        end_date: Optional[str] = None,
+        end_time: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         A2A 세션의 재조율을 요청합니다.
+        기존 세션을 재활성화하여 협상을 다시 진행합니다.
         """
         try:
             # 세션 정보 조회
@@ -491,39 +494,110 @@ class A2AService:
             if not session:
                 return {"status": 404, "error": "세션을 찾을 수 없습니다."}
             
-            # proposal 정보 구성 - 프론트엔드에서 전송한 새로운 값 포함
-            details = session.get("details", {})
-            proposal = {
-                # 새로 선택한 날짜/시간이 있으면 사용, 없으면 기존 값 유지
-                "date": new_date or details.get("proposedDate", ""),
-                "time": new_time or details.get("proposedTime", ""),
-                "location": details.get("location", ""),
-                "activity": details.get("purpose", ""),
-                "participants": details.get("participants", []),
-                # 프론트엔드에서 보낸 재조율 정보 추가
-                "reason": reason,
-                "preferred_time": preferred_time,
-                "manual_input": manual_input
-            }
+            place_pref = session.get("place_pref", {})
+            if isinstance(place_pref, str):
+                import json
+                try:
+                    place_pref = json.loads(place_pref)
+                except:
+                    place_pref = {}
             
-            print(f"🔄 [Reschedule] Session: {session_id}")
+            print(f"🔄 [Reschedule] 기존 세션 재활성화: {session_id}")
             print(f"   - User: {user_id}")
             print(f"   - Reason: {reason}")
             print(f"   - New Date: {new_date}")
             print(f"   - New Time: {new_time}")
-            print(f"   - Manual Input: {manual_input}")
-            print(f"   - Proposal: {proposal}")
             
-            # 거절 처리 (handle_schedule_approval에서 approved=False로 호출)
-            result = await A2AService.handle_schedule_approval(
-                thread_id=session.get("thread_id"),
-                session_ids=[session_id],
-                user_id=user_id,
-                approved=False,
-                proposal=proposal
+            # 1. 세션 상태를 'in_progress'로 변경
+            await A2ARepository.update_session_status(session_id, "in_progress")
+            
+            # 2. 새로운 제안 시간으로 place_pref 업데이트
+            # 새 날짜/시간이 있으면 변환
+            target_date = new_date or place_pref.get("proposedDate") or place_pref.get("date")
+            target_time = new_time or place_pref.get("proposedTime") or place_pref.get("time")
+            
+            # 상대 날짜/시간 변환
+            formatted_date = convert_relative_date(target_date) or target_date
+            formatted_time = convert_relative_time(target_time, place_pref.get("activity")) or target_time
+            formatted_end_date = end_date or formatted_date  # 종료 날짜가 없으면 시작 날짜 사용
+            formatted_end_time = end_time or (formatted_time if formatted_time else "")  # 종료 시간
+            
+            # place_pref에 재조율 정보 추가 (시간 범위 포함)
+            reschedule_details = {
+                "rescheduleReason": reason,
+                "rescheduleRequestedBy": user_id,
+                "proposedDate": formatted_date,
+                "proposedTime": formatted_time,
+                "proposedEndDate": formatted_end_date,
+                "proposedEndTime": formatted_end_time,
+            }
+            
+            await A2ARepository.update_session_status(
+                session_id, 
+                "in_progress",
+                details=reschedule_details
             )
             
-            return result
+            # 3. 재조율 메시지 추가 (시간 범위 표시)
+            initiator_user_id = session.get("initiator_user_id")
+            target_user_id = session.get("target_user_id")
+            
+            time_range_str = f"{formatted_date} {formatted_time} ~ {formatted_end_date} {formatted_end_time}"
+            
+            reschedule_message = {
+                "type": "reschedule_request",
+                "title": "재조율 요청",
+                "description": f"재조율이 요청되었습니다. 새로운 시간: {time_range_str}",
+                "reason": reason,
+                "new_date": formatted_date,
+                "new_time": formatted_time
+            }
+            
+            await A2ARepository.add_message(
+                session_id=session_id,
+                sender_user_id=user_id,
+                receiver_user_id=target_user_id if user_id == initiator_user_id else initiator_user_id,
+                message_type="system",
+                message=reschedule_message
+            )
+            
+            # 4. 참여자 정보 수집
+            participant_user_ids = place_pref.get("participant_user_ids") or session.get("participant_user_ids")
+            if not participant_user_ids:
+                participant_user_ids = [target_user_id] if target_user_id else []
+            
+            # initiator 제외
+            participant_user_ids = [uid for uid in participant_user_ids if uid != initiator_user_id]
+            
+            print(f"🔄 [Reschedule] 협상 재실행 준비:")
+            print(f"   - session_id: {session_id}")
+            print(f"   - initiator: {initiator_user_id}")
+            print(f"   - participants: {participant_user_ids}")
+            print(f"   - target_date: {formatted_date}")
+            print(f"   - target_time: {formatted_time}")
+            
+            if not participant_user_ids:
+                print(f"⚠️ [Reschedule] 참여자가 없습니다! target_user_id: {target_user_id}")
+            
+            # 5. 협상 재실행
+            result = await A2AService._execute_true_a2a_negotiation(
+                session_id=session_id,
+                initiator_user_id=initiator_user_id,
+                participant_user_ids=participant_user_ids,
+                summary=place_pref.get("summary") or place_pref.get("activity"),
+                duration_minutes=60,
+                target_date=formatted_date,
+                target_time=formatted_time,
+                location=place_pref.get("location"),
+                all_session_ids=[session_id]  # 기존 세션에만 저장
+            )
+            
+            return {
+                "status": 200,
+                "message": "재조율 협상이 시작되었습니다.",
+                "session_id": session_id,
+                "result": result
+            }
             
         except Exception as e:
             logger.error(f"재조율 요청 실패: {str(e)}", exc_info=True)
@@ -2468,41 +2542,63 @@ class A2AService:
 
             if approved:
                 # 2. [수정됨] 승인 현황 재계산 (Source of Truth: 개별 유저의 최신 로그)
-                # 기존 approved_by_list에 의존하지 않고, 각 참여자의 최신 로그를 직접 조회하여 승인 여부 판단
                 
                 real_approved_users = set()
                 
                 # 현재 요청한 유저는 승인한 것으로 간주
-                real_approved_users.add(user_id)
+                real_approved_users.add(str(user_id))
                 
+                # [NEW] 재조율 요청 처리
+                reschedule_debug = []
+                for session in sessions:
+                    place_pref = session.get("place_pref", {})
+                    if isinstance(place_pref, str):
+                        try:
+                            import json
+                            place_pref = json.loads(place_pref)
+                        except Exception as e:
+                            logger.error(f"place_pref JSON 파싱 오류: {str(e)}")
+                            place_pref = {}
+                
+                # rescheduleRequestedBy 확인 (문자열 변환)
+                req_by = place_pref.get("rescheduleRequestedBy")
+                if req_by:
+                    req_by_str = str(req_by)
+                    reschedule_debug.append(f"Found requester: {req_by_str}")
+                    # 참여자 목록에 있다면 승인 처리
+                    if req_by_str in [str(p) for p in all_participants]:
+                        real_approved_users.add(req_by_str)
+                        logger.info(f"📌 재조율 요청자 자동 승인: {req_by_str}")
+            
                 # 다른 참여자들의 승인 상태 확인
                 for pid in all_participants:
-                    if pid == user_id: continue # 이미 추가함
+                    pid_str = str(pid)
+                    if pid_str == str(user_id): continue 
+                    if pid_str in real_approved_users: continue 
 
                     # 해당 유저의 가장 최근 'schedule_approval' 로그 조회
-                    # 주의: thread_id나 session_ids 조건도 맞아야 함
                     query = supabase.table('chat_log').select('*').eq(
-                        'user_id', pid
+                        'user_id', pid_str
                     ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1)
                     
                     res = query.execute()
                     if res.data:
                         log_meta = res.data[0].get('metadata', {})
-                        # 해당 로그의 approved_by가 본인 ID라면 승인한 것으로 판단
-                        if log_meta.get('approved_by') == pid:
-                            real_approved_users.add(pid)
-                
+                        if str(log_meta.get('approved_by')) == pid_str:
+                            real_approved_users.add(pid_str)
+            
                 # 전원 승인 여부 판단
                 all_approved = len(real_approved_users) >= len(all_participants)
                 approved_list = list(real_approved_users)
 
-                logger.info(f"승인 현황(재계산): {len(real_approved_users)}/{len(all_participants)} - {real_approved_users}")
+                logger.info(f"승인 현황: {len(real_approved_users)}/{len(all_participants)} - {real_approved_users}")
 
-                # 3. 모든 참여자의 Chat Log 메타데이터 동기화 (UI 업데이트용)
+                # 3. 메타데이터 동기화
                 for participant_id in all_participants:
+                    pid_str = str(participant_id)
                     # 각 참여자의 로그 찾기
                     log_query = supabase.table('chat_log').select('*').eq(
-                        'user_id', participant_id
+                        'user_id', pid_str
                     ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1).execute()
                     
                     if log_query.data:
@@ -2512,17 +2608,38 @@ class A2AService:
                         # 업데이트할 메타데이터 구성
                         # approved_by 필드는 "그 유저가 승인했는지"를 나타내므로, 
                         # 현재 participant_id가 이번 요청자(user_id)라면 user_id로 업데이트, 아니면 기존 값 유지
-                        new_approved_by = user_id if participant_id == user_id else meta.get('approved_by')
+                        new_approved_by = str(user_id) if pid_str == str(user_id) else meta.get('approved_by')
                         
                         new_meta = {
                             **meta,
                             "approved_by_list": approved_list, # 최신 리스트 전파
-                            "all_approved": all_approved,
-                            "approved_by": new_approved_by,
-                            "approved_at": dt_datetime.now().isoformat() if participant_id == user_id else meta.get('approved_at')
+                            "approved_by": new_approved_by
                         }
                         
-                        supabase.table('chat_log').update({'metadata': new_meta}).eq('id', target_log['id']).execute()
+                        # 업데이트 실행
+                        supabase.table('chat_log').update({
+                            "metadata": new_meta
+                        }).eq("id", target_log['id']).execute()
+                
+                # 4. 결과 반환 (UI에서 사용)
+                # 만약 방금 업데이트한 로그가 내 로그라면, 그 메타데이터를 반환값에 포함
+                # 그러나 편의상 위에서 만든 new_meta(내꺼 기준)를 반환
+                
+                # 내 로그 찾기
+                my_log_query = supabase.table('chat_log').select('*').eq(
+                    'user_id', str(user_id)
+                ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1).execute()
+                
+                final_meta = {}
+                if my_log_query.data:
+                     final_meta = my_log_query.data[0].get('metadata', {})
+
+                if all_approved:
+                    # 4. 승인 완료 처리 (캘린더 등록 등)
+                    # ... (기존 로직 유지) ...
+                    
+                    # 캘린더 등록 로직 (생략 - 아래 있는 기존 코드 실행됨)
+                    pass
 
                 # 승인 알림 메시지 (채팅방)
                 approval_msg_text = f"{user_name}님이 일정을 승인했습니다."
