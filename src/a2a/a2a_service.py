@@ -21,6 +21,115 @@ from src.chat.chat_openai_service import OpenAIService
 
 logger = logging.getLogger(__name__)
 
+# 한국 시간대
+KST = timezone(timedelta(hours=9))
+
+def convert_relative_date(date_str: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
+    """상대 날짜를 YYYY-MM-DD 형식으로 변환"""
+    if not date_str:
+        return None
+    
+    if now is None:
+        now = datetime.now(KST)
+    
+    # 이미 YYYY-MM-DD 형식이면 그대로 반환
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        return date_str
+    
+    target_date = None
+    
+    # 상대 날짜 변환
+    if "오늘" in date_str:
+        target_date = now.date()
+    elif "내일" in date_str:
+        target_date = (now + timedelta(days=1)).date()
+    elif "모레" in date_str:
+        target_date = (now + timedelta(days=2)).date()
+    elif "다음주" in date_str or "다음 주" in date_str:
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        target_date = (now + timedelta(days=days_until_monday)).date()
+    elif "이번주" in date_str or "이번 주" in date_str:
+        target_date = now.date()
+    else:
+        # "12월 12일" 형식
+        match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+        if match:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            year = now.year
+            if month < now.month or (month == now.month and day < now.day):
+                year += 1
+            try:
+                target_date = datetime(year, month, day).date()
+            except ValueError:
+                pass
+        else:
+            # "13일" 형식 (월 없이)
+            match_day_only = re.search(r'(\d{1,2})일', date_str)
+            if match_day_only:
+                day = int(match_day_only.group(1))
+                month = now.month
+                year = now.year
+                if day < now.day:
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+                try:
+                    target_date = datetime(year, month, day).date()
+                except ValueError:
+                    pass
+    
+    return target_date.strftime("%Y-%m-%d") if target_date else None
+
+
+def convert_relative_time(time_str: Optional[str], activity: Optional[str] = None) -> Optional[str]:
+    """상대 시간을 HH:MM 형식으로 변환"""
+    if not time_str:
+        return None
+    
+    # 이미 HH:MM 형식이면 그대로 반환
+    if re.match(r'^\d{1,2}:\d{2}$', time_str):
+        return time_str
+    
+    hour = None
+    minute = 0
+    
+    # "오후 3시", "오전 10시 30분" 등
+    hour_match = re.search(r'(\d{1,2})\s*시', time_str)
+    if hour_match:
+        hour = int(hour_match.group(1))
+        
+        # 오후/오전 처리
+        if "오후" in time_str and hour < 12:
+            hour += 12
+        elif "오전" in time_str and hour == 12:
+            hour = 0
+        elif "오전" not in time_str and "오후" not in time_str:
+            # 1~6시는 대부분 오후
+            if 1 <= hour <= 6:
+                hour += 12
+        
+        # 분 처리
+        min_match = re.search(r'(\d{1,2})\s*분', time_str)
+        if min_match:
+            minute = int(min_match.group(1))
+    
+    if hour is not None:
+        return f"{hour:02d}:{minute:02d}"
+    
+    # "점심", "저녁" 등 대략적인 시간
+    if "점심" in time_str:
+        return "12:00"
+    elif "저녁" in time_str:
+        return "18:00"
+    elif "아침" in time_str:
+        return "09:00"
+    
+    return None
+
 class A2AService:
     
     @staticmethod
@@ -1327,6 +1436,10 @@ class A2AService:
                         })
                     else:
                         # 기존 세션이 없으면 새로 생성 (같은 thread_id 사용)
+                        # 요청 시간을 YYYY-MM-DD HH:MM 형식으로 변환
+                        formatted_requested_date = convert_relative_date(date) or date
+                        formatted_requested_time = convert_relative_time(time, activity) or time
+                        
                         place_pref = {
                             "summary": summary,
                             "thread_id": thread_id,
@@ -1335,9 +1448,9 @@ class A2AService:
                             "activity": activity,
                             "date": date,
                             "time": time,
-                            # 원래 요청 시간 저장 (협상 후에도 변경되지 않음)
-                            "requestedDate": date,
-                            "requestedTime": time
+                            # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
+                            "requestedDate": formatted_requested_date,
+                            "requestedTime": formatted_requested_time
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1379,6 +1492,10 @@ class A2AService:
                     target_name = target_user.get("name", "사용자") if target_user else "사용자"
                     
                     # 세션 생성 (place_pref에 thread_id와 모든 참여자 정보 저장)
+                    # 요청 시간을 YYYY-MM-DD HH:MM 형식으로 변환
+                    formatted_requested_date = convert_relative_date(date) or date
+                    formatted_requested_time = convert_relative_time(time, activity) or time
+                    
                     place_pref = {
                         "summary": summary,
                         "thread_id": thread_id,
@@ -1387,9 +1504,9 @@ class A2AService:
                         "activity": activity,
                         "date": date,
                         "time": time,
-                        # 원래 요청 시간 저장 (협상 후에도 변경되지 않음)
-                        "requestedDate": date,
-                        "requestedTime": time
+                        # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
+                        "requestedDate": formatted_requested_date,
+                        "requestedTime": formatted_requested_time
                     }
                     
                     session = await A2ARepository.create_session(
