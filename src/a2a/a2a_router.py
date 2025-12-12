@@ -166,9 +166,15 @@ async def get_a2a_session(
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
             "purpose": summary or "일정 조율",
-            # 우선순위: place_pref.proposedDate > place_pref.date > time_window.date (재조율 시 place_pref에 proposedDate 키로 저장됨)
+            # 원래 요청 시간 (변경되지 않음)
+            "requestedDate": place_pref.get("requestedDate") or place_pref.get("date") or time_window.get("date") or "",
+            "requestedTime": place_pref.get("requestedTime") or place_pref.get("time") or time_window.get("time") or "미정",
+            # 제안/확정 시간 (협상 결과)
             "proposedDate": place_pref.get("proposedDate") or place_pref.get("date") or time_window.get("date") or "",
             "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or time_window.get("time") or "미정",
+            # 확정 시간 (에이전트 협상 후)
+            "agreedDate": place_pref.get("agreedDate") or "",
+            "agreedTime": place_pref.get("agreedTime") or "",
             "location": place_pref.get("location") or "미정",
             "process": process,
             "has_conflict": False,
@@ -242,7 +248,8 @@ async def get_a2a_session(
             print(f"충돌 확인 오류: {conflict_error}")
         
         # 디버깅: 추출된 날짜 확인
-        print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
+        session_status = session.get("status", "unknown")
+        print(f"Session {session_id} - status: {session_status}, date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
         
         # 참여자 정보 추가 (Attendees) - 다중 참여자 지원
         attendees = []

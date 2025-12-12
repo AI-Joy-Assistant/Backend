@@ -90,8 +90,15 @@ class A2ARepository:
                         except:
                             existing_place_pref = {}
                 
-                # 기존 값에 새 details 병합 (새 값이 우선)
+                # 기존 값에 새 details 병합 (새 값이 우선, 단 requestedDate/Time은 기존 값 유지)
                 merged = {**existing_place_pref, **details}
+                
+                # requestedDate/Time은 원래 요청 시간이므로, 기존 값이 있으면 보존
+                if existing_place_pref.get('requestedDate'):
+                    merged['requestedDate'] = existing_place_pref['requestedDate']
+                if existing_place_pref.get('requestedTime'):
+                    merged['requestedTime'] = existing_place_pref['requestedTime']
+                
                 update_data["place_pref"] = merged  # JSONB 컬럼에는 dict 직접 저장
                 logger.info(f"세션 {session_id} - details 저장: {details}, merged: {merged}")
             

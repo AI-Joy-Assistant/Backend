@@ -258,7 +258,7 @@ class NegotiationEngine:
         return msg
     
     async def _save_message(self, msg: A2AMessage):
-        """메시지를 DB에 저장"""
+        """메시지를 모든 관련 세션 DB에 저장 (다중 세션 지원)"""
         try:
             receiver_id = None
             if msg.sender_agent_id == self.initiator_user_id:
@@ -266,17 +266,21 @@ class NegotiationEngine:
             else:
                 receiver_id = self.initiator_user_id
             
-            await A2ARepository.add_message(
-                session_id=self.session_id,
-                sender_user_id=msg.sender_agent_id if msg.sender_agent_id != "system" else self.initiator_user_id,
-                receiver_user_id=receiver_id,
-                message_type=msg.type.value.lower(),
-                message={
-                    "text": msg.message,
-                    "round": msg.round_number,
-                    "proposal": msg.proposal.to_dict() if msg.proposal else None
-                }
-            )
+            # 모든 세션에 메시지 저장 (다중 세션 지원)
+            session_ids_to_save = getattr(self, 'all_session_ids', [self.session_id])
+            
+            for session_id in session_ids_to_save:
+                await A2ARepository.add_message(
+                    session_id=session_id,
+                    sender_user_id=msg.sender_agent_id if msg.sender_agent_id != "system" else self.initiator_user_id,
+                    receiver_user_id=receiver_id,
+                    message_type=msg.type.value.lower(),
+                    message={
+                        "text": msg.message,
+                        "round": msg.round_number,
+                        "proposal": msg.proposal.to_dict() if msg.proposal else None
+                    }
+                )
         except Exception as e:
             logger.error(f"메시지 저장 실패: {e}")
     
@@ -290,22 +294,34 @@ class NegotiationEngine:
         return False
     
     async def _finalize_agreement(self, proposal: Proposal):
-        """합의 확정 - 사용자 승인 대기 상태로 변경"""
+        """합의 확정 - 모든 세션을 사용자 승인 대기 상태로 변경"""
         try:
             logger.info(f"🎉 합의 확정 - 최종 제안: date={proposal.date}, time={proposal.time}, location={proposal.location}")
             
             # 세션 상태를 pending_approval로 업데이트 (사용자가 최종 승인해야 캘린더 등록)
             details = {
+                # 원래 요청 시간 (协商 전 사용자가 처음 요청한 시간)
+                "requestedDate": self.target_date,
+                "requestedTime": self.target_time,
+                # 확정 시간 (에이전트 협상 후 최종 합의된 시간)
+                "agreedDate": proposal.date,
+                "agreedTime": proposal.time,
+                # 기존 호환성 유지
                 "proposedDate": proposal.date,
                 "proposedTime": proposal.time,
                 "location": proposal.location,
                 "purpose": proposal.activity,
                 "agreed_at": datetime.now(KST).isoformat()
             }
-            await A2ARepository.update_session_status(
-                self.session_id, "pending_approval", details  # completed → pending_approval
-            )
-            logger.info(f"세션 {self.session_id} 협상 완료 - 저장된 details: {details}")
+            
+            # 모든 세션 상태 업데이트 (다중 세션 지원)
+            session_ids_to_update = getattr(self, 'all_session_ids', [self.session_id])
+            
+            for session_id in session_ids_to_update:
+                await A2ARepository.update_session_status(
+                    session_id, "pending_approval", details
+                )
+                logger.info(f"세션 {session_id} 협상 완료 - 저장된 details: {details}")
         except Exception as e:
             logger.error(f"합의 확정 실패: {e}")
     

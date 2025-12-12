@@ -68,7 +68,7 @@ class A2AService:
                 result = await A2AService._execute_true_a2a_negotiation(
                     session_id=session_id,
                     initiator_user_id=initiator_user_id,
-                    target_user_id=target_user_id,
+                    participant_user_ids=[target_user_id],  # 리스트로 전달
                     summary=summary,
                     duration_minutes=duration_minutes
                 )
@@ -537,33 +537,41 @@ class A2AService:
     async def _execute_true_a2a_negotiation(
         session_id: str,
         initiator_user_id: str,
-        target_user_id: str,
+        participant_user_ids: List[str],  # ← 다중 참여자 지원
         summary: Optional[str] = None,
         duration_minutes: int = 60,
         target_date: Optional[str] = None,
         target_time: Optional[str] = None,
-        location: Optional[str] = None
+        location: Optional[str] = None,
+        all_session_ids: Optional[List[str]] = None  # 모든 세션에 메시지 저장용
     ) -> Dict[str, Any]:
         """
         True A2A: NegotiationEngine을 사용한 실제 에이전트 간 협상
         각 에이전트가 독립적으로 자신의 캘린더만 접근하며 협상
+        
+        Args:
+            participant_user_ids: 모든 참여자 UUID 리스트 (initiator 제외)
+            all_session_ids: 메시지를 저장할 모든 세션 ID 리스트 (다중 세션 지원)
         """
         try:
             from zoneinfo import ZoneInfo
             KST = ZoneInfo("Asia/Seoul")
             
-            logger.info(f"True A2A 협상 시작: date={target_date}, time={target_time}")
+            logger.info(f"True A2A 협상 시작: participants={len(participant_user_ids)}명, date={target_date}, time={target_time}")
             
             # NegotiationEngine 초기화
             engine = NegotiationEngine(
                 session_id=session_id,
                 initiator_user_id=initiator_user_id,
-                participant_user_ids=[target_user_id],
+                participant_user_ids=participant_user_ids,  # 모든 참여자
                 activity=summary,
                 location=location,
                 target_date=target_date,
                 target_time=target_time
             )
+            
+            # 추가 세션 ID 저장 (메시지 동기화용)
+            engine.all_session_ids = all_session_ids or [session_id]
             
             messages_log = []
             final_proposal = None
@@ -1326,7 +1334,10 @@ class A2AService:
                             "location": location,
                             "activity": activity,
                             "date": date,
-                            "time": time
+                            "time": time,
+                            # 원래 요청 시간 저장 (협상 후에도 변경되지 않음)
+                            "requestedDate": date,
+                            "requestedTime": time
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1375,7 +1386,10 @@ class A2AService:
                         "location": location,
                         "activity": activity,
                         "date": date,
-                        "time": time
+                        "time": time,
+                        # 원래 요청 시간 저장 (협상 후에도 변경되지 않음)
+                        "requestedDate": date,
+                        "requestedTime": time
                     }
                     
                     session = await A2ARepository.create_session(
@@ -1422,18 +1436,22 @@ class A2AService:
 
             # True A2A 또는 기존 시뮬레이션 실행
             if use_true_a2a:
-                # NegotiationEngine 사용 (첫 번째 세션 기준)
+                # NegotiationEngine 사용 - 모든 참여자에게 협상
                 first_session = sessions[0] if sessions else None
                 if first_session:
+                    # 모든 세션 ID 수집 (메시지 동기화용)
+                    all_session_ids = [s["session_id"] for s in sessions]
+                    
                     result = await A2AService._execute_true_a2a_negotiation(
                         session_id=first_session["session_id"],
                         initiator_user_id=initiator_user_id,
-                        target_user_id=first_session["target_id"],
+                        participant_user_ids=target_user_ids,  # 모든 참여자
                         summary=summary,
                         duration_minutes=duration_minutes,
                         target_date=date,
                         target_time=time,
-                        location=final_location
+                        location=final_location,
+                        all_session_ids=all_session_ids  # 모든 세션에 메시지 저장
                     )
                 else:
                     result = {"status": "failed", "messages": [], "needs_approval": False}
