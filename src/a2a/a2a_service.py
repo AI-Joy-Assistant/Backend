@@ -282,9 +282,29 @@ class A2AService:
             target_user_id = session.get("target_user_id")
             initiator_user_id = session.get("initiator_user_id")
             
-            # 요청 받은 사람인지 확인
-            if user_id != target_user_id:
-                return {"status": 403, "error": "요청을 받은 사람만 승인할 수 있습니다."}
+            # place_pref에서 rescheduleRequestedBy 확인
+            place_pref_check = session.get("place_pref", {}) or {}
+            if isinstance(place_pref_check, str):
+                try:
+                    import json
+                    place_pref_check = json.loads(place_pref_check)
+                except:
+                    place_pref_check = {}
+            
+            reschedule_requester = place_pref_check.get("rescheduleRequestedBy")
+            
+            # 승인 권한 확인:
+            # - 재조율인 경우: 요청자(rescheduleRequestedBy)가 아닌 사람만 승인 가능
+            # - 일반인 경우: target_user만 승인 가능
+            if reschedule_requester:
+                # 재조율 요청자는 승인할 수 없음 (본인이 요청한 거니까)
+                if str(user_id) == str(reschedule_requester):
+                    return {"status": 403, "error": "본인이 요청한 재조율은 직접 승인할 수 없습니다."}
+                logger.info(f"🔵 재조율 승인 - 요청자: {reschedule_requester}, 승인자: {user_id}")
+            else:
+                # 일반 세션: target_user만 승인 가능
+                if user_id != target_user_id:
+                    return {"status": 403, "error": "요청을 받은 사람만 승인할 수 있습니다."}
             
             # proposal 정보 구성 (여러 소스에서 가져오기)
             details = session.get("details", {}) or {}
@@ -382,62 +402,7 @@ class A2AService:
             initiator_name = initiator.get("name", "요청자") if initiator else "요청자"
             target_name = target.get("name", "상대방") if target else "상대방"
             
-            # 양쪽 캘린더에 일정 추가
-            all_participants = [initiator_user_id, target_user_id]
-            failed_users = []
-            
-            for pid in all_participants:
-                try:
-                    p_user = await AuthRepository.find_user_by_id(pid)
-                    p_name = p_user.get("name", "사용자") if p_user else "사용자"
-                    
-                    access_token = await AuthService.get_valid_access_token_by_user_id(pid)
-                    if not access_token:
-                        logger.error(f"유저 {pid} 토큰 갱신 실패")
-                        failed_users.append(p_name)
-                        continue
-                    
-                    from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
-                    
-                    # 상대방 이름 찾기
-                    other_name = target_name if pid == initiator_user_id else initiator_name
-                    
-                    # 일정 제목
-                    evt_summary = f"{other_name}와 {activity}"
-                    if location:
-                        evt_summary += f" ({location})"
-                    
-                    event_req = CreateEventRequest(
-                        summary=evt_summary,
-                        start_time=start_time.isoformat(),
-                        end_time=end_time.isoformat(),
-                        location=location,
-                        description="A2A Agent에 의해 자동 생성된 일정입니다.",
-                        attendees=[]
-                    )
-                    
-                    gc_service = GoogleCalendarService()
-                    evt = await gc_service.create_calendar_event(access_token, event_req)
-                    
-                    if evt:
-                        await A2AService._save_calendar_event_to_db(
-                            session_id=session_id,
-                            owner_user_id=pid,
-                            google_event_id=evt.id,
-                            summary=evt_summary,
-                            location=location,
-                            start_at=start_time.isoformat(),
-                            end_at=end_time.isoformat(),
-                            html_link=evt.htmlLink
-                        )
-                    else:
-                        failed_users.append(p_name)
-                        
-                except Exception as e:
-                    logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
-                    failed_users.append(p_name if 'p_name' in dir() else pid)
-            
-            # 확정된 정보를 details에 저장
+            # 확정된 정보를 details에 저장 (먼저 상태 업데이트)
             confirmed_details = {
                 "proposedDate": start_time.strftime("%m월 %d일"),
                 "proposedTime": start_time.strftime("%p %I시").replace("AM", "오전").replace("PM", "오후"),
@@ -449,22 +414,105 @@ class A2AService:
                 "end_time": end_time.isoformat()
             }
             
-            # 세션 상태 및 details 업데이트
+            # 세션 상태를 먼저 completed로 업데이트 (빠른 응답)
             logger.info(f"🔵 세션 상태 업데이트 시작 - session_id: {session_id}, status: completed")
             update_result = await A2ARepository.update_session_status(session_id, "completed", confirmed_details)
             logger.info(f"🔵 세션 상태 업데이트 결과: {update_result}")
             
-            # 결과 메시지
-            if not failed_users:
-                final_msg = "모든 참여자의 캘린더에 일정이 정상 등록되었습니다."
-            else:
-                final_msg = f"일정이 확정되었으나, 다음 사용자의 캘린더 등록에 실패했습니다: {', '.join(failed_users)}"
+            # 캘린더 작업을 백그라운드로 실행 (즉시 응답 후 처리)
+            async def sync_calendars_background():
+                try:
+                    from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
+                    
+                    # [재조율 시] 기존 캘린더 일정 삭제
+                    reschedule_requester = place_pref.get("rescheduleRequestedBy")
+                    if reschedule_requester:
+                        logger.info(f"🗑️ 재조율 감지 - 기존 캘린더 일정 삭제 시작 (session_id: {session_id})")
+                        try:
+                            existing_events = supabase.table('calendar_event').select('*').eq('session_id', session_id).execute()
+                            
+                            if existing_events.data:
+                                gc_service = GoogleCalendarService()
+                                for old_event in existing_events.data:
+                                    owner_id = old_event.get('owner_user_id')
+                                    old_google_id = old_event.get('google_event_id')
+                                    
+                                    if owner_id and old_google_id:
+                                        try:
+                                            owner_token = await AuthService.get_valid_access_token_by_user_id(owner_id)
+                                            if owner_token:
+                                                await gc_service.delete_calendar_event(owner_token, old_google_id)
+                                                logger.info(f"🗑️ 구글 캘린더 일정 삭제 성공: {old_google_id}")
+                                        except Exception as del_error:
+                                            logger.warning(f"🗑️ 구글 캘린더 일정 삭제 실패 (무시): {del_error}")
+                                
+                                supabase.table('calendar_event').delete().eq('session_id', session_id).execute()
+                                logger.info(f"🗑️ calendar_event DB 레코드 삭제 완료")
+                        except Exception as e:
+                            logger.error(f"🗑️ 기존 캘린더 일정 삭제 중 오류: {e}")
+                    
+                    # 양쪽 캘린더에 새 일정 추가
+                    all_participants = [initiator_user_id, target_user_id]
+                    
+                    for pid in all_participants:
+                        try:
+                            p_user = await AuthRepository.find_user_by_id(pid)
+                            p_name = p_user.get("name", "사용자") if p_user else "사용자"
+                            
+                            access_token = await AuthService.get_valid_access_token_by_user_id(pid)
+                            if not access_token:
+                                logger.error(f"유저 {pid} 토큰 갱신 실패")
+                                continue
+                            
+                            other_name = target_name if pid == initiator_user_id else initiator_name
+                            evt_summary = f"{other_name}와 {activity}"
+                            if location:
+                                evt_summary += f" ({location})"
+                            
+                            event_req = CreateEventRequest(
+                                summary=evt_summary,
+                                start_time=start_time.isoformat(),
+                                end_time=end_time.isoformat(),
+                                location=location,
+                                description="A2A Agent에 의해 자동 생성된 일정입니다.",
+                                attendees=[]
+                            )
+                            
+                            gc_service = GoogleCalendarService()
+                            evt = await gc_service.create_calendar_event(access_token, event_req)
+                            
+                            if evt:
+                                await A2AService._save_calendar_event_to_db(
+                                    session_id=session_id,
+                                    owner_user_id=pid,
+                                    google_event_id=evt.id,
+                                    summary=evt_summary,
+                                    location=location,
+                                    start_at=start_time.isoformat(),
+                                    end_at=end_time.isoformat(),
+                                    html_link=evt.htmlLink
+                                )
+                                logger.info(f"✅ 캘린더 일정 생성 성공: {evt_summary} (user: {pid})")
+                                
+                        except Exception as e:
+                            logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
+                    
+                    logger.info(f"✅ 백그라운드 캘린더 동기화 완료 (session_id: {session_id})")
+                    
+                except Exception as e:
+                    logger.error(f"❌ 백그라운드 캘린더 동기화 실패: {e}")
             
+            # 백그라운드 태스크 시작
+            import asyncio
+            asyncio.create_task(sync_calendars_background())
+            logger.info(f"🚀 캘린더 동기화 백그라운드 태스크 시작 (session_id: {session_id})")
+            
+            # 즉시 응답 반환
             return {
                 "status": 200,
-                "message": final_msg,
+                "message": "일정이 확정되었습니다. 캘린더 동기화 중...",
                 "all_approved": True,
-                "failed_users": failed_users,
+                "failed_users": [],
                 "confirmed_details": confirmed_details
             }
             
@@ -579,24 +627,32 @@ class A2AService:
             if not participant_user_ids:
                 print(f"⚠️ [Reschedule] 참여자가 없습니다! target_user_id: {target_user_id}")
             
-            # 5. 협상 재실행
-            result = await A2AService._execute_true_a2a_negotiation(
-                session_id=session_id,
-                initiator_user_id=initiator_user_id,
-                participant_user_ids=participant_user_ids,
-                summary=place_pref.get("summary") or place_pref.get("activity"),
-                duration_minutes=60,
-                target_date=formatted_date,
-                target_time=formatted_time,
-                location=place_pref.get("location"),
-                all_session_ids=[session_id]  # 기존 세션에만 저장
-            )
+            # 5. 협상 재실행 (백그라운드 태스크로 실행 - 즉시 응답)
+            async def run_negotiation_background():
+                try:
+                    result = await A2AService._execute_true_a2a_negotiation(
+                        session_id=session_id,
+                        initiator_user_id=initiator_user_id,
+                        participant_user_ids=participant_user_ids,
+                        summary=place_pref.get("summary") or place_pref.get("activity"),
+                        duration_minutes=60,
+                        target_date=formatted_date,
+                        target_time=formatted_time,
+                        location=place_pref.get("location"),
+                        all_session_ids=[session_id]
+                    )
+                    print(f"✅ [Reschedule Background] 협상 완료: {result.get('status')}")
+                except Exception as bg_error:
+                    print(f"❌ [Reschedule Background] 협상 실패: {bg_error}")
+            
+            # 백그라운드에서 협상 실행 (await 없이 즉시 반환)
+            asyncio.create_task(run_negotiation_background())
             
             return {
                 "status": 200,
-                "message": "재조율 협상이 시작되었습니다.",
+                "message": "재조율 요청이 접수되었습니다. AI가 백그라운드에서 협상 중입니다.",
                 "session_id": session_id,
-                "result": result
+                "background_processing": True
             }
             
         except Exception as e:
@@ -2548,8 +2604,8 @@ class A2AService:
                 # 현재 요청한 유저는 승인한 것으로 간주
                 real_approved_users.add(str(user_id))
                 
-                # [NEW] 재조율 요청 처리
-                reschedule_debug = []
+                # [FIX] 원래 요청자(initiator)는 본인이 요청한 것이므로 자동 승인 처리
+                # 재조율의 경우 rescheduleRequestedBy가 요청자
                 for session in sessions:
                     place_pref = session.get("place_pref", {})
                     if isinstance(place_pref, str):
@@ -2559,16 +2615,19 @@ class A2AService:
                         except Exception as e:
                             logger.error(f"place_pref JSON 파싱 오류: {str(e)}")
                             place_pref = {}
-                
-                # rescheduleRequestedBy 확인 (문자열 변환)
-                req_by = place_pref.get("rescheduleRequestedBy")
-                if req_by:
-                    req_by_str = str(req_by)
-                    reschedule_debug.append(f"Found requester: {req_by_str}")
-                    # 참여자 목록에 있다면 승인 처리
-                    if req_by_str in [str(p) for p in all_participants]:
+                    
+                    # 재조율 요청자가 있으면 그 사람이 요청자 (자동 승인)
+                    req_by = place_pref.get("rescheduleRequestedBy")
+                    if req_by:
+                        req_by_str = str(req_by)
                         real_approved_users.add(req_by_str)
                         logger.info(f"📌 재조율 요청자 자동 승인: {req_by_str}")
+                    else:
+                        # 재조율이 아니면 원래 initiator가 요청자 (자동 승인)
+                        initiator_id = session.get("initiator_user_id")
+                        if initiator_id:
+                            real_approved_users.add(str(initiator_id))
+                            logger.info(f"📌 원래 요청자(initiator) 자동 승인: {initiator_id}")
             
                 # 다른 참여자들의 승인 상태 확인
                 for pid in all_participants:
