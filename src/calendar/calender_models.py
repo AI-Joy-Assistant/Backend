@@ -19,6 +19,7 @@ class CreateEventRequest(BaseModel):
     end_time: str    # ISO 8601 형식의 문자열
     attendees: Optional[List[str]] = None
     location: Optional[str] = None
+    is_all_day: bool = False  # 종일 일정 여부
 
 class GoogleAuthRequest(BaseModel):
     code: str

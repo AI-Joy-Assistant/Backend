@@ -143,15 +143,22 @@ class PersonalAgent:
                 now, now + timedelta(days=14)
             )
             
+            print(f"🔍 [DEBUG] [{self.user_name}] 가용 슬롯 수: {len(availability)}개")
+            
             # 제안 시간이 내 가용 시간 안에 있는지 확인
             proposed_dt = self._parse_proposal_datetime(proposal)
             is_available = False
+            
+            print(f"🔍 [DEBUG] [{self.user_name}] 제안 시간: {proposal.date} {proposal.time} -> parsed: {proposed_dt}")
             
             if proposed_dt:
                 for slot in availability:
                     if slot.start <= proposed_dt < slot.end:
                         is_available = True
+                        print(f"✅ [DEBUG] [{self.user_name}] 제안 시간이 슬롯 내에 있음: {slot.start} ~ {slot.end}")
                         break
+            
+            print(f"🔍 [DEBUG] [{self.user_name}] is_available={is_available}, availability_count={len(availability)}")
             
             # 🚨 강제 차단: 캘린더 충돌 시 GPT 호출 없이 즉시 COUNTER
             if not is_available and availability:
@@ -245,7 +252,7 @@ class PersonalAgent:
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": "제안을 평가하고 결정해주세요."}
                 ],
-                max_tokens=200,
+                max_completion_tokens=200,
                 temperature=0.7
             )
             
@@ -269,20 +276,27 @@ class PersonalAgent:
                     duration_minutes=proposal.duration_minutes
                 )
             
+            # ACCEPT 시 정확한 시간을 포함한 메시지 사용 (GPT가 틀린 시간을 말하는 것 방지)
+            if action == MessageType.ACCEPT:
+                accept_message = f"좋습니다! {proposal.date} {proposal.time}에 뵐게요 😊"
+            else:
+                accept_message = result.get("message", "확인했어요! 👍")
+            
             return AgentDecision(
                 action=action,
                 proposal=counter_proposal if action == MessageType.COUNTER else proposal,
                 reason=result.get("reason"),
-                message=result.get("message", "확인했어요! 👍")
+                message=accept_message
             )
             
         except Exception as e:
             logger.error(f"[{self.user_name}] 제안 평가 실패: {e}")
-            # 실패 시 기본적으로 수락
+            print(f"❌ [ERROR] [{self.user_name}] evaluate_proposal 예외 발생: {e}")
+            # 오류 발생 시 사람에게 넘김 (자동 ACCEPT 하지 않음!)
             return AgentDecision(
-                action=MessageType.ACCEPT,
-                proposal=proposal,
-                message="네, 좋아요! 👍"
+                action=MessageType.NEED_HUMAN,
+                message="오류가 발생했어요. 직접 확인해주세요. 😅",
+                reason=f"error: {str(e)}"
             )
     
     async def make_initial_proposal(
@@ -295,12 +309,15 @@ class PersonalAgent:
     ) -> AgentDecision:
         """
         초기 제안 생성
+        ⚠️ 사용자가 지정한 시간도 자신의 캘린더와 충돌하는지 확인!
         """
         try:
             now = datetime.now(KST)
             availability = await self.get_availability(
                 now, now + timedelta(days=14)
             )
+            
+            print(f"🔍 [DEBUG] [{self.user_name}] make_initial_proposal - 가용 슬롯 수: {len(availability)}개")
             
             if not availability:
                 return AgentDecision(
@@ -315,16 +332,48 @@ class PersonalAgent:
             
             logger.info(f"[{self.user_name}] 초기 제안 - 원본: {target_date} {target_time} → 변환: {actual_date} {actual_time}")
             
-            # 사용자가 지정한 날짜/시간이 있으면 우선 사용
+            proposal = None
+            
+            # 사용자가 지정한 날짜/시간이 있으면 먼저 확인
+            time_was_changed = False  # 시간이 변경되었는지 추적
+            original_time = actual_time  # 원래 요청 시간 저장
+            
             if actual_date and actual_time:
-                proposal = Proposal(
-                    date=actual_date,
-                    time=actual_time,
-                    activity=activity,
-                    location=location
-                )
-            else:
-                # 첫 번째 가용 슬롯으로 제안
+                # 지정 시간이 내 가용 시간 안에 있는지 확인
+                target_dt = self._parse_datetime(actual_date, actual_time)
+                is_available = False
+                
+                if target_dt:
+                    for slot in availability:
+                        if slot.start <= target_dt < slot.end:
+                            is_available = True
+                            print(f"✅ [DEBUG] [{self.user_name}] 지정 시간 {target_dt}가 가용 슬롯 내에 있음")
+                            break
+                
+                if is_available:
+                    # 지정 시간이 가용 시간 내면 사용
+                    proposal = Proposal(
+                        date=actual_date,
+                        time=actual_time,
+                        activity=activity,
+                        location=location
+                    )
+                else:
+                    # 지정 시간이 충돌! → 가장 가까운 가용 슬롯 찾기
+                    print(f"🚫 [DEBUG] [{self.user_name}] 지정 시간 {actual_date} {actual_time}이 캘린더 충돌! 대안 찾는 중...")
+                    best_slot = self._find_best_alternative_slot(target_dt, availability)
+                    if best_slot:
+                        time_was_changed = True  # 시간이 변경됨
+                        proposal = Proposal(
+                            date=best_slot.start.strftime("%Y-%m-%d"),
+                            time=best_slot.start.strftime("%H:%M"),
+                            activity=activity,
+                            location=location
+                        )
+                        print(f"✅ [DEBUG] [{self.user_name}] 대안 시간 제안: {proposal.date} {proposal.time}")
+            
+            # 사용자 지정 시간이 없거나 proposal이 아직 없으면 첫 번째 가용 슬롯 사용
+            if not proposal:
                 first_slot = availability[0]
                 proposal = Proposal(
                     date=first_slot.start.strftime("%Y-%m-%d"),
@@ -333,13 +382,18 @@ class PersonalAgent:
                     location=location
                 )
             
-            # GPT로 메시지 생성
-            message = await self.openai.generate_a2a_message(
-                agent_name=f"{self.user_name}의 비서",
-                receiver_name=context.get("other_names", "상대방"),
-                context=f"{proposal.date} {proposal.time}에 {activity or '약속'}을 제안하려고 함",
-                tone="friendly"
-            )
+            # 메시지 생성 - 시간 변경 여부에 따라 다른 메시지
+            if time_was_changed:
+                # 시간이 변경된 경우 명확히 안내
+                message = f"그 시간은 제 일정이 있어서 {proposal.time}에 제안드려요! 😊"
+            else:
+                # GPT로 메시지 생성 (시간 변경 없음)
+                message = await self.openai.generate_a2a_message(
+                    agent_name=f"{self.user_name}의 비서",
+                    receiver_name=context.get("other_names", "상대방"),
+                    context=f"{proposal.date} {proposal.time}에 {activity or '약속'}을 제안하려고 함",
+                    tone="friendly"
+                )
             
             return AgentDecision(
                 action=MessageType.PROPOSE,
@@ -379,6 +433,29 @@ class PersonalAgent:
         
         # 같은 날짜 슬롯이 없으면 전체에서 가장 가까운 슬롯
         return min(availability, key=lambda s: abs((s.start - proposed_dt).total_seconds()))
+    
+    def _parse_datetime(self, date_str: str, time_str: str) -> Optional[datetime]:
+        """날짜와 시간 문자열을 datetime으로 변환"""
+        import re
+        try:
+            # 날짜 파싱
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            else:
+                return None
+            
+            # 시간 파싱 (HH:MM 형식)
+            if re.match(r'^\d{1,2}:\d{2}$', time_str):
+                parts = time_str.split(':')
+                hour, minute = int(parts[0]), int(parts[1])
+            else:
+                return None
+            
+            return datetime(parsed_date.year, parsed_date.month, parsed_date.day, 
+                           hour, minute, tzinfo=KST)
+        except Exception as e:
+            logger.error(f"_parse_datetime 실패: {e}")
+            return None
     
     def _convert_relative_date(self, date_str: str, now: datetime) -> Optional[str]:
         """상대 날짜를 YYYY-MM-DD 형식으로 변환"""

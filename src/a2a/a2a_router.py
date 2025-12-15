@@ -5,7 +5,8 @@ import jwt
 import json
 import asyncio
 from config.settings import settings
-from .a2a_service import A2AService
+from config.settings import settings
+from .a2a_service import A2AService, convert_relative_date, convert_relative_time
 from .a2a_repository import A2ARepository
 from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
 from .negotiation_engine import NegotiationEngine
@@ -202,71 +203,17 @@ async def get_a2a_session(
             "rescheduleReason": place_pref.get("rescheduleReason")
         }
         
-        # 캘린더 충돌 확인 (현재 사용자의 캘린더)
-        try:
-            proposed_date = details.get("proposedDate")
-            proposed_time = details.get("proposedTime")
-            
-            if proposed_date and proposed_time and proposed_time != "미정":
-                from src.calendar.calender_service import GoogleCalendarService
-                from src.auth.auth_service import AuthService
-                from datetime import datetime, timedelta
-                from zoneinfo import ZoneInfo
-                
-                KST = ZoneInfo("Asia/Seoul")
-                
-                # 액세스 토큰 획득
-                access_token = await AuthService.get_valid_access_token_by_user_id(current_user_id)
-                
-                if access_token:
-                    calendar_service = GoogleCalendarService()
-                    
-                    # 제안 시간 파싱
-                    try:
-                        if ":" in proposed_time:
-                            hour, minute = proposed_time.split(":")[:2]
-                            dt_str = f"{proposed_date}T{int(hour):02d}:{int(minute):02d}:00"
-                        else:
-                            dt_str = f"{proposed_date}T12:00:00"
-                        
-                        proposed_dt = datetime.fromisoformat(dt_str).replace(tzinfo=KST)
-                        
-                        # 제안 시간 전후 1시간 범위에서 기존 일정 확인
-                        start_check = proposed_dt - timedelta(hours=1)
-                        end_check = proposed_dt + timedelta(hours=2)
-                        
-                        events = await calendar_service.get_calendar_events(
-                            access_token=access_token,
-                            time_min=start_check,
-                            time_max=end_check
-                        )
-                        
-                        # 충돌 확인 (CalendarEvent 객체 처리)
-                        for event in events:
-                            # CalendarEvent는 Pydantic 모델, start/end가 dict
-                            event_start_dict = event.start if hasattr(event, 'start') else {}
-                            event_end_dict = event.end if hasattr(event, 'end') else {}
-                            
-                            event_start_str = event_start_dict.get("dateTime") or event_start_dict.get("date")
-                            event_end_str = event_end_dict.get("dateTime") or event_end_dict.get("date")
-                            
-                            if event_start_str and event_end_str:
-                                event_start = datetime.fromisoformat(event_start_str.replace("Z", "+00:00"))
-                                event_end = datetime.fromisoformat(event_end_str.replace("Z", "+00:00"))
-                                
-                                # 제안 시간이 기존 일정과 겹치는지 확인
-                                if event_start <= proposed_dt < event_end:
-                                    details["has_conflict"] = True
-                                    details["conflicting_event"] = {
-                                        "title": event.summary if hasattr(event, 'summary') else "제목 없음",
-                                        "start": event_start.astimezone(KST).strftime("%H:%M"),
-                                        "end": event_end.astimezone(KST).strftime("%H:%M")
-                                    }
-                                    break
-                    except Exception as parse_error:
-                        print(f"시간 파싱 오류: {parse_error}")
-        except Exception as conflict_error:
-            print(f"충돌 확인 오류: {conflict_error}")
+        # [PERFORMANCE] 캘린더 충돌 확인 비활성화 - Google Calendar API 호출이 ~1초 소요됨
+        # 필요시 별도 API(/a2a/session/{id}/conflicts)로 분리하여 비동기 로드 권장
+        # try:
+        #     proposed_date = details.get("proposedDate")
+        #     proposed_time = details.get("proposedTime")
+        #     
+        #     if proposed_date and proposed_time and proposed_time != "미정":
+        #         ... (캘린더 충돌 확인 로직)
+        # except Exception as conflict_error:
+        #     print(f"충돌 확인 오류: {conflict_error}")
+
         
         # 디버깅: 추출된 날짜 확인
         session_status = session.get("status", "unknown")
@@ -520,8 +467,71 @@ async def get_user_sessions(
             
             final_sessions.append(A2ASessionResponse(**session))
 
+
+        # 7. 지난 일정 필터링 (자동 삭제)
+        active_sessions = []
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import re
+        
+        KST = ZoneInfo("Asia/Seoul")
+        now = datetime.now(KST)
+        
+        for session in final_sessions:
+            details = session.details
+            if not details:
+                active_sessions.append(session)
+                continue
+                
+            p_date = details.get("proposedDate")
+            p_time = details.get("proposedTime")
+            
+            # 날짜와 시간이 모두 있는 경우에만 필터링 체크
+            if p_date and p_time and p_time != "미정":
+                try:
+                    target_date_str = None
+                    
+                    # 1. 날짜 파싱 (커스텀 로직: 무조건 현재 연도 기준)
+                    # "12월 13일" 같은 한글 형식 처리
+                    korean_date_match = re.match(r'(\d+)월\s*(\d+)일', p_date)
+                    if korean_date_match:
+                        month = int(korean_date_match.group(1))
+                        day = int(korean_date_match.group(2))
+                        # [FIX] 과거 날짜 필터링이 목적이므로 무조건 현재 연도 사용 (내년으로 넘기지 않음)
+                        target_date_str = f"{now.year}-{month:02d}-{day:02d}"
+                    elif re.match(r'^\d{4}-\d{2}-\d{2}$', p_date):
+                        target_date_str = p_date
+                    else:
+                        # 변환 불가능하면 유지
+                        active_sessions.append(session)
+                        continue
+
+                    # 2. 시간 파싱 (헬퍼 함수 사용 - 시간은 안전함)
+                    normalized_time = convert_relative_time(p_time) or p_time
+                    
+                    if target_date_str and normalized_time and ':' in normalized_time:
+                         # datetime 객체 생성
+                        hour, minute = map(int, normalized_time.split(':'))
+                        dt_str = f"{target_date_str}T{hour:02d}:{minute:02d}:00"
+                        event_dt = datetime.fromisoformat(dt_str).replace(tzinfo=KST)
+                        
+                        # 현재 시간보다 미래인 경우만 추가
+                        if event_dt > now:
+                            active_sessions.append(session)
+                        else:
+                            pass  # 과거 이벤트 필터링됨
+                    else:
+                        active_sessions.append(session)
+                        
+                except Exception as e:
+                    print(f"⚠️ [Auto-Delete] Date parse error for session {session.id}: {e}")
+                    active_sessions.append(session)
+            else:
+                # 날짜/시간이 미정인 경우 (조율 중) 표시
+                active_sessions.append(session)
+
         return {
-            "sessions": final_sessions
+            "sessions": active_sessions
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 목록 조회 실패: {str(e)}")
@@ -593,6 +603,9 @@ async def get_pending_requests(
                     proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
                     proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
             
+            # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
+            is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
+            
             requests.append({
                 "id": session.get("id"),
                 "thread_id": thread_id or session.get("id"),
@@ -605,7 +618,8 @@ async def get_pending_requests(
                 "proposed_date": proposed_date,
                 "proposed_time": proposed_time,
                 "status": session.get("status"),
-                "created_at": session.get("created_at")
+                "created_at": session.get("created_at"),
+                "type": "reschedule" if is_reschedule else "new"
             })
         
         # 최신순 정렬
