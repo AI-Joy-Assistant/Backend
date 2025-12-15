@@ -449,3 +449,101 @@ async def approve_schedule(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"일정 승인 처리 실패: {str(e)}")
+
+
+@router.get("/notifications", summary="알림 조회")
+async def get_notifications(
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    사용자의 알림을 조회합니다.
+    - 친구 요청 알림 (friend_request)
+    - 일정 거절 알림 (schedule_rejected)
+    - 시스템 알림 등
+    """
+    try:
+        notifications = []
+        
+        # 1. 친구 요청 알림 조회 (friend_follow 테이블)
+        try:
+            friend_requests = supabase.table("friend_follow").select(
+                "*, request_user:user!friend_follow_request_id_fkey(name, profile_image)"
+            ).eq("receiver_id", current_user_id).eq("follow_status", "pending").order(
+                "requested_at", desc=True
+            ).limit(20).execute()
+            
+            for req in (friend_requests.data or []):
+                request_user = req.get("request_user", {}) or {}
+                from_user_name = request_user.get("name", "알 수 없음")
+                
+                notifications.append({
+                    "id": req.get("id"),
+                    "type": "friend_request",
+                    "title": "친구 요청",
+                    "message": f"{from_user_name}님이 친구 요청을 보냈습니다.",
+                    "created_at": req.get("requested_at"),
+                    "read": False,
+                    "metadata": {
+                        "from_user_id": req.get("request_id"),
+                        "from_user_name": from_user_name,
+                        "from_user_avatar": request_user.get("profile_image")
+                    }
+                })
+        except Exception as friend_error:
+            logger.warning(f"친구 요청 알림 조회 실패: {friend_error}")
+        
+        # 2. 일정 거절 알림 조회 (chat_log 테이블)
+        rejection_logs = supabase.table("chat_log").select("*").eq(
+            "user_id", current_user_id
+        ).eq("message_type", "schedule_rejection").order(
+            "created_at", desc=True
+        ).limit(20).execute()
+        
+        for log in (rejection_logs.data or []):
+            metadata = log.get("metadata", {})
+            rejected_by = metadata.get("rejected_by")
+            
+            # 거절한 사람 이름 조회 (메타데이터에 있으면 사용, 없으면 DB 조회)
+            rejected_by_name = metadata.get("rejected_by_name", "상대방")
+            if rejected_by_name == "상대방" and rejected_by:
+                try:
+                    user_res = supabase.table("user").select("name").eq("id", rejected_by).execute()
+                    if user_res.data:
+                        rejected_by_name = user_res.data[0].get("name", "상대방")
+                except:
+                    pass
+            
+            # 일정 정보 구성
+            schedule_date = metadata.get("schedule_date", "")
+            schedule_time = metadata.get("schedule_time", "")
+            schedule_activity = metadata.get("schedule_activity", "")
+            
+            # 메시지 구성
+            schedule_info = ""
+            if schedule_date or schedule_time:
+                schedule_info = f"{schedule_date} {schedule_time}".strip()
+            if schedule_activity:
+                schedule_info = f"'{schedule_activity}' ({schedule_info})" if schedule_info else f"'{schedule_activity}'"
+            
+            if schedule_info:
+                message = f"{rejected_by_name}님이 {schedule_info} 일정을 거절했습니다."
+            else:
+                message = f"{rejected_by_name}님이 일정을 거절했습니다."
+            
+            notifications.append({
+                "id": log.get("id"),
+                "type": "schedule_rejected",
+                "title": "일정 거절",
+                "message": message,
+                "created_at": log.get("created_at"),
+                "read": False,  # TODO: 읽음 상태 관리 필요 시 추가
+                "metadata": metadata
+            })
+        
+        # 최신순 정렬
+        notifications.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        return {"notifications": notifications}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"알림 조회 실패: {str(e)}")

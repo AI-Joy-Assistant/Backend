@@ -3016,8 +3016,13 @@ class A2AService:
                         metadata={
                             "needs_recoordination": True, # 재조율 플래그 ON
                             "rejected_by": user_id,
+                            "rejected_by_name": user_name,
                             "thread_id": thread_id,
-                            "session_ids": session_ids
+                            "session_ids": session_ids,
+                            "schedule_date": proposal.get("date"),
+                            "schedule_time": proposal.get("time"),
+                            "schedule_activity": proposal.get("activity"),
+                            "schedule_location": proposal.get("location"),
                         }
                     )
                     

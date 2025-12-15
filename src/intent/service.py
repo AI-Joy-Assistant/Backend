@@ -69,7 +69,7 @@ class IntentService:
                 if m.group(3): extracted.append(m.group(3).strip())
                 
                 # 조사와 받침 일치 여부 확인으로 정제 (선택적)
-                # 예: "성신조이랑" -> "성신조" + "이랑" (X, 조는 받침 없음) -> "성신조이" + "랑" (O)
+                # 예: "조이랑" -> "성신조" + "이랑" (X, 조는 받침 없음) -> "성신조이" + "랑" (O)
                 refined_names = []
                 for i, name in enumerate(extracted):
                     # 다음 조사가 무엇인지 확인

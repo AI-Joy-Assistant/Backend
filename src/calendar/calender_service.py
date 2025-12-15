@@ -164,9 +164,18 @@ class GoogleCalendarService:
 
         event_body: Dict[str, Any] = {
             "summary": event_data.summary,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Seoul"},
-            "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "Asia/Seoul"},
         }
+        
+        # 종일 일정은 date 형식 사용, 일반 일정은 dateTime 형식 사용
+        if event_data.is_all_day:
+            # 날짜만 추출 (YYYY-MM-DD)
+            start_date = start_dt.strftime("%Y-%m-%d")
+            end_date = end_dt.strftime("%Y-%m-%d")
+            event_body["start"] = {"date": start_date, "timeZone": "Asia/Seoul"}
+            event_body["end"] = {"date": end_date, "timeZone": "Asia/Seoul"}
+        else:
+            event_body["start"] = {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Seoul"}
+            event_body["end"] = {"dateTime": end_dt.isoformat(), "timeZone": "Asia/Seoul"}
         if getattr(event_data, "description", None):
             event_body["description"] = event_data.description
         if getattr(event_data, "location", None):
