@@ -147,6 +147,37 @@ async def get_chat_history(
         raise HTTPException(status_code=500, detail=f"채팅 기록 조회 실패: {str(e)}")
 
 
+@router.get("/unread-count", summary="읽지 않은 메시지 수 조회")
+async def get_unread_count(
+    last_read_at: str,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    마지막 읽은 시간 이후의 AI 응답 메시지 수를 반환합니다.
+    - last_read_at: ISO 형식의 날짜/시간 문자열
+    """
+    try:
+        logger.info(f"⏱️ unread-count API 호출: user={current_user_id}, last_read_at={last_read_at}")
+        
+        # AI 응답만 카운트 (response_text가 있는 것)
+        res = supabase.table("chat_log").select("id, created_at", count="exact").eq(
+            "user_id", current_user_id
+        ).not_.is_("response_text", "null").gt(
+            "created_at", last_read_at
+        ).execute()
+        
+        count = res.count if res.count else 0
+        logger.info(f"⏱️ unread-count 결과: count={count}, 조회된 rows={len(res.data or [])}")
+        if res.data:
+            for row in res.data[:5]:  # 첫 5개만 로그
+                logger.info(f"   - id={row.get('id')}, created_at={row.get('created_at')}")
+        
+        return {"count": count}
+    except Exception as e:
+        logger.error(f"unread-count API 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"읽지 않은 메시지 수 조회 실패: {str(e)}")
+
+
 @router.get("/default-session", summary="기본 채팅 세션 조회/생성")
 async def get_or_create_default_session(
     current_user_id: str = Depends(get_current_user_id)

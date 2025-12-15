@@ -532,11 +532,122 @@ class ChatService:
             # 5. 캘린더 직접 추가 (A2A가 아닐 때만!!)
             # [✅ 수정 3] friend_ids가 있으면(=상대방이 있으면) 절대로 여기로 들어오면 안 됨
             calendar_event = None
-            if not response_sent_to_db and not recoordination_needed and not friend_ids and schedule_info.get("has_schedule_request"):
-                if schedule_info.get("date") and schedule_info.get("time"):
-                    calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info, original_text=message)
-                    if calendar_event:
-                        ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+            
+            # [✅ NEW] 확정/부정 메시지 감지
+            # 확정: "응", "네" 등 → 시작시간만 등록
+            # 부정: "아닝", "아니" 등 → 끝나는 시간 없이 시작시간만 등록
+            confirmation_keywords = ["응", "네", "네네", "그래", "등록해", "등록해줘", "맞아", "ㅇㅇ", "시작시간만", "시작 시간만"]
+            negative_confirmation = ["아닝", "아니", "아니요", "아뇨", "몰라", "모름", "미정", "안정해졌어", "정해진거없어"]
+            
+            is_confirmation = (
+                message.strip() in confirmation_keywords or 
+                message.strip() in negative_confirmation or
+                any(kw in message for kw in ["등록", "좋아", "그거로", "시작시간만"])
+            )
+            
+            if not response_sent_to_db and not recoordination_needed and not friend_ids:
+                # Case 1: 현재 메시지에 날짜+시간 정보가 있는 경우
+                if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
+                    # [수정] 단일 시간("3시에")인 경우 바로 등록하지 않고 AI가 종료 시간을 물어보게 함
+                    # 범위 표현("부터", "까지", "~")이 있거나, "시작시간만" 같은 강제 키워드가 있을 때만 즉시 등록
+                    time_str = schedule_info.get("time", "")
+                    has_range = any(x in time_str for x in ["부터", "까지", "~", "-"])
+                    force_register = any(x in message for x in ["시작시간만", "시작 시간만", "그냥 등록", "바로 등록"])
+                    
+                    if has_range or force_register:
+                        calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info, original_text=message)
+                        if calendar_event:
+                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+                    else:
+                        logger.info(f"[CHAT] 단일 시간 감지('{time_str}') -> 즉시 등록 보류하고 AI 질문 유도")
+                
+                # Case 2: 확정 메시지인 경우 - 이전 대화에서 일정 정보 추출
+                elif is_confirmation:
+                    logger.info(f"[CHAT] 확정 메시지 감지: '{message}' - 이전 대화에서 일정 정보 추출 시도")
+                    
+                    # 이전 대화 기록에서 일정 정보 추출
+                    recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=10, session_id=session_id)
+                    
+                    collected_info = {
+                        "date": None,
+                        "time": None,
+                        "title": None,
+                        "activity": None,
+                        "location": None
+                    }
+                    
+                    # 최근 대화에서 정보 수집
+                    for log in recent_logs:
+                        text = log.get("request_text") or log.get("response_text") or ""
+                        
+                        # 각 메시지에서 일정 정보 추출 시도
+                        temp_info = await IntentService.extract_schedule_info(text)
+                        
+                        # 누락된 정보만 채우기
+                        if temp_info.get("date") and not collected_info["date"]:
+                            collected_info["date"] = temp_info["date"]
+                        if temp_info.get("time") and not collected_info["time"]:
+                            collected_info["time"] = temp_info["time"]
+                        if temp_info.get("title") and not collected_info["title"]:
+                            collected_info["title"] = temp_info["title"]
+                        if temp_info.get("activity") and not collected_info["activity"]:
+                            collected_info["activity"] = temp_info["activity"]
+                        if temp_info.get("location") and not collected_info["location"]:
+                            collected_info["location"] = temp_info["location"]
+                    
+                    logger.info(f"[CHAT] 수집된 일정 정보: {collected_info}")
+                    
+                    # 날짜와 시간이 있으면 등록
+                    if collected_info.get("date") and collected_info.get("time"):
+                        collected_info["has_schedule_request"] = True
+                        calendar_event = await ChatService._add_schedule_to_calendar(
+                            user_id, 
+                            collected_info, 
+                            original_text=collected_info.get("title") or collected_info.get("activity") or "일정"
+                        )
+                        if calendar_event:
+                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+                    elif collected_info.get("date"):
+                        # 시간 없이 날짜만 있는 경우 - 시간 물어보기
+                        ai_response = f"날짜는 {collected_info.get('date')}로 확인했어요. 몇 시에 시작하는 일정인가요?"
+
+                # [NEW] Case 3: 날짜는 없지만 시간이 있는 경우 (예: "3시에") -> 이전 대화에서 날짜 가져오기
+                elif schedule_info.get("time") and not schedule_info.get("date"):
+                    logger.info(f"[CHAT] 시간만 감지: '{message}' - 이전 대화에서 날짜 정보 추출 시도")
+                    
+                    recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=10, session_id=session_id)
+                    
+                    # 현재 메시지 정보로 초기화
+                    collected_info = {
+                        "date": None,
+                        "time": schedule_info.get("time"),
+                        "title": schedule_info.get("title") or schedule_info.get("activity"),
+                        "activity": schedule_info.get("activity"),
+                        "location": schedule_info.get("location")
+                    }
+                    
+                    # 최근 대화에서 부족한 정보(특히 날짜, 제목) 수집
+                    for log in recent_logs:
+                        text = log.get("request_text") or log.get("response_text") or ""
+                        temp_info = await IntentService.extract_schedule_info(text)
+                        
+                        if temp_info.get("date") and not collected_info["date"]:
+                            collected_info["date"] = temp_info["date"]
+                        if temp_info.get("title") and not collected_info["title"]:
+                            collected_info["title"] = temp_info["title"]
+                        if temp_info.get("activity") and not collected_info["activity"]:
+                            collected_info["activity"] = temp_info["activity"]
+                            
+                    # 날짜가 찾아지면 등록 시도
+                    if collected_info.get("date"):
+                        collected_info["has_schedule_request"] = True
+                        calendar_event = await ChatService._add_schedule_to_calendar(
+                            user_id, 
+                            collected_info, 
+                            original_text=message
+                        )
+                        if calendar_event:
+                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
 
                         # 6. 응답이 없는 경우 (스케줄 정보 부족 또는 일반 대화) -> OpenAI Fallback
             if ai_response is None and not response_sent_to_db:
@@ -840,6 +951,10 @@ class ChatService:
             except:
                 pass
 
+            # [수정] 종료 시간이 명시되지 않은 경우(start==end), 사용자가 "시작 시간만" 원했으므로 그대로 유지
+            if start_time == end_time:
+                logger.info(f"종료 시간 미지정 -> 시작 시간과 동일하게 등록 (0분 일정): {end_time}")
+
             # [수정] 일정 제목 생성 로직 개선 (title -> activity -> original_text)
             title = schedule_info.get("title")
             
@@ -969,10 +1084,16 @@ class ChatService:
 
         def parse_hour(hh: int, context: str) -> int:
             """시간을 24시간 형식으로 변환"""
+            # 명시적으로 오후/저녁이면 12 더함
             if has_pm(context) and 1 <= hh <= 11:
                 hh += 12
-            if has_am(context) and hh == 12:
-                hh = 0
+            # 명시적으로 오전/아침이면 그대로 (12시는 0시로)
+            elif has_am(context):
+                if hh == 12:
+                    hh = 0
+            # AM/PM 미지정일 때: 1-6시는 보통 오후를 의미 (새벽 약속은 드묾)
+            elif 1 <= hh <= 6:
+                hh += 12
             return hh
 
         # 1) 시간 범위 파싱: "오후 7시부터 9시까지" 또는 "7시-9시" 등
