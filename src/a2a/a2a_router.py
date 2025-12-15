@@ -593,6 +593,9 @@ async def get_pending_requests(
                     proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
                     proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
             
+            # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
+            is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
+            
             requests.append({
                 "id": session.get("id"),
                 "thread_id": thread_id or session.get("id"),
@@ -605,7 +608,8 @@ async def get_pending_requests(
                 "proposed_date": proposed_date,
                 "proposed_time": proposed_time,
                 "status": session.get("status"),
-                "created_at": session.get("created_at")
+                "created_at": session.get("created_at"),
+                "type": "reschedule" if is_reschedule else "new"
             })
         
         # 최신순 정렬

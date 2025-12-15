@@ -457,18 +457,48 @@ async def get_notifications(
 ):
     """
     사용자의 알림을 조회합니다.
-    - 일정 거절 알림 (schedule_rejection)
+    - 친구 요청 알림 (friend_request)
+    - 일정 거절 알림 (schedule_rejected)
     - 시스템 알림 등
     """
     try:
-        # schedule_rejection 타입의 알림 조회
+        notifications = []
+        
+        # 1. 친구 요청 알림 조회 (friend_follow 테이블)
+        try:
+            friend_requests = supabase.table("friend_follow").select(
+                "*, request_user:user!friend_follow_request_id_fkey(name, profile_image)"
+            ).eq("receiver_id", current_user_id).eq("follow_status", "pending").order(
+                "requested_at", desc=True
+            ).limit(20).execute()
+            
+            for req in (friend_requests.data or []):
+                request_user = req.get("request_user", {}) or {}
+                from_user_name = request_user.get("name", "알 수 없음")
+                
+                notifications.append({
+                    "id": req.get("id"),
+                    "type": "friend_request",
+                    "title": "친구 요청",
+                    "message": f"{from_user_name}님이 친구 요청을 보냈습니다.",
+                    "created_at": req.get("requested_at"),
+                    "read": False,
+                    "metadata": {
+                        "from_user_id": req.get("request_id"),
+                        "from_user_name": from_user_name,
+                        "from_user_avatar": request_user.get("profile_image")
+                    }
+                })
+        except Exception as friend_error:
+            logger.warning(f"친구 요청 알림 조회 실패: {friend_error}")
+        
+        # 2. 일정 거절 알림 조회 (chat_log 테이블)
         rejection_logs = supabase.table("chat_log").select("*").eq(
             "user_id", current_user_id
         ).eq("message_type", "schedule_rejection").order(
             "created_at", desc=True
         ).limit(20).execute()
         
-        notifications = []
         for log in (rejection_logs.data or []):
             metadata = log.get("metadata", {})
             rejected_by = metadata.get("rejected_by")
@@ -509,6 +539,9 @@ async def get_notifications(
                 "read": False,  # TODO: 읽음 상태 관리 필요 시 추가
                 "metadata": metadata
             })
+        
+        # 최신순 정렬
+        notifications.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         
         return {"notifications": notifications}
         
