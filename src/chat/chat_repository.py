@@ -244,6 +244,9 @@ class ChatRepository:
         - session_id가 있으면 해당 세션만
         - 없으면 유저 전체 기준 최근 로그
         """
+        import time
+        start_time = time.time()
+        
         try:
             query = (
                 supabase.table("chat_log")
@@ -263,8 +266,14 @@ class ChatRepository:
                     query = query.eq("session_id", str(session_id))
 
             res = query.order("created_at", desc=True).limit(limit).execute()
+            
+            elapsed = time.time() - start_time
+            logger.info(f"⏱️ get_recent_chat_logs 쿼리 시간: {elapsed:.3f}초 (rows: {len(res.data or [])})")
+            
             return res.data or []
         except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"⏱️ get_recent_chat_logs 오류 발생 (시간: {elapsed:.3f}초): {str(e)}")
             raise Exception(f"최근 채팅 로그 조회 오류: {str(e)}")
 
     @staticmethod
