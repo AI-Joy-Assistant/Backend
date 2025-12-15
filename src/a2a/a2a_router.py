@@ -5,7 +5,8 @@ import jwt
 import json
 import asyncio
 from config.settings import settings
-from .a2a_service import A2AService
+from config.settings import settings
+from .a2a_service import A2AService, convert_relative_date, convert_relative_time
 from .a2a_repository import A2ARepository
 from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
 from .negotiation_engine import NegotiationEngine
@@ -97,10 +98,23 @@ async def get_a2a_session(
         process = []
         for msg in messages:
             msg_data = msg.get("message", {}) or {}
+            created_at = msg.get("created_at")  # 메시지 생성 시간
             
             # 발신자 정보
             sender_id = msg.get("sender_user_id")
             sender_name = user_names_cache.get(sender_id, "AI") if sender_id else "시스템"
+            
+            # 메시지 타입 확인
+            msg_type = msg_data.get("type") or msg.get("type")
+            
+            # 재조율 요청 메시지 처리
+            if msg_type == "reschedule_request":
+                process.append({
+                    "step": "🔄 재조율 요청",
+                    "description": f"{sender_name}님이 재조율을 요청했습니다. ({msg_data.get('reason', '')})",
+                    "created_at": created_at
+                })
+                continue
             
             # 기존 형식: step + text
             step = msg_data.get("step")
@@ -112,7 +126,7 @@ async def get_a2a_session(
             
             if step and text:
                 # 기존 형식
-                process.append({"step": str(step), "description": text})
+                process.append({"step": str(step), "description": text, "created_at": created_at})
             elif text:
                 # True A2A 형식 - 발신자 표시 추가
                 step_label = f"[{sender_name}의 AI] Round {round_num}" if round_num else f"[{sender_name}의 AI]"
@@ -121,7 +135,7 @@ async def get_a2a_session(
                 if proposal and (proposal.get('date') or proposal.get('time')):
                     proposal_info = f" ({proposal.get('date', '')} {proposal.get('time', '')})"
                     description += proposal_info
-                process.append({"step": step_label, "description": description})
+                process.append({"step": step_label, "description": description, "created_at": created_at})
         
         # 2. 기본 정보
         place_pref = session.get("place_pref", {}) or {}
@@ -166,83 +180,83 @@ async def get_a2a_session(
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
             "purpose": summary or "일정 조율",
-            # 우선순위: place_pref.proposedDate > place_pref.date > time_window.date (재조율 시 place_pref에 proposedDate 키로 저장됨)
+            # 원래 요청 시간 (변경되지 않음)
+            "requestedDate": place_pref.get("requestedDate") or place_pref.get("date") or time_window.get("date") or "",
+            "requestedTime": place_pref.get("requestedTime") or place_pref.get("time") or time_window.get("time") or "미정",
+            # 제안/확정 시간 (협상 결과)
             "proposedDate": place_pref.get("proposedDate") or place_pref.get("date") or time_window.get("date") or "",
             "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or time_window.get("time") or "미정",
+            # 확정 시간 (에이전트 협상 후)
+            "agreedDate": place_pref.get("agreedDate") or "",
+            "agreedTime": place_pref.get("agreedTime") or "",
             "location": place_pref.get("location") or "미정",
             "process": process,
             "has_conflict": False,
-            "conflicting_event": None
+            "conflicting_event": None,
+            # 종료 시간 (시간 범위 지원)
+            "proposedEndDate": place_pref.get("proposedEndDate") or "",
+            "proposedEndTime": place_pref.get("proposedEndTime") or "",
+            "agreedEndDate": place_pref.get("agreedEndDate") or "",
+            "agreedEndTime": place_pref.get("agreedEndTime") or "",
+            # 재조율 요청 정보
+            "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
+            "rescheduleReason": place_pref.get("rescheduleReason")
         }
         
-        # 캘린더 충돌 확인 (현재 사용자의 캘린더)
-        try:
-            proposed_date = details.get("proposedDate")
-            proposed_time = details.get("proposedTime")
-            
-            if proposed_date and proposed_time and proposed_time != "미정":
-                from src.calendar.calender_service import GoogleCalendarService
-                from src.auth.auth_service import AuthService
-                from datetime import datetime, timedelta
-                from zoneinfo import ZoneInfo
-                
-                KST = ZoneInfo("Asia/Seoul")
-                
-                # 액세스 토큰 획득
-                access_token = await AuthService.get_valid_access_token_by_user_id(current_user_id)
-                
-                if access_token:
-                    calendar_service = GoogleCalendarService()
-                    
-                    # 제안 시간 파싱
-                    try:
-                        if ":" in proposed_time:
-                            hour, minute = proposed_time.split(":")[:2]
-                            dt_str = f"{proposed_date}T{int(hour):02d}:{int(minute):02d}:00"
-                        else:
-                            dt_str = f"{proposed_date}T12:00:00"
-                        
-                        proposed_dt = datetime.fromisoformat(dt_str).replace(tzinfo=KST)
-                        
-                        # 제안 시간 전후 1시간 범위에서 기존 일정 확인
-                        start_check = proposed_dt - timedelta(hours=1)
-                        end_check = proposed_dt + timedelta(hours=2)
-                        
-                        events = await calendar_service.get_calendar_events(
-                            access_token=access_token,
-                            time_min=start_check,
-                            time_max=end_check
-                        )
-                        
-                        # 충돌 확인 (CalendarEvent 객체 처리)
-                        for event in events:
-                            # CalendarEvent는 Pydantic 모델, start/end가 dict
-                            event_start_dict = event.start if hasattr(event, 'start') else {}
-                            event_end_dict = event.end if hasattr(event, 'end') else {}
-                            
-                            event_start_str = event_start_dict.get("dateTime") or event_start_dict.get("date")
-                            event_end_str = event_end_dict.get("dateTime") or event_end_dict.get("date")
-                            
-                            if event_start_str and event_end_str:
-                                event_start = datetime.fromisoformat(event_start_str.replace("Z", "+00:00"))
-                                event_end = datetime.fromisoformat(event_end_str.replace("Z", "+00:00"))
-                                
-                                # 제안 시간이 기존 일정과 겹치는지 확인
-                                if event_start <= proposed_dt < event_end:
-                                    details["has_conflict"] = True
-                                    details["conflicting_event"] = {
-                                        "title": event.summary if hasattr(event, 'summary') else "제목 없음",
-                                        "start": event_start.astimezone(KST).strftime("%H:%M"),
-                                        "end": event_end.astimezone(KST).strftime("%H:%M")
-                                    }
-                                    break
-                    except Exception as parse_error:
-                        print(f"시간 파싱 오류: {parse_error}")
-        except Exception as conflict_error:
-            print(f"충돌 확인 오류: {conflict_error}")
+        # [PERFORMANCE] 캘린더 충돌 확인 비활성화 - Google Calendar API 호출이 ~1초 소요됨
+        # 필요시 별도 API(/a2a/session/{id}/conflicts)로 분리하여 비동기 로드 권장
+        # try:
+        #     proposed_date = details.get("proposedDate")
+        #     proposed_time = details.get("proposedTime")
+        #     
+        #     if proposed_date and proposed_time and proposed_time != "미정":
+        #         ... (캘린더 충돌 확인 로직)
+        # except Exception as conflict_error:
+        #     print(f"충돌 확인 오류: {conflict_error}")
+
         
         # 디버깅: 추출된 날짜 확인
-        print(f"Session {session_id} - date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
+        session_status = session.get("status", "unknown")
+        print(f"Session {session_id} - status: {session_status}, date: {details['proposedDate']}, time: {details['proposedTime']}, conflict: {details['has_conflict']}")
+        
+        # 참여자 정보 추가 (Attendees) - 다중 참여자 지원
+        attendees = []
+        added_ids = set()  # 중복 방지
+        
+        try:
+            # 1. participant_user_ids 컬럼 우선 사용 (새 방식)
+            participant_ids = session.get("participant_user_ids") or []
+            
+            # 2. 없으면 initiator + target fallback (기존 세션 호환)
+            if not participant_ids:
+                if initiator_id:
+                    participant_ids.append(initiator_id)
+                target_id = session.get("target_user_id")
+                if target_id and target_id != initiator_id:
+                    participant_ids.append(target_id)
+            
+            print(f"🔍 [Attendees] participant_user_ids: {participant_ids}")
+            
+            # 3. 모든 참여자 정보 조회
+            for participant_id in participant_ids:
+                if participant_id and participant_id not in added_ids:
+                    try:
+                        participant_info = await AuthRepository.find_user_by_id(participant_id)
+                        if participant_info:
+                            attendees.append({
+                                "id": participant_id,
+                                "name": participant_info.get("name") or "알 수 없음",
+                                "avatar": participant_info.get("profile_image") or "https://picsum.photos/150",
+                                "isCurrentUser": participant_id == current_user_id
+                            })
+                            added_ids.add(participant_id)
+                    except Exception as e:
+                        print(f"참여자 조회 실패 ({participant_id}): {e}")
+        except Exception as e:
+            print(f"참여자 정보 조회 오류: {e}")
+        
+        print(f"📋 [Attendees Final] Total: {len(attendees)}, IDs: {added_ids}")
+        details["attendees"] = attendees
 
         session["details"] = details
         session["title"] = summary if summary else "일정 조율"
@@ -405,7 +419,7 @@ async def get_user_sessions(
             if not isinstance(place_pref, dict):
                 place_pref = {}
                 
-            print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
+            # print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
             
             summary = place_pref.get("summary") or session.get("summary")
             
@@ -453,8 +467,71 @@ async def get_user_sessions(
             
             final_sessions.append(A2ASessionResponse(**session))
 
+
+        # 7. 지난 일정 필터링 (자동 삭제)
+        active_sessions = []
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import re
+        
+        KST = ZoneInfo("Asia/Seoul")
+        now = datetime.now(KST)
+        
+        for session in final_sessions:
+            details = session.details
+            if not details:
+                active_sessions.append(session)
+                continue
+                
+            p_date = details.get("proposedDate")
+            p_time = details.get("proposedTime")
+            
+            # 날짜와 시간이 모두 있는 경우에만 필터링 체크
+            if p_date and p_time and p_time != "미정":
+                try:
+                    target_date_str = None
+                    
+                    # 1. 날짜 파싱 (커스텀 로직: 무조건 현재 연도 기준)
+                    # "12월 13일" 같은 한글 형식 처리
+                    korean_date_match = re.match(r'(\d+)월\s*(\d+)일', p_date)
+                    if korean_date_match:
+                        month = int(korean_date_match.group(1))
+                        day = int(korean_date_match.group(2))
+                        # [FIX] 과거 날짜 필터링이 목적이므로 무조건 현재 연도 사용 (내년으로 넘기지 않음)
+                        target_date_str = f"{now.year}-{month:02d}-{day:02d}"
+                    elif re.match(r'^\d{4}-\d{2}-\d{2}$', p_date):
+                        target_date_str = p_date
+                    else:
+                        # 변환 불가능하면 유지
+                        active_sessions.append(session)
+                        continue
+
+                    # 2. 시간 파싱 (헬퍼 함수 사용 - 시간은 안전함)
+                    normalized_time = convert_relative_time(p_time) or p_time
+                    
+                    if target_date_str and normalized_time and ':' in normalized_time:
+                         # datetime 객체 생성
+                        hour, minute = map(int, normalized_time.split(':'))
+                        dt_str = f"{target_date_str}T{hour:02d}:{minute:02d}:00"
+                        event_dt = datetime.fromisoformat(dt_str).replace(tzinfo=KST)
+                        
+                        # 현재 시간보다 미래인 경우만 추가
+                        if event_dt > now:
+                            active_sessions.append(session)
+                        else:
+                            pass  # 과거 이벤트 필터링됨
+                    else:
+                        active_sessions.append(session)
+                        
+                except Exception as e:
+                    print(f"⚠️ [Auto-Delete] Date parse error for session {session.id}: {e}")
+                    active_sessions.append(session)
+            else:
+                # 날짜/시간이 미정인 경우 (조율 중) 표시
+                active_sessions.append(session)
+
         return {
-            "sessions": final_sessions
+            "sessions": active_sessions
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세션 목록 조회 실패: {str(e)}")
@@ -472,9 +549,9 @@ async def get_pending_requests(
         print(f"🔍 [Pending Requests] Fetching for user: {current_user_id}")
         sessions = await A2ARepository.get_pending_requests_for_user(current_user_id)
         print(f"🔍 [Pending Requests] Found {len(sessions) if sessions else 0} sessions")
-        if sessions:
-            for s in sessions:
-                print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
+        # if sessions:
+        #     for s in sessions:
+                # print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
         
         if not sessions:
             return {"requests": []}
@@ -650,8 +727,10 @@ async def reschedule_session(
         reason = body.get("reason")
         preferred_time = body.get("preferred_time")
         manual_input = body.get("manual_input") or body.get("note")
-        new_date = body.get("date")  # 새로 선택한 날짜
-        new_time = body.get("time")  # 새로 선택한 시간
+        new_date = body.get("date")  # 새로 선택한 시작 날짜
+        new_time = body.get("time")  # 새로 선택한 시작 시간
+        end_date = body.get("endDate")  # 종료 날짜
+        end_time = body.get("endTime")  # 종료 시간
 
         # 권한 확인 및 세션 조회
         session = await A2ARepository.get_session(session_id)
@@ -669,7 +748,9 @@ async def reschedule_session(
             preferred_time=preferred_time,
             manual_input=manual_input,
             new_date=new_date,
-            new_time=new_time
+            new_time=new_time,
+            end_date=end_date,
+            end_time=end_time
         )
         
         return result
@@ -733,7 +814,8 @@ async def start_true_a2a_session(
                 "location": request.place_pref.get("location") if request.place_pref else None,
                 "date": request.time_window.get("date") if request.time_window else None,
                 "time": request.time_window.get("time") if request.time_window else None
-            } if request.summary else None
+            } if request.summary else None,
+            participant_user_ids=[current_user_id, request.target_user_id]  # 다중 참여자 지원
         )
         
         return {

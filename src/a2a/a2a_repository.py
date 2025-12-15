@@ -15,13 +15,13 @@ class A2ARepository:
         intent: str = "schedule",
         time_window: Optional[Dict[str, Any]] = None,
         place_pref: Optional[Dict[str, Any]] = None,
-        summary: Optional[str] = None
+        summary: Optional[str] = None,
+        participant_user_ids: Optional[List[str]] = None  # 다중 참여자 지원
     ) -> Dict[str, Any]:
         """A2A 세션 생성"""
         try:
             session_id = str(uuid.uuid4())
             # a2a_session 테이블의 실제 컬럼 구조에 맞춰 생성
-            # 필수 필드만 포함 (summary, time_window, place_pref는 선택적)
             session_data = {
                 "id": session_id,
                 "initiator_user_id": initiator_user_id,
@@ -30,8 +30,13 @@ class A2ARepository:
                 "status": "pending",
             }
             
+            # participant_user_ids 설정 (없으면 initiator + target으로 기본 생성)
+            if participant_user_ids:
+                session_data["participant_user_ids"] = participant_user_ids
+            else:
+                session_data["participant_user_ids"] = [initiator_user_id, target_user_id]
+            
             # time_window와 place_pref는 JSONB 필드일 수 있으므로 조건부로 추가
-            # summary는 place_pref에 포함시키거나 제외
             if place_pref is not None:
                 session_data["place_pref"] = place_pref
             elif summary is not None:
@@ -85,8 +90,15 @@ class A2ARepository:
                         except:
                             existing_place_pref = {}
                 
-                # 기존 값에 새 details 병합 (새 값이 우선)
+                # 기존 값에 새 details 병합 (새 값이 우선, 단 requestedDate/Time은 기존 값 유지)
                 merged = {**existing_place_pref, **details}
+                
+                # requestedDate/Time은 원래 요청 시간이므로, 기존 값이 있으면 보존
+                if existing_place_pref.get('requestedDate'):
+                    merged['requestedDate'] = existing_place_pref['requestedDate']
+                if existing_place_pref.get('requestedTime'):
+                    merged['requestedTime'] = existing_place_pref['requestedTime']
+                
                 update_data["place_pref"] = merged  # JSONB 컬럼에는 dict 직접 저장
                 logger.info(f"세션 {session_id} - details 저장: {details}, merged: {merged}")
             
@@ -189,9 +201,9 @@ class A2ARepository:
             ).in_('status', ['pending', 'pending_approval', 'in_progress']).order('created_at', desc=True).execute()
             
             logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
-            if response.data:
-                for s in response.data:
-                    logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
+            # if response.data:
+            #     for s in response.data:
+            #         logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
             
             return response.data if response.data else []
         except Exception as e:
