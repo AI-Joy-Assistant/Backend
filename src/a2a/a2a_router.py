@@ -200,6 +200,7 @@ async def get_a2a_session(
             "agreedEndTime": place_pref.get("agreedEndTime") or "",
             # 재조율 요청 정보
             "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
+            "rescheduleRequestedAt": place_pref.get("rescheduleRequestedAt"),  # [NEW] 재조율 요청 시간
             "rescheduleReason": place_pref.get("rescheduleReason")
         }
         
@@ -605,7 +606,8 @@ async def get_pending_requests(
             
             # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
             is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
-            
+            reschedule_requested_at = place_pref.get("rescheduleRequestedAt") if isinstance(place_pref, dict) else None
+
             requests.append({
                 "id": session.get("id"),
                 "thread_id": thread_id or session.get("id"),
@@ -619,6 +621,7 @@ async def get_pending_requests(
                 "proposed_time": proposed_time,
                 "status": session.get("status"),
                 "created_at": session.get("created_at"),
+                "reschedule_requested_at": reschedule_requested_at,  # [NEW] 재조율 요청 시간
                 "type": "reschedule" if is_reschedule else "new"
             })
         

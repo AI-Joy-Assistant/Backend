@@ -574,6 +574,7 @@ class A2AService:
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
+                "rescheduleRequestedAt": datetime.now().isoformat(),  # [NEW] 재조율 요청 시간 저장
                 "proposedDate": formatted_date,
                 "proposedTime": formatted_time,
                 "proposedEndDate": formatted_end_date,

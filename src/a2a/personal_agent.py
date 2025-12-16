@@ -246,7 +246,7 @@ class PersonalAgent:
     "counter_time": "HH:MM (COUNTER 시 필수, 위 가용 시간에서 선택)"
 }}"""
 
-            response = self.openai.client.chat.completions.create(
+            response = await self.openai.client.chat.completions.create(
                 model=self.openai.model,
                 messages=[
                     {"role": "system", "content": prompt},
