@@ -180,7 +180,7 @@ async def get_a2a_session(
         details = {
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
-            "purpose": summary or "일정 조율",
+            "purpose": place_pref.get("purpose") or summary or "일정 조율",
             # 원래 요청 시간 (변경되지 않음)
             "requestedDate": place_pref.get("requestedDate") or place_pref.get("date") or time_window.get("date") or "",
             "requestedTime": place_pref.get("requestedTime") or place_pref.get("time") or time_window.get("time") or "미정",
@@ -201,6 +201,7 @@ async def get_a2a_session(
             "agreedEndTime": place_pref.get("agreedEndTime") or "",
             # 재조율 요청 정보
             "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
+            "rescheduleRequestedAt": place_pref.get("rescheduleRequestedAt"),  # [NEW] 재조율 요청 시간
             "rescheduleReason": place_pref.get("rescheduleReason")
         }
         
@@ -353,9 +354,16 @@ async def get_user_sessions(
             # 가장 최근 세션을 대표로 사용
             representative = max(thread_sessions, key=lambda x: x.get('created_at', ''))
 
-            # 참여자 ID 수집 (initiator + target)
+            # 참여자 ID 수집 (initiator + target + participant_user_ids)
             initiators = {s.get("initiator_user_id") for s in thread_sessions}
             targets = {s.get("target_user_id") for s in thread_sessions}
+            
+            # session.participant_user_ids에서 참여자 수집 (다중 사용자 세션 지원)
+            session_participants = set()
+            for s in thread_sessions:
+                p_ids = s.get("participant_user_ids") or []
+                if isinstance(p_ids, list):
+                    session_participants.update(p_ids)
 
             # place_pref에 명시된 참여자 정보도 확인 (UUID 형식인 것만 필터링)
             place_pref = representative.get("place_pref", {})
@@ -368,7 +376,7 @@ async def get_user_sessions(
                         pref_participants.add(p)
 
             # 전체 참여자 합집합 (나 제외)
-            participants_set = (initiators | targets | pref_participants) - {current_user_id}
+            participants_set = (initiators | targets | pref_participants | session_participants) - {current_user_id}
 
             participant_list = list(participants_set)
             all_participant_ids.update(participants_set) # 전체 ID 수집
@@ -606,7 +614,8 @@ async def get_pending_requests(
             
             # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
             is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
-            
+            reschedule_requested_at = place_pref.get("rescheduleRequestedAt") if isinstance(place_pref, dict) else None
+
             requests.append({
                 "id": session.get("id"),
                 "thread_id": thread_id or session.get("id"),
@@ -620,6 +629,7 @@ async def get_pending_requests(
                 "proposed_time": proposed_time,
                 "status": session.get("status"),
                 "created_at": session.get("created_at"),
+                "reschedule_requested_at": reschedule_requested_at,  # [NEW] 재조율 요청 시간
                 "type": "reschedule" if is_reschedule else "new"
             })
         

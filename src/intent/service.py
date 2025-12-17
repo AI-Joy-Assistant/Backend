@@ -127,7 +127,8 @@ class IntentService:
         # 날짜 추출
         date_expr = None
         date_patterns = [
-            r"(오늘|내일|모레|다음주|이번주)",
+            r"(?:이번\s*주|다음\s*주|지난\s*주)?\s*[월화수목금토일]요일",
+            r"(오늘|내일|모레|다음\s*주|이번\s*주)",
             r"(\d{1,2})\s*월\s*(\d{1,2})\s*일",
             r"(\d{1,2})\s*일",
         ]
@@ -167,22 +168,37 @@ class IntentService:
                         location = words[-1] if len(words[-1]) > 1 else None
                 break
 
-        # 제목(Title) 추출
+        # 제목(Title) & 활동(Activity) 추출
         title = None
-        # "XX 예약", "XX 약속", "XX 미팅" 패턴
-        title_pattern = r"([가-힣A-Za-z0-9]+)\s*(예약|약속|미팅|모임|회식)"
-        # [FIX] finditer로 모든 매칭을 확인하여 "내일 예약" 같은 건너뛰고 "치과 예약"을 찾음
+        activity = None
+        
+        # 1. "XX 예약", "XX 약속", "XX 미팅" 패턴 (구체적)
+        title_pattern = r"([가-힣A-Za-z0-9]+)\s*(예약|약속|미팅|모임|회식|회의)"
         matches = re.finditer(title_pattern, text)
         for m in matches:
             word = m.group(1)
             type_ = m.group(2)
             # "내일 예약", "오늘 약속" 등은 타이틀로 부적절하므로 제외
-            if word in ["오늘", "내일", "모레", "이번주", "다음주", "점심", "저녁", "아침", "새벽", "오후", "오전"]:
+            if word in ["오늘", "내일", "모레", "이번주", "다음주", "점심", "저녁", "아침", "새벽", "오후", "오전"] or word.endswith("에서"):
+                # 이 경우 '약속', '미팅' 자체를 활동으로 잡음
+                if not activity: 
+                    activity = type_
+                    title = type_
                 continue
             
             # 유효한 타이틀 발견
             title = f"{word} {type_}"
+            activity = type_
             break
+            
+        # 2. 패턴 매칭 실패 시, 단순 키워드가 있는지 확인
+        if not title:
+            simple_keywords = ["약속", "미팅", "회의", "모임", "회식", "진료", "예약", "식사", "밥"]
+            for kw in simple_keywords:
+                if kw in text:
+                    activity = kw
+                    title = kw  # "약속" 등 단순 명사로 설정
+                    break
 
         return {
             "intent": "schedule" if has_schedule else None,
@@ -190,7 +206,7 @@ class IntentService:
             "friend_names": friend_names if len(friend_names) > 1 else None,  # 여러 명일 때
             "date": date_expr,
             "time": time_expr,
-            "activity": None,
+            "activity": activity,
             "title": title,
             "location": location,
             "has_schedule_request": has_schedule,
@@ -274,7 +290,7 @@ class IntentService:
             "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
             "date": final_date,
             "time": raw.get("time") or heuristic_result.get("time"),
-            "activity": raw.get("activity") or heuristic_result.get("activity"),
+            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),  # [FIX] 활동이 너무 길면(문장 등) 휴리스틱 사용
             "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
             "has_schedule_request": bool(has_schedule),

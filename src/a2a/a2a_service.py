@@ -38,6 +38,26 @@ def convert_relative_date(date_str: Optional[str], now: Optional[datetime] = Non
     
     target_date = None
     
+    # 요일 처리 (월요일~일요일)
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    target_weekday = None
+    for i, w in enumerate(weekdays):
+        if w in date_str:
+            target_weekday = i
+            break
+    
+    if target_weekday is not None:
+        # 요일 발견
+        current_weekday = now.weekday()
+        days_ahead = (target_weekday - current_weekday) % 7
+        
+        # "다음주 화요일" 등 "다음"이 포함된 경우 7일 추가
+        if "다음주" in date_str or "다음 주" in date_str:
+             days_ahead += 7
+        
+        target_date = (now + timedelta(days=days_ahead)).date()
+        return target_date.strftime("%Y-%m-%d")
+
     # 상대 날짜 변환
     if "오늘" in date_str:
         target_date = now.date()
@@ -564,8 +584,19 @@ class A2AService:
             print(f"   - New Date: {new_date}")
             print(f"   - New Time: {new_time}")
             
-            # 1. 세션 상태를 'in_progress'로 변경
-            await A2ARepository.update_session_status(session_id, "in_progress")
+            # 1. thread_id로 관련된 모든 세션 찾기 (3명 이상 그룹 지원)
+            thread_id = place_pref.get("thread_id")
+            all_session_ids = [session_id]  # 기본값: 현재 세션만
+            
+            if thread_id:
+                thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+                if thread_sessions:
+                    all_session_ids = [s["id"] for s in thread_sessions]
+                    print(f"🔗 [Reschedule] thread_id={thread_id}로 {len(all_session_ids)}개 세션 발견")
+            
+            # 모든 관련 세션 상태를 'in_progress'로 변경
+            for sid in all_session_ids:
+                await A2ARepository.update_session_status(sid, "in_progress")
             
             # 2. 새로운 제안 시간으로 place_pref 업데이트
             # 새 날짜/시간이 있으면 변환
@@ -582,17 +613,20 @@ class A2AService:
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
+                "rescheduleRequestedAt": datetime.now().isoformat(),  # [NEW] 재조율 요청 시간 저장
                 "proposedDate": formatted_date,
                 "proposedTime": formatted_time,
                 "proposedEndDate": formatted_end_date,
                 "proposedEndTime": formatted_end_time,
             }
             
-            await A2ARepository.update_session_status(
-                session_id, 
-                "in_progress",
-                details=reschedule_details
-            )
+            # 모든 관련 세션에 재조율 정보 업데이트
+            for sid in all_session_ids:
+                await A2ARepository.update_session_status(
+                    sid, 
+                    "in_progress",
+                    details=reschedule_details
+                )
             
             # 3. 재조율 메시지 추가 (시간 범위 표시)
             initiator_user_id = session.get("initiator_user_id")
@@ -617,8 +651,13 @@ class A2AService:
                 message=reschedule_message
             )
             
-            # 4. 참여자 정보 수집
-            participant_user_ids = place_pref.get("participant_user_ids") or session.get("participant_user_ids")
+            # 4. 참여자 정보 수집 (place_pref에는 'participants' 키로 저장됨)
+            participant_user_ids = (
+                place_pref.get("participants") or  # place_pref에서는 'participants' 키 사용
+                place_pref.get("participant_user_ids") or 
+                session.get("participant_user_ids") or
+                []
+            )
             if not participant_user_ids:
                 participant_user_ids = [target_user_id] if target_user_id else []
             
@@ -647,7 +686,7 @@ class A2AService:
                         target_date=formatted_date,
                         target_time=formatted_time,
                         location=place_pref.get("location"),
-                        all_session_ids=[session_id]
+                        all_session_ids=all_session_ids  # 모든 관련 세션에 협상 로그 저장
                     )
                     print(f"✅ [Reschedule Background] 협상 완료: {result.get('status')}")
                 except Exception as bg_error:
@@ -1563,7 +1602,8 @@ class A2AService:
                                 "location": location or place_pref.get("location"),
                                 "activity": activity or place_pref.get("activity"),
                                 "date": date or place_pref.get("date"),
-                                "time": time or place_pref.get("time")
+                                "time": time or place_pref.get("time"),
+                                "purpose": activity or place_pref.get("activity")  # [FIX] purpose 업데이트
                             })
                             # place_pref 업데이트는 Supabase에서 직접 업데이트 필요
                             # 일단 세션은 재사용
@@ -1589,7 +1629,10 @@ class A2AService:
                             "time": time,
                             # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                             "requestedDate": formatted_requested_date,
-                            "requestedTime": formatted_requested_time
+                            "requestedTime": formatted_requested_time,
+                            "purpose": activity,
+                            # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
+                            "origin_chat_session_id": origin_chat_session_id
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1646,6 +1689,7 @@ class A2AService:
                         # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                         "requestedDate": formatted_requested_date,
                         "requestedTime": formatted_requested_time,
+                        "purpose": activity,  # [FIX] purpose 추가
                         # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
                         "origin_chat_session_id": origin_chat_session_id
                     }
@@ -3017,6 +3061,7 @@ class A2AService:
                         )
                         continue
 
+
                     # 원본 채팅 세션 ID 추출 (place_pref 또는 metadata에 저장됨)
                     curr_origin_session_id = None
                     for session in sessions:
@@ -3047,6 +3092,7 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
+                    # 상대방(initiator 등)에게 알림 전송
                     await ChatRepository.create_chat_log(
                         user_id=pid,
                         request_text=None,
