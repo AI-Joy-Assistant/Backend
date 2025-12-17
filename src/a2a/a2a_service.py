@@ -38,6 +38,26 @@ def convert_relative_date(date_str: Optional[str], now: Optional[datetime] = Non
     
     target_date = None
     
+    # 요일 처리 (월요일~일요일)
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    target_weekday = None
+    for i, w in enumerate(weekdays):
+        if w in date_str:
+            target_weekday = i
+            break
+    
+    if target_weekday is not None:
+        # 요일 발견
+        current_weekday = now.weekday()
+        days_ahead = (target_weekday - current_weekday) % 7
+        
+        # "다음주 화요일" 등 "다음"이 포함된 경우 7일 추가
+        if "다음주" in date_str or "다음 주" in date_str:
+             days_ahead += 7
+        
+        target_date = (now + timedelta(days=days_ahead)).date()
+        return target_date.strftime("%Y-%m-%d")
+
     # 상대 날짜 변환
     if "오늘" in date_str:
         target_date = now.date()
@@ -1573,7 +1593,8 @@ class A2AService:
                                 "location": location or place_pref.get("location"),
                                 "activity": activity or place_pref.get("activity"),
                                 "date": date or place_pref.get("date"),
-                                "time": time or place_pref.get("time")
+                                "time": time or place_pref.get("time"),
+                                "purpose": activity or place_pref.get("activity")  # [FIX] purpose 업데이트
                             })
                             # place_pref 업데이트는 Supabase에서 직접 업데이트 필요
                             # 일단 세션은 재사용
@@ -1599,7 +1620,8 @@ class A2AService:
                             "time": time,
                             # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                             "requestedDate": formatted_requested_date,
-                            "requestedTime": formatted_requested_time
+                            "requestedTime": formatted_requested_time,
+                            "purpose": activity
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1655,7 +1677,8 @@ class A2AService:
                         "time": time,
                         # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                         "requestedDate": formatted_requested_date,
-                        "requestedTime": formatted_requested_time
+                        "requestedTime": formatted_requested_time,
+                        "purpose": activity  # [FIX] purpose 추가
                     }
                     
                     session = await A2ARepository.create_session(

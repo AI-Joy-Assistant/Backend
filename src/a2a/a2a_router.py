@@ -179,7 +179,7 @@ async def get_a2a_session(
         details = {
             "proposer": initiator_name,
             "proposerAvatar": initiator_avatar,
-            "purpose": summary or "일정 조율",
+            "purpose": place_pref.get("purpose") or summary or "일정 조율",
             # 원래 요청 시간 (변경되지 않음)
             "requestedDate": place_pref.get("requestedDate") or place_pref.get("date") or time_window.get("date") or "",
             "requestedTime": place_pref.get("requestedTime") or place_pref.get("time") or time_window.get("time") or "미정",

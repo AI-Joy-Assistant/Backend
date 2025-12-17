@@ -442,14 +442,18 @@ class ChatService:
                     ai_response = wait_msg
 
                     # 요약 메시지
-                    summary_parts = []
-                    if friend_names:
-                        summary_parts.append(", ".join(friend_names))
-                    if schedule_info.get("date"):
-                        summary_parts.append(schedule_info.get("date"))
-                    if schedule_info.get("time"):
-                        summary_parts.append(schedule_info.get("time"))
-                    summary = " ".join(summary_parts) if summary_parts else "약속"
+                    # [FIX] 제목 생성 시 활동(Activity)이 있으면 그것만 제목으로 사용 (깔끔하게)
+                    if schedule_info.get("activity"):
+                         summary = schedule_info.get("activity")
+                    else:
+                        summary_parts = []
+                        if friend_names:
+                             summary_parts.append(", ".join(friend_names))
+                        if schedule_info.get("date"):
+                             summary_parts.append(schedule_info.get("date"))
+                        if schedule_info.get("time"):
+                             summary_parts.append(schedule_info.get("time"))
+                        summary = " ".join(summary_parts) if summary_parts else "약속"
 
                     if recoordination_needed:
                         # [재조율 로직]

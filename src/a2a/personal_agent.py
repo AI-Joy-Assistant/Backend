@@ -468,6 +468,29 @@ class PersonalAgent:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
             return date_str
         
+        # 요일 처리 (월요일~일요일)
+        weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+        target_weekday = None
+        for i, w in enumerate(weekdays):
+            if w in date_str:
+                target_weekday = i
+                break
+        
+        if target_weekday is not None:
+            # 요일 발견
+            current_weekday = now.weekday()
+            days_ahead = (target_weekday - current_weekday) % 7
+            
+            # "다음주 화요일" 등 "다음"이 포함된 경우 7일 추가 (단, 오늘이 그 요일이고 "다음"이 있으면 7일 후)
+            if "다음주" in date_str or "다음 주" in date_str:
+                 days_ahead += 7
+            
+            # [FIX] 만약 days_ahead가 0인데(오늘), 현재 시간이 이미 오후 늦게라면(혹은 사용자가 3시에 요청했는데 지금이 4시면) 
+            # 다음주로 넘겨야 할 수도 있지만, 여기서는 날짜만 판단하므로 그대로 둠.
+            
+            target_date = (now + timedelta(days=days_ahead)).date()
+            return target_date.strftime("%Y-%m-%d")
+
         # 상대 날짜 변환
         if "오늘" in date_str:
             target_date = now.date()
@@ -476,7 +499,7 @@ class PersonalAgent:
         elif "모레" in date_str:
             target_date = (now + timedelta(days=2)).date()
         elif "다음주" in date_str or "다음 주" in date_str:
-            # 다음주 월요일 기준
+            # 다음주 월요일 기준 (요일 지정 없는 경우)
             days_until_monday = (7 - now.weekday()) % 7
             if days_until_monday == 0:
                 days_until_monday = 7
