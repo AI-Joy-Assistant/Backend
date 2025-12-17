@@ -556,8 +556,19 @@ class A2AService:
             print(f"   - New Date: {new_date}")
             print(f"   - New Time: {new_time}")
             
-            # 1. 세션 상태를 'in_progress'로 변경
-            await A2ARepository.update_session_status(session_id, "in_progress")
+            # 1. thread_id로 관련된 모든 세션 찾기 (3명 이상 그룹 지원)
+            thread_id = place_pref.get("thread_id")
+            all_session_ids = [session_id]  # 기본값: 현재 세션만
+            
+            if thread_id:
+                thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+                if thread_sessions:
+                    all_session_ids = [s["id"] for s in thread_sessions]
+                    print(f"🔗 [Reschedule] thread_id={thread_id}로 {len(all_session_ids)}개 세션 발견")
+            
+            # 모든 관련 세션 상태를 'in_progress'로 변경
+            for sid in all_session_ids:
+                await A2ARepository.update_session_status(sid, "in_progress")
             
             # 2. 새로운 제안 시간으로 place_pref 업데이트
             # 새 날짜/시간이 있으면 변환
@@ -581,11 +592,13 @@ class A2AService:
                 "proposedEndTime": formatted_end_time,
             }
             
-            await A2ARepository.update_session_status(
-                session_id, 
-                "in_progress",
-                details=reschedule_details
-            )
+            # 모든 관련 세션에 재조율 정보 업데이트
+            for sid in all_session_ids:
+                await A2ARepository.update_session_status(
+                    sid, 
+                    "in_progress",
+                    details=reschedule_details
+                )
             
             # 3. 재조율 메시지 추가 (시간 범위 표시)
             initiator_user_id = session.get("initiator_user_id")
@@ -610,8 +623,13 @@ class A2AService:
                 message=reschedule_message
             )
             
-            # 4. 참여자 정보 수집
-            participant_user_ids = place_pref.get("participant_user_ids") or session.get("participant_user_ids")
+            # 4. 참여자 정보 수집 (place_pref에는 'participants' 키로 저장됨)
+            participant_user_ids = (
+                place_pref.get("participants") or  # place_pref에서는 'participants' 키 사용
+                place_pref.get("participant_user_ids") or 
+                session.get("participant_user_ids") or
+                []
+            )
             if not participant_user_ids:
                 participant_user_ids = [target_user_id] if target_user_id else []
             
@@ -640,7 +658,7 @@ class A2AService:
                         target_date=formatted_date,
                         target_time=formatted_time,
                         location=place_pref.get("location"),
-                        all_session_ids=[session_id]
+                        all_session_ids=all_session_ids  # 모든 관련 세션에 협상 로그 저장
                     )
                     print(f"✅ [Reschedule Background] 협상 완료: {result.get('status')}")
                 except Exception as bg_error:

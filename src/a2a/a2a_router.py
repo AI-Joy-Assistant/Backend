@@ -353,9 +353,16 @@ async def get_user_sessions(
             # 가장 최근 세션을 대표로 사용
             representative = max(thread_sessions, key=lambda x: x.get('created_at', ''))
 
-            # 참여자 ID 수집 (initiator + target)
+            # 참여자 ID 수집 (initiator + target + participant_user_ids)
             initiators = {s.get("initiator_user_id") for s in thread_sessions}
             targets = {s.get("target_user_id") for s in thread_sessions}
+            
+            # session.participant_user_ids에서 참여자 수집 (다중 사용자 세션 지원)
+            session_participants = set()
+            for s in thread_sessions:
+                p_ids = s.get("participant_user_ids") or []
+                if isinstance(p_ids, list):
+                    session_participants.update(p_ids)
 
             # place_pref에 명시된 참여자 정보도 확인 (UUID 형식인 것만 필터링)
             place_pref = representative.get("place_pref", {})
@@ -368,7 +375,7 @@ async def get_user_sessions(
                         pref_participants.add(p)
 
             # 전체 참여자 합집합 (나 제외)
-            participants_set = (initiators | targets | pref_participants) - {current_user_id}
+            participants_set = (initiators | targets | pref_participants | session_participants) - {current_user_id}
 
             participant_list = list(participants_set)
             all_participant_ids.update(participants_set) # 전체 ID 수집

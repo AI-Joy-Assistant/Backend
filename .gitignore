@@ -35,3 +35,8 @@ git rm --cached src/calendar/__pycache__/router.cpython-313.pyc
 # 디렉터리 통째로(권장)
 git rm -r --cached src/calendar/__pycache__/
 .env.backup
+
+# Meta Llama model weights
+*.safetensors
+*.gguf
+models/

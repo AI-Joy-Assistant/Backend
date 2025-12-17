@@ -24,15 +24,16 @@ class AuthRepository:
         """ID로 사용자 찾기"""
         try:
             print(f"🔍 ID로 사용자 조회: {user_id}")
-            response = supabase.table('user').select('*').eq('id', user_id).maybe_single().execute()
-            if response is None:
+            response = supabase.table('user').select('*').eq('id', user_id).execute()
+            if response is None or not response.data:
                 print(f"❌ ID로 사용자를 찾을 수 없음: {user_id}")
                 return None
-            print(f"✅ ID로 사용자 조회 성공: {response.data.get('email')}")
-            return response.data
+            print(f"✅ ID로 사용자 조회 성공: {response.data[0].get('email')}")
+            return response.data[0]
         except Exception as e:
             print(f"❌ ID로 사용자 조회 오류: {str(e)}")
-            raise Exception(f"사용자 조회 오류: {str(e)}")
+            # 사용자가 없는 경우는 None 반환 (예외로 처리하지 않음)
+            return None
 
     @staticmethod
     async def create_user(user_data: Dict[str, str]) -> Dict[str, Any]:
