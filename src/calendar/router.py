@@ -1,0 +1,312 @@
+# src/calendar/router.py
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from typing import Optional
+import datetime as dt
+import httpx
+import logging
+
+from .models import CalendarEvent, CreateEventRequest, GoogleAuthRequest, GoogleAuthResponse
+from .service import GoogleCalendarService
+
+from config.settings import settings
+from src.auth.service import AuthService
+from src.auth.repository import AuthRepository
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/calendar", tags=["calendar"])
+
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+# ---------------------------
+# 내부 유틸: 액세스 토큰 보장 (만료 시 refresh)
+# ---------------------------
+async def _ensure_access_token(current_user: dict) -> str:
+    """
+    1) DB에서 access_token / refresh_token / expiry(있으면)를 읽는다
+    2) 만료 임박(<=60초) 또는 만료면 refresh_token으로 새 access_token 발급
+    3) 최신 access_token을 반환하고 DB에 반영
+    """
+    db_user = await AuthRepository.find_user_by_email(current_user["email"])
+    if not db_user:
+        raise HTTPException(status_code=401, detail="사용자 정보를 찾을 수 없습니다.")
+
+    access_token = db_user.get("access_token")
+    refresh_token = db_user.get("refresh_token")
+    expiry = db_user.get("token_expiry") or db_user.get("expiry")
+
+    def _to_dt(x):
+        if not x:
+            return None
+        if isinstance(x, dt.datetime):
+            return x
+        try:
+            return dt.datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    expiry_dt = _to_dt(expiry)
+
+    needs_refresh = False
+    if access_token and expiry_dt:
+        now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        needs_refresh = (expiry_dt - now_utc).total_seconds() < 60
+    elif access_token and not expiry_dt:
+        needs_refresh = False
+    else:
+        needs_refresh = True
+
+    if not needs_refresh and access_token:
+        return access_token
+
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Google 재로그인이 필요합니다 (refresh_token 없음).")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        r = await client.post(GOOGLE_TOKEN_URL, data=data)
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Google 토큰 갱신 실패: {r.text}")
+        tok = r.json()
+
+    new_access = tok["access_token"]
+    now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+    new_expiry = (now_utc + dt.timedelta(seconds=tok.get("expires_in", 3600))).isoformat()
+
+    try:
+        await AuthRepository.update_google_user_info(
+            email=current_user["email"],
+            access_token=new_access,
+            refresh_token=refresh_token,
+            profile_image=None,
+            name=None,
+            token_expiry=new_expiry,
+        )
+    except TypeError:
+        await AuthRepository.update_google_user_info(
+            email=current_user["email"],
+            access_token=new_access,
+            refresh_token=refresh_token,
+            profile_image=None,
+            name=None,
+        )
+    return new_access
+
+# ---------------------------
+# OAuth (선택 유지)
+# ---------------------------
+@router.get("/auth-url")
+async def get_google_auth_url():
+    service = GoogleCalendarService()
+    auth_url = service.get_authorization_url()
+    return {"auth_url": auth_url}
+
+@router.post("/auth", response_model=GoogleAuthResponse)
+async def authenticate_google(request: GoogleAuthRequest):
+    try:
+        service = GoogleCalendarService()
+        token_data = await service.get_access_token(request.code)
+        return GoogleAuthResponse(
+            access_token=token_data["access_token"],
+            refresh_token=token_data.get("refresh_token"),
+            expires_in=token_data["expires_in"],
+            token_type=token_data["token_type"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Google 인증 실패: {str(e)}")
+
+# ---------------------------
+# Events (JWT 인증으로 자동 토큰 갱신)
+# ---------------------------
+@router.get("/events")
+async def get_calendar_events(
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID"),
+        time_min: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-15T00:00:00+09:00"),
+        time_max: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-16T00:00:00+09:00"),
+):
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        service = GoogleCalendarService()
+        events = await service.get_calendar_events(
+            access_token=google_access_token,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        return {"events": events}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
+
+@router.get("/events/legacy")
+async def get_calendar_events_legacy(
+        access_token: str = Query(..., description="Google OAuth access token"),
+        calendar_id: str = Query("primary", description="캘린더 ID"),
+        time_min: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-15T00:00:00+09:00"),
+        time_max: Optional[str] = Query(None, description="ISO8601 ex) 2025-08-16T00:00:00+09:00"),
+):
+    try:
+        service = GoogleCalendarService()
+        events = await service.get_calendar_events(
+            access_token=access_token,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        return {"events": events}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
+
+@router.post("/events", response_model=CalendarEvent)
+async def create_calendar_event(
+        event_data: CreateEventRequest,
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID"),
+):
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        service = GoogleCalendarService()
+        event = await service.create_calendar_event(
+            access_token=google_access_token,
+            event_data=event_data,
+            calendar_id=calendar_id,
+        )
+        return event
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"이벤트 생성 실패: {str(e)}")
+
+@router.delete("/events/{event_id}")
+async def delete_calendar_event(
+        event_id: str,
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID"),
+):
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        service = GoogleCalendarService()
+        success = await service.delete_calendar_event(
+            access_token=google_access_token,
+            event_id=event_id,
+            calendar_id=calendar_id,
+        )
+        if success:
+            return {"message": "이벤트가 성공적으로 삭제되었습니다."}
+        raise HTTPException(status_code=400, detail="이벤트 삭제에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
+
+# ---------------------------
+# Google Calendar Webhook
+# ---------------------------
+@router.post("/webhook")
+async def google_calendar_webhook(request: Request):
+    try:
+        headers = request.headers
+        resource_state = headers.get("X-Goog-Resource-State")
+        channel_id     = headers.get("X-Goog-Channel-Id")
+        resource_id    = headers.get("X-Goog-Resource-Id")
+        logger.info(f"[WEBHOOK] state={resource_state}, channel={channel_id}, resource={resource_id}")
+        return {"status": "received"}
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 웹훅 처리 오류: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 처리 실패: {str(e)}")
+
+@router.post("/subscribe")
+async def subscribe_to_calendar_webhook(
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID")
+):
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        webhook_url = f"{settings.BASE_URL}/calendar/webhook"
+        subscription_data = {
+            "id": f"webhook_{current_user['email']}_{calendar_id}",
+            "type": "web_hook",
+            "address": webhook_url,
+            "params": { "ttl": "2592000" }
+        }
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/watch"
+        headers = { "Authorization": f"Bearer {google_access_token}", "Content-Type": "application/json" }
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=subscription_data, headers=headers)
+            response.raise_for_status()
+        result = response.json()
+        logger.info(f"[WEBHOOK] 구독 성공: {result.get('id')}")
+        return { "status": "success", "subscription_id": result.get("id"), "expiration": result.get("expiration") }
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 구독 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 구독 실패: {str(e)}")
+
+@router.post("/renew-subscription")
+async def renew_calendar_webhook(
+        current_user: dict = Depends(AuthService.get_current_user),
+        calendar_id: str = Query("primary", description="캘린더 ID")
+):
+    try:
+        google_access_token = await _ensure_access_token(current_user)
+        try:
+            await unsubscribe_from_calendar_webhook(current_user, calendar_id, google_access_token)
+        except Exception as e:
+            logger.warning(f"[WEBHOOK] 기존 구독 해제 실패 (무시): {str(e)}")
+
+        webhook_url = f"{settings.BASE_URL}/calendar/webhook"
+        subscription_data = {
+            "id": f"webhook_{current_user['email']}_{calendar_id}",
+            "type": "web_hook",
+            "address": webhook_url,
+            "params": { "ttl": "2592000" }
+        }
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/watch"
+        headers = { "Authorization": f"Bearer {google_access_token}", "Content-Type": "application/json" }
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(url, json=subscription_data, headers=headers)
+            response.raise_for_status()
+        result = response.json()
+        logger.info(f"[WEBHOOK] 구독 갱신 성공: {result.get('id')}")
+        return {
+            "status": "success",
+            "subscription_id": result.get("id"),
+            "expiration": result.get("expiration"),
+            "message": "웹훅 구독이 성공적으로 갱신되었습니다."
+        }
+    except Exception as e:
+        logger.error(f"[WEBHOOK] 구독 갱신 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"웹훅 구독 갱신 실패: {str(e)}")
+
+async def unsubscribe_from_calendar_webhook(current_user: dict, calendar_id: str, access_token: str):
+    subscription_id = f"webhook_{current_user['email']}_{calendar_id}"
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/stop"
+    headers = { "Authorization": f"Bearer {access_token}", "Content-Type": "application/json" }
+    data = {"id": subscription_id}
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(url, json=data, headers=headers)
+        if response.status_code == 200:
+            logger.info(f"[WEBHOOK] 구독 해제 성공: {subscription_id}")
+        else:
+            logger.warning(f"[WEBHOOK] 구독 해제 실패: {response.status_code}")
+
+@router.get("/test")
+async def test_calendar_api():
+    return {
+        "message": "Google Calendar API 연결 준비 완료",
+        "status": "ready",
+        "available_endpoints": [
+            "GET /calendar/auth-url",
+            "POST /calendar/auth",
+            "GET /calendar/events",
+            "POST /calendar/events",
+            "DELETE /calendar/events/{event_id}",
+        ],
+    }
