@@ -313,3 +313,43 @@ class ChatRepository:
             return res.data or []
         except Exception as e:
             raise Exception(f"세션별 채팅 로그 조회 오류: {str(e)}")
+
+    @staticmethod
+    async def delete_all_user_data(user_id: str) -> None:
+        """사용자와 관련된 모든 채팅 데이터 삭제 (탈퇴용)"""
+        try:
+            # 사용자가 user_id인 경우 OR friend_id인 경우 모두 삭제
+            # Supabase PostgREST for OR: or=(user_id.eq.X,friend_id.eq.X)
+            print(f"🗑️ [Chat] 사용자 관련 모든 채팅 삭제 시작: {user_id}")
+            
+            response = (
+                supabase
+                .table('chat_log')
+                .delete()
+                .or_(f"user_id.eq.{user_id},friend_id.eq.{user_id}")
+                .execute()
+            )
+            
+            deleted_count = len(response.data) if response.data else 0
+            print(f"✅ [Chat] 사용자 관련 채팅 삭제 완료: {deleted_count}건")
+            
+        except Exception as e:
+            print(f"❌ [Chat] 데이터 삭제 오류: {str(e)}")
+            raise Exception(f"채팅 데이터 삭제 실패: {str(e)}")
+    @staticmethod
+    async def update_session_title(session_id: str, title: str, user_id: str) -> None:
+        """세션 제목 업데이트"""
+        try:
+            # 세션 확인
+            check = supabase.table("chat_sessions").select("id").eq("id", session_id).eq("user_id", user_id).execute()
+            if not check.data:
+                logger.warning(f"세션 제목 업데이트 중단: 세션이 없거나 권한 없음 (session_id={session_id}, user_id={user_id})")
+                return
+
+            supabase.table("chat_sessions").update({
+                "title": title
+            }).eq("id", session_id).execute()
+            logger.info(f"세션 제목 업데이트 성공: {title} (session_id={session_id})")
+        except Exception as e:
+            logger.error(f"세션 제목 업데이트 실패: {str(e)}")
+            # 에러 발생해도 로직 중단하지 않음

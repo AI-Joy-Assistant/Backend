@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta
 import re
 from src.intent.service import IntentService
+from config.database import supabase
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,30 @@ class ChatService:
                 message_type="user_message",
                 session_id=session_id,  # ✅ 세션 연결
             )
+
+            # [추가] 세션 제목 자동 업데이트 ("새 채팅"일 경우 첫 메시지로 변경)
+            if session_id:
+                try:
+                    logger.error(f"DEBUG: Session update attempt. Session ID: {session_id}")
+                    # 현재 세션 정보 조회
+                    current_session = supabase.table("chat_sessions").select("title").eq("id", session_id).single().execute()
+                    if current_session.data:
+                        current_title = current_session.data.get("title")
+                        logger.error(f"DEBUG: Current Title: {current_title}")
+                        if current_title: 
+                             if current_title.strip() == "새 채팅":
+                                # 메시지가 길면 20자로 자름
+                                new_title = message[:20] + "..." if len(message) > 20 else message
+                                logger.error(f"DEBUG: Updating to new title: {new_title}")
+                                await ChatRepository.update_session_title(session_id, new_title, user_id)
+                             else:
+                                 logger.error(f"DEBUG: Title is not '새 채팅', skipping update. Title is '{current_title}'")
+                        else:
+                             logger.error("DEBUG: Title is empty/None")
+                    else:
+                        logger.error("DEBUG: Session not found in DB.")
+                except Exception as e:
+                    logger.error(f"DEBUG: Error updating title: {e}")
 
             # 2. 의도 파악
             schedule_info = await IntentService.extract_schedule_info(message)
@@ -493,7 +518,8 @@ class ChatService:
                             location=schedule_info.get("location"),
                             activity=schedule_info.get("activity"),
                             duration_minutes=60,
-                            force_new=True  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
+                            force_new=True,  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
+                            origin_chat_session_id=session_id  # [✅ 추가] 원본 채팅 세션 ID 전달
                         )
                         thread_id = a2a_result.get("thread_id")
                         session_ids = a2a_result.get("session_ids", [])
