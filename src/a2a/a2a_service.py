@@ -138,7 +138,8 @@ class A2AService:
         target_user_id: str,
         summary: Optional[str] = None,
         duration_minutes: int = 60,
-        use_true_a2a: bool = True
+        use_true_a2a: bool = True,
+        origin_chat_session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         A2A 세션 시작 및 전체 시뮬레이션 자동 진행
@@ -146,14 +147,21 @@ class A2AService:
         
         Args:
             use_true_a2a: True면 새로운 NegotiationEngine 사용, False면 기존 시뮬레이션 방식
+            origin_chat_session_id: 일정 요청을 시작한 원본 채팅방 ID
         """
         try:
             # 1) 세션 생성 (summary는 place_pref에 포함)
+            # origin_chat_session_id를 place_pref의 thread_id로 저장하여 추후 활용
+            place_pref = {"summary": summary or f"일정 조율"}
+            if origin_chat_session_id:
+                place_pref["origin_chat_session_id"] = origin_chat_session_id
+                place_pref["thread_id"] = origin_chat_session_id # 호환성을 위해 thread_id로도 저장
+
             session = await A2ARepository.create_session(
                 initiator_user_id=initiator_user_id,
                 target_user_id=target_user_id,
                 intent="schedule",
-                place_pref={"summary": summary or f"일정 조율"} if summary else None,
+                place_pref=place_pref if summary or origin_chat_session_id else None,
                 participant_user_ids=[initiator_user_id, target_user_id]  # 다중 참여자 지원
             )
             session_id = session["id"]
@@ -1472,7 +1480,8 @@ class A2AService:
         activity: Optional[str] = None,
         duration_minutes: int = 60,
         force_new: bool = False,
-        use_true_a2a: bool = True
+        use_true_a2a: bool = True,
+        origin_chat_session_id: Optional[str] = None  # 원본 채팅 세션 ID 추가
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 세션 시작
@@ -1636,7 +1645,9 @@ class A2AService:
                         "time": time,
                         # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                         "requestedDate": formatted_requested_date,
-                        "requestedTime": formatted_requested_time
+                        "requestedTime": formatted_requested_time,
+                        # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
+                        "origin_chat_session_id": origin_chat_session_id
                     }
                     
                     session = await A2ARepository.create_session(
@@ -2949,7 +2960,7 @@ class A2AService:
                 # ... (필요 시 거절 처리 코드도 동일한 동기화 방식 적용 권장)
                 
                 # 간단한 거절 처리 예시
-                reject_msg = f"{user_name}님이 일정을 거절했습니다. 재조율을 진행합니다."
+                reject_msg = f"{user_name}님이 일정을 거절했습니다."
                 for session in sessions:
                      await A2ARepository.add_message(
                         session_id=session["id"],
@@ -3006,18 +3017,72 @@ class A2AService:
                         )
                         continue
 
-                    # 상대방(initiator 등)에게 알림 전송
+                    # 원본 채팅 세션 ID 추출 (place_pref 또는 metadata에 저장됨)
+                    curr_origin_session_id = None
+                    for session in sessions:
+                         pp = session.get("place_pref", {})
+                         if isinstance(pp, str):
+                             try:
+                                 pp = json.loads(pp)
+                             except:
+                                 pp = {}
+                         if pp.get("origin_chat_session_id"):
+                             curr_origin_session_id = pp.get("origin_chat_session_id")
+                             break
+                    
+                    # [Fallback] origin_chat_session_id가 없으면 initiator의 기본 채팅 세션 조회
+                    if not curr_origin_session_id:
+                        try:
+                            default_session = supabase.table("chat_sessions").select("id").eq(
+                                "user_id", pid
+                            ).eq("title", "기본 채팅").single().execute()
+                            if default_session.data:
+                                curr_origin_session_id = default_session.data.get("id")
+                                logger.info(f"Initiator({pid})의 기본 채팅 세션 사용: {curr_origin_session_id}")
+                        except Exception as e:
+                            logger.warning(f"기본 채팅 세션 조회 실패: {e}")
+                    
+                    # session_id가 있으면 friend_id는 None이어도 됨 (세션에 메시지 추가)
+                    # 없으면 기존처럼 friend_id 사용 (1:1 채팅방)
+                    target_session_id = curr_origin_session_id if curr_origin_session_id else None
+                    target_friend_id = user_id if not target_session_id else None
+
                     await ChatRepository.create_chat_log(
                         user_id=pid,
                         request_text=None,
                         response_text=f"{reject_msg}\n상대방이 새로운 시간을 입력하면 다시 알려드리겠습니다.",
-                        friend_id=None,
+                        friend_id=target_friend_id,
+                        session_id=target_session_id, # 원본 채팅방 ID 전달
                         message_type="schedule_rejection", # 이 타입으로 보내야 함
                         metadata={
                             "needs_recoordination": True, # 재조율 플래그 ON
                             "rejected_by": user_id,
                             "rejected_by_name": user_name,
                             "thread_id": thread_id,
+                            "session_ids": session_ids,
+                            "schedule_date": proposal.get("date"),
+                            "schedule_time": proposal.get("time"),
+                            "schedule_activity": proposal.get("activity"),
+                            "schedule_location": proposal.get("location"),
+                        }
+                    )
+                    
+                    # [추가] 거절한 본인(user_id)에게도 시스템 메시지 추가 (내 채팅방에 표시되도록)
+                    # 1:1일 경우 상대방 ID(pid)를 friend_id로 설정
+                    my_friend_id = pid if not target_session_id else None
+                    
+                    await ChatRepository.create_chat_log(
+                        user_id=user_id,
+                        request_text=None,
+                        response_text=f"일정을 거절했습니다.\n재조율이 필요하면 다시 요청해주세요.",
+                        friend_id=my_friend_id,
+                        session_id=target_session_id,
+                        message_type="schedule_rejection",
+                        metadata={
+                            "needs_recoordination": True,
+                            "rejected_by": user_id,
+                            "rejected_by_name": user_name,
+                             "thread_id": thread_id,
                             "session_ids": session_ids,
                             "schedule_date": proposal.get("date"),
                             "schedule_time": proposal.get("time"),

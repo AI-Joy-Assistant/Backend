@@ -161,4 +161,34 @@ class FriendsRepository:
             return filtered_users
         except Exception as e:
             print(f"사용자 검색 오류: {e}")
-            return [] 
+            return []
+
+    async def delete_all_user_data(self, user_id: str) -> None:
+        """사용자와 관련된 모든 친구 데이터 삭제 (탈퇴용)"""
+        try:
+            print(f"🗑️ [Friends] 사용자 관련 친구 데이터 삭제 시작: {user_id}")
+            
+            # 1. friend_list 삭제 (user_id 또는 friend_id가 해당 사용자인 경우)
+            # 관계 끊기(status=False)가 아니라 실제 데이터 삭제
+            res_list = (
+                self.supabase
+                .table('friend_list')
+                .delete()
+                .or_(f"user_id.eq.{user_id},friend_id.eq.{user_id}")
+                .execute()
+            )
+            print(f"✅ [Friends] 친구 목록 삭제: {len(res_list.data) if res_list.data else 0}건")
+            
+            # 2. friend_follow 삭제 (request_id 또는 receiver_id가 해당 사용자인 경우)
+            res_follow = (
+                self.supabase
+                .table('friend_follow')
+                .delete()
+                .or_(f"request_id.eq.{user_id},receiver_id.eq.{user_id}")
+                .execute()
+            )
+            print(f"✅ [Friends] 친구 요청 삭제: {len(res_follow.data) if res_follow.data else 0}건")
+            
+        except Exception as e:
+            print(f"❌ [Friends] 데이터 삭제 오류: {str(e)}")
+            raise Exception(f"친구 데이터 삭제 실패: {str(e)}") 

@@ -47,7 +47,8 @@ async def start_a2a_session(
             initiator_user_id=current_user_id,
             target_user_id=request.target_user_id,
             summary=request.summary,
-            duration_minutes=request.time_window.get("duration_minutes", 60) if request.time_window else 60
+            duration_minutes=request.time_window.get("duration_minutes", 60) if request.time_window else 60,
+            origin_chat_session_id=request.origin_chat_session_id
         )
         
         if result["status"] == 200:
