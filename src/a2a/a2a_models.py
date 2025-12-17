@@ -23,6 +23,7 @@ class A2ASessionCreate(BaseModel):
     time_window: Optional[Dict[str, Any]] = None
     place_pref: Optional[Dict[str, Any]] = None
     summary: Optional[str] = None
+    origin_chat_session_id: Optional[str] = None  # 일정 요청을 시작한 원본 채팅방 ID
 
 class A2ASessionResponse(BaseModel):
     id: str

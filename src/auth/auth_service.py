@@ -453,9 +453,21 @@ class AuthService:
     async def delete_user(user_id: str) -> None:
         """사용자 계정 삭제"""
         try:
-            print(f"🗑️ 사용자 계정 삭제 시작: {user_id}")
+            print(f"🗑️ 사용자 계정 삭제 및 데이터 정리 시작: {user_id}")
+            
+            # 1. 채팅 데이터 삭제
+            from ..chat.chat_repository import ChatRepository
+            await ChatRepository.delete_all_user_data(user_id)
+            
+            # 2. 친구 데이터 삭제
+            from ..friends.friends_repository import FriendsRepository
+            friends_repo = FriendsRepository()
+            await FriendsRepository.delete_all_user_data(friends_repo, user_id)
+            
+            # 3. 사용자 계정 삭제 (마지막)
             await AuthRepository.delete_user(user_id)
-            print(f"✅ 사용자 계정 삭제 성공: {user_id}")
+            print(f"✅ 사용자 계정 및 모든 데이터 삭제 성공: {user_id}")
+            
         except Exception as e:
             print(f"❌ 사용자 계정 삭제 실패: {str(e)}")
             raise Exception(f"사용자 계정 삭제 실패: {str(e)}") 

@@ -329,7 +329,9 @@ async def update_chat_session(
     채팅 세션의 제목을 변경합니다.
     """
     try:
+        print(f"DEBUG: Processing PUT /sessions/{session_id}")
         title = request.get("title", "").strip()
+        print(f"DEBUG: New title requested: {title}")
         if not title:
             raise HTTPException(status_code=400, detail="제목을 입력해주세요.")
         
@@ -339,12 +341,14 @@ async def update_chat_session(
         ).eq("user_id", current_user_id).execute()
         
         if not check.data:
+            print(f"DEBUG: Session {session_id} not found for user {current_user_id}")
             raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
         
         # 세션 제목 업데이트
-        supabase.table("chat_sessions").update({
+        result = supabase.table("chat_sessions").update({
             "title": title
         }).eq("id", session_id).execute()
+        print(f"DEBUG: Update result data: {result.data}")
         
         return {"status": "ok", "message": "세션 이름이 변경되었습니다.", "title": title}
     except HTTPException:
