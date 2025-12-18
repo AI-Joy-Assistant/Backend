@@ -592,6 +592,7 @@ async def get_pending_requests(
             # 우선순위: details (협상 결과) > place_pref (초기 요청)
             proposed_date = None
             proposed_time = None
+            proposed_end_time = None
             
             # details에서 협상 완료된 날짜/시간 먼저 확인
             details = session.get("details", {}) or {}
@@ -605,12 +606,14 @@ async def get_pending_requests(
             if isinstance(details, dict):
                 proposed_date = details.get("proposedDate")
                 proposed_time = details.get("proposedTime")
+                proposed_end_time = details.get("proposedEndTime")
             
             # details에 없으면 place_pref에서 가져옴 (초기 요청)
             if not proposed_date or not proposed_time:
                 if isinstance(place_pref, dict):
                     proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
                     proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
+                    proposed_end_time = proposed_end_time or place_pref.get("proposedEndTime") or place_pref.get("end_time")
             
             # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
             is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
@@ -627,6 +630,7 @@ async def get_pending_requests(
                 "participant_count": participant_count,
                 "proposed_date": proposed_date,
                 "proposed_time": proposed_time,
+                "proposed_end_time": proposed_end_time,
                 "status": session.get("status"),
                 "created_at": session.get("created_at"),
                 "reschedule_requested_at": reschedule_requested_at,  # [NEW] 재조율 요청 시간
