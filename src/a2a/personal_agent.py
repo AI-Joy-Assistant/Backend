@@ -241,7 +241,7 @@ class PersonalAgent:
 {{
     "action": "ACCEPT" 또는 "COUNTER",
     "reason": "짧은 이유",
-    "message": "상대방에게 보낼 메시지 (이모지 포함, 20자 이내)",
+    "message": "상대방에게 보낼 메시지 (ACCEPT 시에는 반드시 날짜/시간 포함하여 자연스럽게)",
     "counter_date": "YYYY-MM-DD (COUNTER 시 필수, 위 가용 시간에서 선택)",
     "counter_time": "HH:MM (COUNTER 시 필수, 위 가용 시간에서 선택)"
 }}"""
@@ -276,11 +276,8 @@ class PersonalAgent:
                     duration_minutes=proposal.duration_minutes
                 )
             
-            # ACCEPT 시 정확한 시간을 포함한 메시지 사용 (GPT가 틀린 시간을 말하는 것 방지)
-            if action == MessageType.ACCEPT:
-                accept_message = f"좋습니다! {proposal.date} {proposal.time}에 뵐게요 😊"
-            else:
-                accept_message = result.get("message", "확인했어요! 👍")
+            # ACCEPT 시에도 AI가 생성한 메시지 사용 (단, 프롬프트에서 시간 포함하도록 유도)
+            accept_message = result.get("message", "확인했어요! 👍")
             
             return AgentDecision(
                 action=action,

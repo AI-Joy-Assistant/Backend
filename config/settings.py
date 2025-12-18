@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     "http://127.0.0.1:3000",
     "http://localhost:19006",
     "http://127.0.0.1:19006",# Expo 웹 대체 포트
+    "https://joyner-dev-mbp.loca.lt", # Tunnel URL
+
     ]
     CORS_CREDENTIALS: bool = True
 
