@@ -1025,10 +1025,8 @@ class ChatService:
 
                     if (recoordination_needed or a2a_result.get("status") == 200):
                         if needs_approval and proposal:
-                            date_str = proposal.get("date", "")
-                            time_str = proposal.get("time", "")
-                            confirm_msg = f"✅ 약속 확정: {date_str} {time_str}\n확정하시겠습니까?"
-                            ai_response = confirm_msg
+                            # [FIX] A2A 화면 안내 메시지가 이미 전송되므로 중복 메시지 제거
+                            ai_response = None
                         elif a2a_result.get("needs_recoordination"):
                             # [FIX] a2a_service에서 이미 충돌 알림 메시지를 DB에 저장했으므로
                             # 여기서 또 ai_response로 반환하면 프론트엔드에서 중복으로 표시됨 (폴링 + 로컬 추가)
