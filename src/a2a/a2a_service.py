@@ -1599,7 +1599,7 @@ class A2AService:
                             place_pref.update({
                                 "thread_id": thread_id,
                                 "participants": target_user_ids,
-                                "location": location or place_pref.get("location"),
+                                "location": location,  # [FIX] 기존 세션 location 재사용 안 함
                                 "activity": activity or place_pref.get("activity"),
                                 "date": date or place_pref.get("date"),
                                 "time": time or place_pref.get("time"),
@@ -1714,27 +1714,8 @@ class A2AService:
             # 3) 다중 사용자 일정 조율 시뮬레이션 실행
             # 기존 세션을 재사용하는 경우, 기존 메시지에 이어서 추가
             
-            # [FIX] 재조율 시(reuse_existing=True) location이 None이면 기존 세션의 location 사용
+            # [FIX] 기존 세션에서 location 재사용 안 함 - 현재 요청의 location만 사용
             final_location = location
-            if reuse_existing and not final_location:
-                # 첫 번째 세션의 place_pref에서 location 확인
-                if sessions:
-                    first_session_id = sessions[0]["session_id"]
-                    # DB에서 다시 조회하거나, 위에서 가져온 existing_session_map 활용
-                    # 여기서는 간단히 existing_session_map이 있다고 가정하고 처리 (위에서 조회함)
-                    # 하지만 sessions 리스트는 새로 구성되었으므로, DB 조회가 안전하나 성능상...
-                    # 위 로직에서 place_pref를 업데이트 했으므로, 업데이트된 값을 써야 함.
-                    # sessions 루프에서 place_pref를 저장해두는 것이 좋음.
-                    pass 
-
-            # 위에서 place_pref를 업데이트 할 때 location이 없으면 기존 값을 유지했음.
-            # 따라서 sessions[0]에 해당하는 세션의 place_pref를 조회하면 됨.
-            # 하지만 여기서는 인자로 넘겨야 함.
-            
-            # 간단히: location이 없으면, existing_session_map의 첫 번째 값에서 가져옴
-            if not final_location and existing_session_map:
-                first_existing = list(existing_session_map.values())[0]
-                final_location = first_existing.get("place_pref", {}).get("location")
 
             # True A2A 또는 기존 시뮬레이션 실행
             if use_true_a2a:

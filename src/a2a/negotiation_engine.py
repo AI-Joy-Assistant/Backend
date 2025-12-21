@@ -4,13 +4,15 @@ NegotiationEngine - 다중 참여자 협상 엔진
 import logging
 import uuid
 import asyncio
+import json
 from typing import Dict, Any, Optional, List, AsyncGenerator
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from dataclasses import dataclass, field
 
 from .a2a_protocol import (
     MessageType, Proposal, A2AMessage, AgentDecision,
-    NegotiationStatus, NegotiationResult, HumanInterventionReason
+    NegotiationStatus, NegotiationResult, HumanInterventionReason, TimeSlot
 )
 from .personal_agent import PersonalAgent
 from .a2a_repository import A2ARepository
@@ -18,6 +20,67 @@ from src.auth.auth_repository import AuthRepository
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
+
+
+@dataclass
+class RecommendedSlot:
+    """추천 슬롯 정보"""
+    date: str  # "2025-12-17"
+    time_condition: Optional[str] = None  # "6시 이후", "2시 이전", None (종일)
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    available_users: List[str] = field(default_factory=list)
+    unavailable_users: List[str] = field(default_factory=list)
+    is_all_available: bool = False
+    priority_score: int = 0  # 높을수록 좋음
+
+
+@dataclass
+class DateRecommendation:
+    """날짜 추천 결과"""
+    date: str
+    condition: str
+    display_text: str  # "12/17 (6시 이후) - 3명 가능"
+    available_count: int
+    unavailable_names: List[str] = field(default_factory=list)
+
+
+def _clean_llm_message(message: str) -> str:
+    """LLM 응답에서 JSON이 섞여있으면 자연스러운 텍스트만 추출"""
+    if not message:
+        return message
+    
+    message = message.strip()
+    
+    # JSON 형식인지 확인 (다양한 필드 처리)
+    if message.startswith("{"):
+        try:
+            parsed = json.loads(message)
+            if isinstance(parsed, dict):
+                # message 필드 우선
+                if "message" in parsed:
+                    extracted = parsed.get("message", "")
+                    if extracted:
+                        logger.info(f"[LLM Cleanup] JSON.message → Text: {extracted[:30]}...")
+                        return extracted.strip('"').strip("'")
+                
+                # reason 필드 (message가 없을 때)
+                if "reason" in parsed and "action" not in parsed:
+                    extracted = parsed.get("reason", "")
+                    if extracted and not extracted.startswith("{"):
+                        logger.info(f"[LLM Cleanup] JSON.reason → Text: {extracted[:30]}...")
+                        return extracted.strip('"').strip("'")
+                
+                # JSON 전체가 온 경우 → 기본 메시지로 대체
+                logger.warning(f"[LLM Cleanup] JSON detected, replacing with default: {message[:50]}...")
+                return "일정을 확인하고 있어요 😊"
+        except json.JSONDecodeError:
+            pass
+    
+    # 따옴표 제거
+    message = message.strip('"').strip("'")
+    
+    return message
 
 
 class NegotiationEngine:
@@ -55,6 +118,7 @@ class NegotiationEngine:
         self.messages: List[A2AMessage] = []
         self.last_proposals: Dict[str, Proposal] = {}  # 교착 상태 탐지용
         self.deadlock_counter = 0
+        self.user_names: Dict[str, str] = {}  # user_id -> user_name 매핑
     
     async def initialize_agents(self):
         """모든 참여자의 에이전트 초기화"""
@@ -64,7 +128,139 @@ class NegotiationEngine:
             user = await AuthRepository.find_user_by_id(user_id)
             user_name = user.get("name", "사용자") if user else "사용자"
             self.agents[user_id] = PersonalAgent(user_id, user_name)
+            self.user_names[user_id] = user_name
             logger.info(f"에이전트 초기화: {user_name}")
+    
+    async def collect_all_availabilities(
+        self, 
+        start: datetime, 
+        end: datetime
+    ) -> Dict[str, List[TimeSlot]]:
+        """모든 참여자의 가용 시간을 수집"""
+        await self.initialize_agents()
+        
+        results = {}
+        all_user_ids = [self.initiator_user_id] + self.participant_user_ids
+        
+        for user_id in all_user_ids:
+            agent = self.agents[user_id]
+            slots = await agent.get_availability(start, end)
+            results[user_id] = slots
+            logger.info(f"[{self.user_names.get(user_id, '사용자')}] 가용 슬롯 {len(slots)}개 수집")
+        
+        return results
+    
+    def find_intersection_slots(
+        self, 
+        availabilities: Dict[str, List[TimeSlot]],
+        preferred_hour: Optional[int] = None
+    ) -> List[RecommendedSlot]:
+        """교집합 계산 및 우선순위 정렬"""
+        all_user_ids = list(availabilities.keys())
+        total_users = len(all_user_ids)
+        
+        # 날짜별로 가용 시간 그룹화
+        date_slots: Dict[str, Dict[str, List[TimeSlot]]] = {}
+        
+        for user_id, slots in availabilities.items():
+            for slot in slots:
+                date_str = slot.start.strftime("%Y-%m-%d")
+                if date_str not in date_slots:
+                    date_slots[date_str] = {}
+                if user_id not in date_slots[date_str]:
+                    date_slots[date_str][user_id] = []
+                date_slots[date_str][user_id].append(slot)
+        
+        recommendations = []
+        
+        for date_str, user_slots in date_slots.items():
+            available_users = list(user_slots.keys())
+            unavailable_users = [uid for uid in all_user_ids if uid not in available_users]
+            
+            # 시간대 분석
+            # 모든 사용자의 슬롯 교집합 시간대 찾기
+            common_hours = set(range(9, 22))  # 9시~22시 기본
+            
+            for user_id in available_users:
+                user_hours = set()
+                for slot in user_slots[user_id]:
+                    for hour in range(slot.start.hour, min(slot.end.hour + 1, 22)):
+                        user_hours.add(hour)
+                common_hours = common_hours.intersection(user_hours)
+            
+            # 시간 조건 결정
+            time_condition = None
+            start_hour = None
+            end_hour = None
+            
+            if common_hours:
+                min_hour = min(common_hours)
+                max_hour = max(common_hours)
+                
+                if min_hour >= 18:
+                    time_condition = f"{min_hour}시 이후"
+                    start_hour = min_hour
+                elif max_hour <= 14:
+                    time_condition = f"{max_hour}시 이전"
+                    end_hour = max_hour
+                elif len(common_hours) == 13:  # 9~21시 전체
+                    time_condition = "시간 무관"
+                else:
+                    time_condition = f"{min_hour}시~{max_hour}시"
+                    start_hour = min_hour
+                    end_hour = max_hour
+            
+            # 우선순위 계산
+            priority = len(available_users) * 10
+            if len(available_users) == total_users:
+                priority += 100  # 전원 가능 보너스
+            if preferred_hour and common_hours and preferred_hour in common_hours:
+                priority += 20  # 선호 시간대 보너스
+            
+            rec = RecommendedSlot(
+                date=date_str,
+                time_condition=time_condition,
+                start_hour=start_hour,
+                end_hour=end_hour,
+                available_users=[self.user_names.get(uid, uid) for uid in available_users],
+                unavailable_users=[self.user_names.get(uid, uid) for uid in unavailable_users],
+                is_all_available=(len(available_users) == total_users),
+                priority_score=priority
+            )
+            recommendations.append(rec)
+        
+        # 우선순위 내림차순 정렬
+        recommendations.sort(key=lambda x: x.priority_score, reverse=True)
+        
+        return recommendations
+    
+    def recommend_best_dates(self, recommendations: List[RecommendedSlot], max_count: int = 3) -> List[DateRecommendation]:
+        """상위 N개 날짜 추천 + 조건 설명"""
+        results = []
+        
+        for rec in recommendations[:max_count]:
+            # 날짜 포맷팅 (12/17)
+            dt = datetime.strptime(rec.date, "%Y-%m-%d")
+            date_display = f"{dt.month}/{dt.day}"
+            
+            # 가능 인원 표시
+            available_count = len(rec.available_users)
+            
+            if rec.is_all_available:
+                display = f"{date_display} ({rec.time_condition or '시간 무관'}) - 전원 가능 ✅"
+            else:
+                unavailable_str = ", ".join(rec.unavailable_users)
+                display = f"{date_display} ({rec.time_condition or '시간 무관'}) - {available_count}명 가능 ({unavailable_str}님 제외)"
+            
+            results.append(DateRecommendation(
+                date=rec.date,
+                condition=rec.time_condition or "시간 무관",
+                display_text=display,
+                available_count=available_count,
+                unavailable_names=rec.unavailable_users
+            ))
+        
+        return results
     
     async def run_negotiation(self) -> AsyncGenerator[A2AMessage, None]:
         """
@@ -243,6 +439,9 @@ class NegotiationEngine:
         if sender_id != "system" and sender_id in self.agents:
             sender_name = f"{self.agents[sender_id].user_name}의 AI"
         
+        # LLM 응답에서 JSON이 섞여있으면 정리
+        cleaned_message = _clean_llm_message(message)
+        
         msg = A2AMessage(
             id=str(uuid.uuid4()),
             session_id=self.session_id,
@@ -251,7 +450,7 @@ class NegotiationEngine:
             sender_name=sender_name,
             round_number=self.current_round,
             proposal=proposal,
-            message=message,
+            message=cleaned_message,
             timestamp=datetime.now(KST)
         )
         self.messages.append(msg)

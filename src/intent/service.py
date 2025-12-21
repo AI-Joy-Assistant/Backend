@@ -289,11 +289,16 @@ class IntentService:
             "friend_name": friend_name,
             "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
             "date": final_date,
+            "start_date": raw.get("start_date"),
+            "end_date": raw.get("end_date"),
             "time": raw.get("time") or heuristic_result.get("time"),
-            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),  # [FIX] 활동이 너무 길면(문장 등) 휴리스틱 사용
+            "start_time": raw.get("start_time"),
+            "end_time": raw.get("end_time"),
+            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),
             "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
             "has_schedule_request": bool(has_schedule),
+            "missing_fields": raw.get("missing_fields"),
             "raw": {**raw, "heuristic_used": heuristic_result.get("has_schedule_request", False)},
         }
 
