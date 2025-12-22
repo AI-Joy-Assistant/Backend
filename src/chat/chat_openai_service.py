@@ -1,10 +1,12 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List
 from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI
+import os
+import httpx
 
 from config.settings import settings
 
@@ -15,6 +17,45 @@ class OpenAIService:
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
     
+    async def request_chat_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 200) -> str:
+        """Llama 또는 OpenAI 모델을 사용하여 채팅 응답 생성 (통합 메서드)"""
+        # Llama API 우선 사용
+        if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
+            return await self._call_custom_model(messages, temperature, max_tokens)
+        
+        # OpenAI 폴백
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        return response.choices[0].message.content.strip()
+
+    async def _call_custom_model(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 500) -> str:
+        """커스텀 LLM (Llama 등) 호출 - 새 API 스펙"""
+        url = settings.LLM_API_URL or os.getenv("LLM_API_URL")
+        if not url:
+            raise ValueError("LLM_API_URL not set")
+
+        # 새 API 스펙: messages 배열 그대로 전송
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        logger.info(f"[Llama API] 요청 전송: {url}")
+        logger.debug(f"[Llama API] Payload: {len(messages)}개 메시지")
+        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            response_text = data.get("response", "")
+            logger.info(f"[Llama API] 응답 수신: {len(response_text)}자")
+            return response_text
+
     def _get_current_time_info(self) -> str:
         """현재 시간 정보를 문자열로 반환"""
         KST = ZoneInfo("Asia/Seoul")
@@ -120,6 +161,16 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
             messages.append({"role": "user", "content": user_message})
             logger.info(f"[OpenAI] 현재 메시지: {user_message}")
             
+            # Llama API 우선 사용
+            if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
+                ai_response = await self._call_custom_model(messages, temperature=0.7, max_tokens=500)
+                logger.info(f"[Llama API] 응답 생성 완료: {len(ai_response)}자")
+                return {
+                    "status": "success",
+                    "message": ai_response,
+                    "usage": {}
+                }
+
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -162,54 +213,102 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
         try:
             current_time = self._get_current_time_info()
             
+            # 현재 시간 상세 정보 (YYYY-MM-DD 형식 포함)
+            now_dt = datetime.now(ZoneInfo("Asia/Seoul"))
+            today_str = now_dt.strftime("%Y-%m-%d")
+            
             system_prompt = f"""다음 메시지에서 일정 관련 정보를 추출해주세요.
-현재 시간: {current_time}
+현재 시각: {current_time}
+오늘 날짜(기준): {today_str}
 
-**중요: 반드시 유효한 JSON만 반환하세요. 설명이나 추가 텍스트 없이 JSON만 반환하세요.**
+**중요: 반드시 유효한 JSON만 반환하세요.**
 
-JSON 형태로 다음 정보를 반환하세요:
+JSON 반환 형식:
 {{
-    "friend_name": "친구 이름 (1명인 경우)",
-    "friend_names": ["친구1", "친구2"] (여러 명인 경우, friend_name보다 우선),
-    "date": "날짜 (오늘, 내일, 모레, 특정 날짜, 이번주 등)",
-    "time": "시간 (점심, 저녁, 특정 시간) 또는 null (시간 정보가 없을 때)",
-    "end_time": "종료 시간 (있다면) 또는 null",
-    "activity": "활동 내용 (밥, 미팅, 진료 등)",
-    "title": "일정 제목 - 구체적인 장소나 목적을 포함 (예: 병원 방문, 치과 예약, 팀 미팅)",
-    "location": "장소 (있다면)",
-    "has_schedule_request": true 또는 false,
-    "time_specified": true 또는 false (사용자가 시간을 명시했는지 여부)
+    "friend_name": "친구 이름",
+    "friend_names": ["친구1", "친구2"],
+    "date": "텍스트 날짜 (예: 이번주 금요일)",
+    "start_date": "YYYY-MM-DD (범위 시작)",
+    "end_date": "YYYY-MM-DD (범위 종료)",
+    "time": "시간 텍스트 (예: 저녁)",
+    "start_time": "HH:MM (24시간제)",
+    "end_time": "HH:MM (24시간제)",
+    "activity": "활동 내용",
+    "title": "일정 제목",
+    "location": "장소",
+    "has_schedule_request": true/false,
+    "missing_fields": ["date", "time", "location"] (누락된 필수 정보 리스트)
 }}
 
-## 일정 제목(title) 추출 규칙:
-- 장소가 포함된 경우: "병원", "치과", "학교", "회사" 등 → "병원 방문", "치과 진료", "학교 수업" 등
-- 활동이 포함된 경우: "밥", "저녁", "미팅" 등 → "저녁 식사", "점심 약속", "팀 미팅" 등
-- 구체적인 내용 우선: "치과 예약이 있어" → title: "치과 예약"
-- 일반적인 표현: "가야해", "갈거야" → activity로 추론하여 title 생성
+## 1. 날짜 범위 변환 규칙 (오늘: {today_str} 기준)
+- "이번 달": 오늘부터 이번 달 말일까지 (start_date ~ end_date)
+- "다음 주": 다음 주 월요일 ~ 일요일
+- "주말": 이번 주 토요일 ~ 일요일 (이미 지났으면 다음 주 주말)
+- "평일": 월~금
+- "오늘": 오늘 날짜
+- "내일": 오늘 + 1일
 
-## 예시:
-- "내일 병원에 갈거야 일정 등록해줘" → {{"date": "내일", "time": null, "title": "병원 방문", "activity": "병원", "has_schedule_request": true, "time_specified": false}}
-- "2시에 갈거야" (이전 맥락: 병원) → {{"time": "2시", "title": "병원 방문", "has_schedule_request": true, "time_specified": true}}
-- "병원간다니까" → {{"title": "병원 방문", "activity": "병원", "has_schedule_request": true}}
-- "아구만이랑 내일 점심 약속 잡아줘" → {{"friend_name": "아구만", "date": "내일", "time": "점심", "activity": "약속", "title": "점심 약속", "has_schedule_request": true, "time_specified": true}}
-- "민서, 규민이랑 이번주 금요일 저녁 7시에 밥 약속 잡아줘" → {{"friend_names": ["민서", "규민"], "date": "이번주 금요일", "time": "저녁 7시", "activity": "밥", "title": "저녁 식사", "has_schedule_request": true, "time_specified": true}}
-- "내일 치과 예약이 있어 3시에 일정 등록해줘" → {{"date": "내일", "time": "3시", "title": "치과 예약", "has_schedule_request": true, "time_specified": true}}
-- "안녕하세요" → {{"has_schedule_request": false}}
+## 2. 시간 변환 규칙
+- "아침": start_time="09:00", end_time="11:00"
+- "점심": start_time="12:00", end_time="14:00"
+- "저녁": start_time="18:00", end_time="22:00"
+- "오후 3시": start_time="15:00"
+- "오전 10시": start_time="10:00"
+- "오후"만 있으면: start_time="14:00", end_time="18:00"
 
-**반드시 JSON 형식만 반환하세요. 다른 텍스트는 포함하지 마세요.**"""
+## 3. 필수 정보 확인 (Slot Filling)
+- 약속을 잡으려는 의도가 명확한데 정보가 빠진 경우 `missing_fields`에 추가하세요.
+- 단순히 "언제 볼까?" 같이 탐색하는 단계면 `time`, `location`은 missing이 아님.
+- "내일 보자" -> date는 있지만 time, location이 없으므로 missing_fields=["time", "location"] 가능.
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": message}
-                ],
-                max_tokens=200,
-                temperature=0.1
-            )
+## 예시
+- "이번 달 안에 민서랑 밥 먹자" -> 
+  {{
+    "friend_name": "민서", 
+    "date": "이번 달", 
+    "start_date": "{today_str}", 
+    "end_date": "{(now_dt.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1):%Y-%m-%d}", 
+    "missing_fields": ["time", "location"],
+    "title": "민서와 식사", 
+    "has_schedule_request": true
+  }}
+- "내일 오후 5시 강남역" -> 
+  {{ 
+    "date": "내일", "start_date": "{(now_dt + timedelta(days=1)):%Y-%m-%d}", 
+    "time": "오후 5시", "start_time": "17:00", 
+    "location": "강남역", 
+    "missing_fields": [], 
+    "has_schedule_request": true
+  }}
+
+**반드시 JSON 형식만 반환하세요.**"""
+
+            # Llama API 우선 사용
+            if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
+                content = await self._call_custom_model(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message}
+                    ],
+                    temperature=0.1,
+                    max_tokens=200
+                )
+                logger.info(f"[Llama API] 일정 정보 추출 완료")
+            else:
+                # OpenAI 폴백
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": message}
+                    ],
+                    max_tokens=200,
+                    temperature=0.1
+                )
+                content = response.choices[0].message.content
             
             try:
-                content = response.choices[0].message.content.strip()
+                content = content.strip()
                 # JSON 코드 블록 제거 (```json ... ``` 형태)
                 if content.startswith("```"):
                     # 첫 번째 ``` 이후부터 마지막 ``` 이전까지 추출
@@ -230,12 +329,12 @@ JSON 형태로 다음 정보를 반환하세요:
                     result["has_schedule_request"] = bool(result.get("friend_name") or result.get("date") or result.get("time"))
                 return result
             except json.JSONDecodeError as e:
-                logger.warning(f"JSON 파싱 실패, 원본: {response.choices[0].message.content[:100]}")
+                logger.warning(f"JSON 파싱 실패, 원본: {content[:100]}")
                 # JSON 파싱 실패 시 휴리스틱으로 폴백
                 return {
                     "has_schedule_request": False,
                     "error": "JSON 파싱 실패",
-                    "raw_content": response.choices[0].message.content[:200]
+                    "raw_content": content[:200]
                 }
                 
         except Exception as e:
@@ -244,13 +343,66 @@ JSON 형태로 다음 정보를 반환하세요:
                 "has_schedule_request": False,
                 "error": str(e)
             }
+
+    async def generate_slot_filling_question(self, missing_fields: List[str], current_info: Dict[str, Any]) -> str:
+        """누락된 정보에 대해 자연스럽게 되묻는 질문 생성"""
+        try:
+            field_names = {
+                "date": "날짜",
+                "time": "시간",
+                "location": "장소",
+                "friend_name": "만날 친구"
+            }
+            # missing_fields가 None일 경우 대비
+            if not missing_fields:
+                return "일정 정보를 좀 더 알려주시겠어요?"
+
+            missing_korean = [field_names.get(f, f) for f in missing_fields]
+            
+            system_prompt = f"""
+            당신은 사용자의 일정 비서입니다. 
+            사용자가 일정을 잡으려고 하는데 다음 정보가 부족합니다: {', '.join(missing_korean)}
+            
+            현재 파악된 정보:
+            - 날짜: {current_info.get('date') or '미정'}
+            - 시간: {current_info.get('time') or '미정'}
+            - 장소: {current_info.get('location') or '미정'}
+            - 친구: {current_info.get('friend_name') or current_info.get('friend_names') or '미정'}
+            
+            사용자에게 자연스럽게 부족한 정보를 물어보세요.
+            친근하고 도움이 되는 톤으로 말하세요.
+            한 번에 하나씩 물어봐도 되고, 자연스럽다면 묶어서 물어봐도 됩니다.
+            """
+            
+            # Llama API 우선 사용
+            if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
+                return await self._call_custom_model(
+                    [{"role": "system", "content": system_prompt}],
+                    temperature=0.7,
+                    max_tokens=150
+                )
+            
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": system_prompt}],
+                max_tokens=150,
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"슬롯 필링 질문 생성 실패: {e}")
+            # Fallback
+            return f"일정을 잡으려면 {', '.join(missing_korean)} 정보가 더 필요해요. 알려주시겠어요?"
     async def generate_a2a_message(self, agent_name: str, receiver_name: str, context: str, tone: str = "polite") -> str:
         """A2A 에이전트 대화 메시지 생성"""
         try:
             system_prompt = f"""당신은 '{agent_name}'이라는 이름의 AI 비서입니다. 
 상대방('{receiver_name}')의 AI 비서와 대화하며 일정을 조율하고 있습니다.
 
-상황: {context}
+[필수 확인 시스템 팩트]: {context}
+위의 시스템 팩트를 절대적으로 따르세요. 캘린더 상태와 다른 말을 지어내면 안 됩니다.
+
 톤앤매너: {tone} (친절하고 정중하게, 하지만 간결하게)
 
 규칙:
@@ -258,14 +410,51 @@ JSON 형태로 다음 정보를 반환하세요:
 2. 상대방의 이름을 부르지 않아도 됩니다.
 3. 이모지를 적절히 사용하세요 (1~2개).
 4. 문맥에 맞는 자연스러운 한국어로 말하세요.
-5. '내 캘린더 확인 중...' 같은 기계적인 말 대신 '잠시만요, 일정 확인해볼게요!' 같이 대화하듯 말하세요.
+5. ⚠️ 반드시 순한국어만 사용! 일본어(空いている 등), 중국어, 영어 절대 금지!
+6. '내 캘린더 확인 중...' 같은 기계적인 말 대신 '잠시만요, 일정 확인해볼게요!' 같이 대화하듯 말하세요.
+
+⚠️ 절대 규칙:
+- JSON 형식으로 응답하지 마세요!
+- 오직 자연스러운 대화 메시지만 반환하세요.
+- 예시: "좋아요! 그 시간에 뵐게요 😊"
 """
 
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "이 상황에 맞는 한 마디를 해주세요."}
+                {"role": "user", "content": "이 상황에 맞는 자연스러운 한 마디만 해주세요. JSON이 아닌 대화체로 답하세요."}
             ]
             
+            # Llama API 우선 사용
+            if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
+                result = await self._call_custom_model(messages, temperature=0.8, max_tokens=100)
+                result = result.strip()
+                
+                # JSON 응답이 오면 자연스러운 텍스트만 추출
+                if result.startswith("{"):
+                    try:
+                        parsed = json.loads(result)
+                        if isinstance(parsed, dict):
+                            # message 필드 우선
+                            if "message" in parsed and parsed["message"]:
+                                result = parsed["message"]
+                                logger.info(f"[Llama API] JSON.message 추출: {result[:30]}...")
+                            # reason 필드 (message가 없을 때, action이 없을 때만)
+                            elif "reason" in parsed and "action" not in parsed:
+                                result = parsed.get("reason", "")
+                                logger.info(f"[Llama API] JSON.reason 추출: {result[:30]}...")
+                            else:
+                                # JSON 전체인 경우 기본 메시지로 대체
+                                logger.warning(f"[Llama API] JSON 응답 감지, 기본 메시지로 대체: {result[:50]}...")
+                                result = "일정을 확인하고 있어요 😊"
+                    except json.JSONDecodeError:
+                        pass
+                
+                # 따옴표 제거
+                result = result.strip('"').strip("'")
+                logger.info(f"[Llama API] A2A 메시지 생성 완료: {result[:30]}...")
+                return result
+
+            # OpenAI 폴백
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,

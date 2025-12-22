@@ -289,11 +289,16 @@ class IntentService:
             "friend_name": friend_name,
             "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
             "date": final_date,
+            "start_date": raw.get("start_date"),
+            "end_date": raw.get("end_date"),
             "time": raw.get("time") or heuristic_result.get("time"),
-            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),  # [FIX] 활동이 너무 길면(문장 등) 휴리스틱 사용
+            "start_time": raw.get("start_time"),
+            "end_time": raw.get("end_time"),
+            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),
             "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
             "has_schedule_request": bool(has_schedule),
+            "missing_fields": raw.get("missing_fields"),
             "raw": {**raw, "heuristic_used": heuristic_result.get("has_schedule_request", False)},
         }
 
@@ -302,6 +307,49 @@ class IntentService:
         if "내일" in message and "내일" not in (final_result["date"] or ""):
             # 단순 포함 여부만 보면 위험할 수 있으나(내일은 안돼), 현재 이슈 해결을 위해 우선 적용
             final_result["date"] = "내일"
+        
+        # [NEW] 명시적 날짜 오버라이드 휴리스틱
+        # "25일", "12월 25일" 패턴이 원본 메시지에 있으면 LLM의 "내일" 해석을 무시하고 정확한 날짜로 변환
+        explicit_day_match = re.search(r'(\d{1,2})월?\s*(\d{1,2})일', message)
+        if explicit_day_match:
+            from datetime import datetime
+            today = datetime.now()
+            
+            if explicit_day_match.group(1) and '월' in message[explicit_day_match.start():explicit_day_match.end()+1]:
+                # "12월 25일" 패턴
+                month = int(explicit_day_match.group(1))
+                day = int(explicit_day_match.group(2))
+            else:
+                # "25일" 패턴 (월 없음) - 현재 달 또는 다음 달로 가정
+                day = int(explicit_day_match.group(1)) if not explicit_day_match.group(2) else int(explicit_day_match.group(2))
+                # 단일 숫자+일 패턴 재확인
+                single_day_match = re.search(r'(?<!\d)(\d{1,2})일', message)
+                if single_day_match:
+                    day = int(single_day_match.group(1))
+                month = today.month
+                # 오늘보다 이전 날짜면 다음 달로
+                if day < today.day:
+                    month = today.month + 1 if today.month < 12 else 1
+            
+            year = today.year
+            # 12월인데 1월을 말하면 내년
+            if month < today.month:
+                year += 1
+            
+            # 날짜 유효성 확인
+            try:
+                explicit_date = datetime(year, month, day)
+                explicit_date_str = explicit_date.strftime("%Y-%m-%d")
+                
+                # LLM이 "내일"로 잘못 해석했는지 확인
+                llm_date = final_result.get("start_date") or ""
+                if llm_date != explicit_date_str:
+                    logger.info(f"[DATE FIX] 명시적 날짜 감지: '{message}' → {explicit_date_str} (LLM: {llm_date})")
+                    final_result["start_date"] = explicit_date_str
+                    final_result["end_date"] = explicit_date_str
+                    final_result["date"] = f"{month}월 {day}일"
+            except ValueError:
+                pass  # 유효하지 않은 날짜는 무시
 
         logger.info(f"최종 Intent 추출 결과: {final_result}")
         

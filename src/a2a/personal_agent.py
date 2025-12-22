@@ -3,6 +3,7 @@ PersonalAgent - 각 사용자별 독립 AI 에이전트
 """
 import logging
 import json
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -17,6 +18,42 @@ from .a2a_protocol import (
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
+
+# 요일 한글 변환
+WEEKDAY_KR = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+
+def _get_weekday_korean(date_str: str) -> str:
+    """날짜 문자열(YYYY-MM-DD)을 한글 요일로 변환"""
+    try:
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return WEEKDAY_KR[dt.weekday()]
+    except Exception:
+        pass
+    return ""
+
+def _format_date_with_weekday(date_str: str, time_str: str = None) -> str:
+    """날짜를 요일 포함 형식으로 변환 (예: 12월 22일 월요일 오후 1시)"""
+    try:
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            weekday = WEEKDAY_KR[dt.weekday()]
+            date_formatted = f"{dt.month}월 {dt.day}일 {weekday}"
+            
+            if time_str:
+                # 시간 변환 (HH:MM -> 오전/오후 X시)
+                if re.match(r'^\d{1,2}:\d{2}$', time_str):
+                    parts = time_str.split(':')
+                    hour = int(parts[0])
+                    if hour < 12:
+                        time_formatted = f"오전 {hour}시" if hour > 0 else "오전 12시"
+                    else:
+                        time_formatted = f"오후 {hour - 12}시" if hour > 12 else "오후 12시"
+                    return f"{date_formatted} {time_formatted}"
+            return date_formatted
+    except Exception:
+        pass
+    return f"{date_str} {time_str}" if time_str else date_str
 
 
 class PersonalAgent:
@@ -176,11 +213,27 @@ class PersonalAgent:
                     
                     logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! 강제 COUNTER - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
                     
+                    # 정확한 요일 포함 날짜 형식
+                    original_formatted = _format_date_with_weekday(proposal.date, proposal.time)
+                    counter_formatted = _format_date_with_weekday(counter_proposal.date, counter_proposal.time)
+                    
+                    # 메시지만 LLM으로 생성 (팩트 주입 - 정확한 요일 포함)
+                    try:
+                        counter_message = await self.openai.generate_a2a_message(
+                            agent_name=f"{self.user_name}의 비서",
+                            receiver_name=context.get("other_names", "상대방"),
+                            context=f"[상황: 상대방이 '{original_formatted}'에 만나자고 제안함. 하지만 내 캘린더에 그 시간 일정이 있음!] 정중히 거절하고 '{counter_formatted}'은 어떠세요? 라고 질문 형태로 역제안하세요. 예: '그 시간은 일정이 있어서요 😅 {counter_formatted}은 어떠세요?'",
+                            tone="friendly_counter"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
+                        counter_message = f"그 시간은 일정이 있어요 😅 {counter_formatted}은 어떠세요?"
+                    
                     return AgentDecision(
                         action=MessageType.COUNTER,
                         proposal=counter_proposal,
-                        reason="캘린더 충돌",
-                        message=f"그 시간은 일정이 있어요 😅 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
+                        reason="캘린더 충돌 - 팩트 기반 역제안",
+                        message=counter_message
                     )
             
             # 가용 시간이 전혀 없는 경우
@@ -192,102 +245,80 @@ class PersonalAgent:
                     reason="no_availability"
                 )
             
-            # ✅ 가용 시간 내 제안 → GPT로 최종 결정 (대부분 ACCEPT)
-            # 현재 연도 가져오기
-            current_year = now.year
+            # ✅ 혼합 방식: 결정은 코드, 메시지는 LLM
+            # 캘린더 상태가 명확하므로 코드에서 즉시 결정
             
-            # 라운드가 3 이상이면 ACCEPT하도록 강력 유도
-            round_num = context.get('round', 1)
-            accept_instruction = ""
-            if round_num >= 3:
-                accept_instruction = "\n⚠️ 중요: 이미 3라운드 이상 진행되었습니다. 가능하면 반드시 ACCEPT하세요!"
-            elif round_num >= 4:
-                accept_instruction = "\n🚨 경고: 협상이 거의 끝났습니다. 무조건 ACCEPT하세요!"
-            
-            # 가용 시간 슬롯 문자열 생성 (최대 5개)
-            available_slots_str = ""
-            if availability:
-                slot_examples = []
-                for slot in availability[:5]:
-                    slot_examples.append(f"  - {slot.start.strftime('%Y-%m-%d %H:%M')} ~ {slot.end.strftime('%H:%M')}")
-                available_slots_str = "\n".join(slot_examples)
-            
-            # GPT로 결정
-            prompt = f"""당신은 '{self.user_name}'의 AI 비서입니다. 유연하고 협조적인 스타일로 협상합니다.
-
-상대방 제안:
-- 날짜: {proposal.date}
-- 시간: {proposal.time}
-- 장소: {proposal.location or '미정'}
-- 활동: {proposal.activity or '약속'}
-
-나의 상태:
-- 해당 시간 가능 여부: {'✅ 가능' if is_available else '❌ 불가능'}
-- 내 가용 시간 슬롯:
-{available_slots_str if available_slots_str else '  (가용 시간 없음)'}
-
-협상 컨텍스트:
-- 현재 라운드: {round_num}/5
-- 참여자 수: {context.get('participant_count', 2)}명
-{accept_instruction}
-
-⚠️ 중요 규칙:
-1. 해당 시간이 가능하면 반드시 "action": "ACCEPT"를 선택하세요.
-2. 라운드 3 이상에서는 무조건 ACCEPT하세요 (시간 협의보다 약속이 중요).
-3. COUNTER할 경우, 반드시 위의 '내 가용 시간 슬롯'에서 하나를 선택하여 counter_date와 counter_time을 채우세요.
-4. counter_date는 YYYY-MM-DD 형식 (예: {current_year}-12-12), counter_time은 HH:MM 형식 (예: 15:00).
-
-반드시 JSON 형식으로만 응답하세요:
-{{
-    "action": "ACCEPT" 또는 "COUNTER",
-    "reason": "짧은 이유",
-    "message": "상대방에게 보낼 메시지 (이모지 포함, 20자 이내)",
-    "counter_date": "YYYY-MM-DD (COUNTER 시 필수, 위 가용 시간에서 선택)",
-    "counter_time": "HH:MM (COUNTER 시 필수, 위 가용 시간에서 선택)"
-}}"""
-
-            response = await self.openai.client.chat.completions.create(
-                model=self.openai.model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": "제안을 평가하고 결정해주세요."}
-                ],
-                max_completion_tokens=200,
-                temperature=0.7
-            )
-            
-            content = response.choices[0].message.content.strip()
-            # JSON 파싱
-            if content.startswith("```"):
-                lines = content.split("\n")[1:-1]
-                content = "\n".join(lines)
-            
-            result = json.loads(content)
-            
-            action = MessageType.ACCEPT if result["action"] == "ACCEPT" else MessageType.COUNTER
-            counter_proposal = None
-            
-            if action == MessageType.COUNTER:
-                counter_proposal = Proposal(
-                    date=result.get("counter_date", proposal.date),
-                    time=result.get("counter_time", proposal.time),
-                    location=proposal.location,
-                    activity=proposal.activity,
-                    duration_minutes=proposal.duration_minutes
+            if is_available:
+                # ============================================
+                # 🎯 캘린더 가용 → 강제 ACCEPT (LLM 결정 X)
+                # ============================================
+                logger.info(f"[{self.user_name}] ✅ 캘린더 가용! 강제 ACCEPT - {proposal.date} {proposal.time}")
+                
+                # 정확한 요일 포함 날짜 형식
+                formatted_datetime = _format_date_with_weekday(proposal.date, proposal.time)
+                
+                # 메시지만 LLM으로 생성 (팩트 주입 - 정확한 요일 포함)
+                try:
+                    accept_message = await self.openai.generate_a2a_message(
+                        agent_name=f"{self.user_name}의 비서",
+                        receiver_name=context.get("other_names", "상대방"),
+                        context=f"[상황: 상대방이 '{formatted_datetime}'에 만나자고 제안함. 내 캘린더 확인 결과: 그 시간 비어있음!] 흔쾌히 수락하며 '좋아요, {formatted_datetime}에 뵙겠습니다!' 처럼 동의하세요.",
+                        tone="friendly_accept"
+                    )
+                except Exception as e:
+                    logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
+                    accept_message = f"좋아요! {formatted_datetime}에 뵐게요 😊"
+                
+                return AgentDecision(
+                    action=MessageType.ACCEPT,
+                    proposal=proposal,
+                    reason="캘린더 가용 - 팩트 기반 수락",
+                    message=accept_message
                 )
             
-            # ACCEPT 시 정확한 시간을 포함한 메시지 사용 (GPT가 틀린 시간을 말하는 것 방지)
-            if action == MessageType.ACCEPT:
-                accept_message = f"좋습니다! {proposal.date} {proposal.time}에 뵐게요 😊"
             else:
-                accept_message = result.get("message", "확인했어요! 👍")
-            
-            return AgentDecision(
-                action=action,
-                proposal=counter_proposal if action == MessageType.COUNTER else proposal,
-                reason=result.get("reason"),
-                message=accept_message
-            )
+                # ============================================
+                # 🚫 캘린더 충돌 → 강제 COUNTER (LLM 결정 X)
+                # ============================================
+                # 이 케이스는 위에서 이미 처리됨 (lines 163-184)
+                # 여기 도달하면 availability가 비어있는 경우
+                logger.warning(f"[{self.user_name}] 예상치 못한 상태 - is_available=False, availability={len(availability)}")
+                
+                # 첫 번째 가용 슬롯으로 역제안
+                if availability:
+                    best_slot = availability[0]
+                    counter_proposal = Proposal(
+                        date=best_slot.start.strftime("%Y-%m-%d"),
+                        time=best_slot.start.strftime("%H:%M"),
+                        location=proposal.location,
+                        activity=proposal.activity,
+                        duration_minutes=proposal.duration_minutes
+                    )
+                    
+                    # 메시지만 LLM으로 생성 (팩트 주입)
+                    try:
+                        counter_message = await self.openai.generate_a2a_message(
+                            agent_name=f"{self.user_name}의 비서",
+                            receiver_name=context.get("other_names", "상대방"),
+                            context=f"[캘린더 확인 결과: {proposal.date} {proposal.time}은 ❌ 일정 있음] 대신 {counter_proposal.date} {counter_proposal.time}을 제안합니다. 기존 시간이 안 되고 새 시간을 제안하는 메시지를 작성하세요.",
+                            tone="friendly_counter"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
+                        counter_message = f"그 시간은 일정이 있어요 😅 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
+                    
+                    return AgentDecision(
+                        action=MessageType.COUNTER,
+                        proposal=counter_proposal,
+                        reason="캘린더 충돌 - 팩트 기반 역제안",
+                        message=counter_message
+                    )
+                else:
+                    return AgentDecision(
+                        action=MessageType.NEED_HUMAN,
+                        message="가능한 시간을 찾지 못했어요 😅",
+                        reason="no_available_slot"
+                    )
             
         except Exception as e:
             logger.error(f"[{self.user_name}] 제안 평가 실패: {e}")
@@ -372,28 +403,62 @@ class PersonalAgent:
                         )
                         print(f"✅ [DEBUG] [{self.user_name}] 대안 시간 제안: {proposal.date} {proposal.time}")
             
-            # 사용자 지정 시간이 없거나 proposal이 아직 없으면 첫 번째 가용 슬롯 사용
+            # 사용자 지정 시간이 없거나 proposal이 아직 없으면 시간 선호도에 맞는 슬롯 찾기
             if not proposal:
-                first_slot = availability[0]
+                # 시간 선호도가 있으면 해당 시간대 슬롯 우선 탐색
+                if actual_time:
+                    preferred_hour = int(actual_time.split(":")[0]) if ":" in actual_time else 18
+                    
+                    # 선호 시간대(±2시간)에 맞는 슬롯 찾기
+                    matching_slots = []
+                    for slot in availability:
+                        slot_hour = slot.start.hour
+                        if abs(slot_hour - preferred_hour) <= 2:
+                            matching_slots.append(slot)
+                    
+                    if matching_slots:
+                        best_slot = matching_slots[0]
+                        logger.info(f"[{self.user_name}] 시간 선호도 {actual_time}에 맞는 슬롯 발견: {best_slot.start}")
+                    else:
+                        # 선호 시간대에 맞는 슬롯이 없으면 첫 번째 슬롯 사용
+                        best_slot = availability[0]
+                        logger.info(f"[{self.user_name}] 시간 선호도 {actual_time}에 맞는 슬롯 없음, 첫 번째 슬롯 사용: {best_slot.start}")
+                else:
+                    best_slot = availability[0]
+                
                 proposal = Proposal(
-                    date=first_slot.start.strftime("%Y-%m-%d"),
-                    time=first_slot.start.strftime("%H:%M"),
+                    date=best_slot.start.strftime("%Y-%m-%d"),
+                    time=best_slot.start.strftime("%H:%M"),
                     activity=activity,
                     location=location
                 )
             
-            # 메시지 생성 - 시간 변경 여부에 따라 다른 메시지
-            if time_was_changed:
-                # 시간이 변경된 경우 명확히 안내
-                message = f"그 시간은 제 일정이 있어서 {proposal.time}에 제안드려요! 😊"
-            else:
-                # GPT로 메시지 생성 (시간 변경 없음)
-                message = await self.openai.generate_a2a_message(
-                    agent_name=f"{self.user_name}의 비서",
-                    receiver_name=context.get("other_names", "상대방"),
-                    context=f"{proposal.date} {proposal.time}에 {activity or '약속'}을 제안하려고 함",
-                    tone="friendly"
-                )
+            # 메시지 생성 - LLM에 팩트 주입 (정확한 요일 포함)
+            proposal_formatted = _format_date_with_weekday(proposal.date, proposal.time)
+            
+            try:
+                if time_was_changed:
+                    # 시간이 변경된 경우 - 원래 시간은 안 되고 대안 제시
+                    message = await self.openai.generate_a2a_message(
+                        agent_name=f"{self.user_name}의 비서",
+                        receiver_name=context.get("other_names", "상대방"),
+                        context=f"[상황: 원래 요청한 시간은 내 캘린더에 일정이 있음!] '{proposal_formatted}'은 어떠세요? 라고 질문 형태로 제안하세요. 예: '그 시간은 일정이 있어서요, {proposal_formatted}은 어떠세요? 😊'",
+                        tone="friendly_alternative"
+                    )
+                else:
+                    # 시간 변경 없음 - 흔쾌히 초대
+                    message = await self.openai.generate_a2a_message(
+                        agent_name=f"{self.user_name}의 비서",
+                        receiver_name=context.get("other_names", "상대방"),
+                        context=f"[상황: '{proposal_formatted}'에 만남을 제안하려 함. 시간 확인 완료!] '{proposal_formatted}에 {activity or '약속'} 어떠세요?' 처럼 자연스럽게 초대하세요.",
+                        tone="friendly_propose"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
+                if time_was_changed:
+                    message = f"그 시간은 제 일정이 있어서 {proposal_formatted}에 제안드려요! 😊"
+                else:
+                    message = f"{proposal_formatted}에 {activity or '약속'} 어떠세요? 😊"
             
             return AgentDecision(
                 action=MessageType.PROPOSE,
@@ -479,14 +544,19 @@ class PersonalAgent:
         if target_weekday is not None:
             # 요일 발견
             current_weekday = now.weekday()
-            days_ahead = (target_weekday - current_weekday) % 7
             
-            # "다음주 화요일" 등 "다음"이 포함된 경우 7일 추가 (단, 오늘이 그 요일이고 "다음"이 있으면 7일 후)
             if "다음주" in date_str or "다음 주" in date_str:
-                 days_ahead += 7
-            
-            # [FIX] 만약 days_ahead가 0인데(오늘), 현재 시간이 이미 오후 늦게라면(혹은 사용자가 3시에 요청했는데 지금이 4시면) 
-            # 다음주로 넘겨야 할 수도 있지만, 여기서는 날짜만 판단하므로 그대로 둠.
+                # 다음주 X요일 = 다음 주 월요일 + X일
+                days_to_next_monday = (7 - current_weekday) % 7
+                if days_to_next_monday == 0:
+                    days_to_next_monday = 7
+                days_ahead = days_to_next_monday + target_weekday
+            else:
+                # 이번주 X요일
+                days_ahead = (target_weekday - current_weekday) % 7
+                if days_ahead == 0:
+                    # 오늘이 해당 요일이면 그대로 (또는 다음 주로 할 수도 있음)
+                    pass
             
             target_date = (now + timedelta(days=days_ahead)).date()
             return target_date.strftime("%Y-%m-%d")

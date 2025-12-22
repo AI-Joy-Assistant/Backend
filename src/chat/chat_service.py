@@ -196,23 +196,253 @@ class ChatService:
                     current_session = supabase.table("chat_sessions").select("title").eq("id", session_id).single().execute()
                     if current_session.data:
                         current_title = current_session.data.get("title")
-                        logger.error(f"DEBUG: Current Title: {current_title}")
+                        logger.debug(f"DEBUG: Current Title: {current_title}")
                         if current_title: 
                              if current_title.strip() == "새 채팅":
                                 # 메시지가 길면 20자로 자름
                                 new_title = message[:20] + "..." if len(message) > 20 else message
-                                logger.error(f"DEBUG: Updating to new title: {new_title}")
+                                logger.debug(f"DEBUG: Updating to new title: {new_title}")
                                 await ChatRepository.update_session_title(session_id, new_title, user_id)
                              else:
-                                 logger.error(f"DEBUG: Title is not '새 채팅', skipping update. Title is '{current_title}'")
+                                 logger.debug(f"DEBUG: Title is not '새 채팅', skipping update. Title is '{current_title}'")
                         else:
-                             logger.error("DEBUG: Title is empty/None")
+                             logger.debug("DEBUG: Title is empty/None")
                     else:
-                        logger.error("DEBUG: Session not found in DB.")
+                        logger.debug("DEBUG: Session not found in DB.")
                 except Exception as e:
                     logger.error(f"DEBUG: Error updating title: {e}")
 
-            # 2. 의도 파악
+            # 2. [✅ NEW] 시간 응답 처리 (date_selected_mode)
+            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=3, session_id=session_id)
+            
+            date_selected_context = None
+            for log in recent_logs:
+                meta = log.get("metadata") or {}
+                if meta.get("date_selected_mode") and meta.get("selected_date"):
+                    date_selected_context = meta
+                    break
+            
+            if date_selected_context:
+                # 시간 파싱 시도
+                selected_time = None
+                time_condition = date_selected_context.get("time_condition")
+                
+                # "6시", "오후 2시", "18:00" 등 파싱
+                time_match = re.search(r'(\d{1,2})\s*[시:]', message)
+                if time_match:
+                    hour = int(time_match.group(1))
+                    
+                    # 오후/오전 처리
+                    if "오후" in message and hour < 12:
+                        hour += 12
+                    elif "오전" in message and hour == 12:
+                        hour = 0
+                    elif "오전" not in message and "오후" not in message and hour < 7:
+                        # 7시 미만이고 오전/오후 명시 없으면 오후로 추정
+                        hour += 12
+                    
+                    selected_time = f"{hour:02d}:00"
+                    logger.info(f"[Time Selection] 시간 파싱: {message} -> {selected_time}")
+                
+                if selected_time:
+                    hour = int(selected_time.split(":")[0])
+                    
+                    # 시간 조건 검증
+                    is_valid = True
+                    rejection_msg = None
+                    
+                    if time_condition:
+                        cond_match = re.search(r'(\d+)시\s*(이후|이전)', time_condition)
+                        if cond_match:
+                            cond_hour = int(cond_match.group(1))
+                            cond_type = cond_match.group(2)
+                            
+                            if cond_type == "이후" and hour < cond_hour:
+                                is_valid = False
+                                rejection_msg = f"😅 해당 시간은 불가능해요. {time_condition}로 말씀해주세요!"
+                            elif cond_type == "이전" and hour >= cond_hour:
+                                is_valid = False
+                                rejection_msg = f"😅 해당 시간은 불가능해요. {time_condition}로 말씀해주세요!"
+                    
+                    if not is_valid:
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=rejection_msg,
+                            friend_id=None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                            metadata=date_selected_context  # 컨텍스트 유지
+                        )
+                        return {
+                            "status": 200,
+                            "data": {
+                                "user_message": message,
+                                "ai_response": rejection_msg,
+                                "schedule_info": {"invalid_time": True},
+                                "calendar_event": None,
+                                "usage": None
+                            }
+                        }
+                    
+                    # 시간 조건 통과 → A2A 시작
+                    from src.a2a.a2a_service import A2AService
+                    
+                    selected_date = date_selected_context.get("selected_date")
+                    friend_ids = date_selected_context.get("friend_ids", [])
+                    activity = date_selected_context.get("activity")
+                    location = date_selected_context.get("location")
+                    
+                    confirm_msg = f"✅ {selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                    await ChatRepository.create_chat_log(
+                        user_id=user_id,
+                        request_text=None,
+                        response_text=confirm_msg,
+                        friend_id=None,
+                        message_type="ai_response",
+                        session_id=session_id,
+                    )
+                    
+                    # A2A 협상 시작
+                    a2a_result = await A2AService.start_multi_user_session(
+                        initiator_user_id=user_id,
+                        target_user_ids=friend_ids,
+                        summary=activity or "약속",
+                        date=selected_date,
+                        time=selected_time,
+                        location=location,
+                        activity=activity,
+                        duration_minutes=60,
+                        force_new=True,
+                        origin_chat_session_id=session_id
+                    )
+                    
+                    return {
+                        "status": 200,
+                        "data": {
+                            "user_message": message,
+                            "ai_response": confirm_msg,
+                            "schedule_info": {"selected_date": selected_date, "selected_time": selected_time},
+                            "calendar_event": None,
+                            "usage": None,
+                            "a2a_started": True
+                        }
+                    }
+            
+            # 3. 추천 응답 확인 및 날짜 선택 파싱
+            recommendation_context = None
+            for log in recent_logs:
+                meta = log.get("metadata") or {}
+                if meta.get("recommendation_mode") and meta.get("recommendations"):
+                    recommendation_context = meta
+                    break
+            
+            if recommendation_context:
+                # 추천 선택 파싱 시도
+                selected_date = None
+                recommendations = recommendation_context.get("recommendations", [])
+                
+                # "1번", "1", "1️⃣" 형식 파싱
+                number_match = re.search(r'(\d+)\s*번?', message)
+                if number_match:
+                    idx = int(number_match.group(1)) - 1
+                    if 0 <= idx < len(recommendations):
+                        selected_date = recommendations[idx]["date"]
+                        logger.info(f"[Selection] 번호 선택: {idx+1}번 -> {selected_date}")
+                
+                # "12/25", "12월 25일" 형식 파싱
+                if not selected_date:
+                    date_match = re.search(r'(\d{1,2})[/월]?\s*(\d{1,2})', message)
+                    if date_match:
+                        month = int(date_match.group(1))
+                        day = int(date_match.group(2))
+                        # 현재 연도 또는 내년으로 맞추기
+                        year = datetime.now().year
+                        if month < datetime.now().month:
+                            year += 1
+                        target_date = f"{year}-{month:02d}-{day:02d}"
+                        
+                        # 추천 목록에서 찾기
+                        for rec in recommendations:
+                            if rec["date"] == target_date:
+                                selected_date = target_date
+                                logger.info(f"[Selection] 날짜 선택: {target_date}")
+                                break
+                
+                # "22일" (일만 있는 경우) 파싱
+                if not selected_date:
+                    day_only_match = re.search(r'(\d{1,2})일', message)
+                    if day_only_match:
+                        day = int(day_only_match.group(1))
+                        # 추천 목록에서 해당 일자 찾기
+                        for rec in recommendations:
+                            rec_day = int(rec["date"].split("-")[2])
+                            if rec_day == day:
+                                selected_date = rec["date"]
+                                logger.info(f"[Selection] 일자 선택: {day}일 -> {selected_date}")
+                                break
+                
+                if selected_date:
+                    # 날짜 선택됨 → 시간 물어보기 (바로 A2A 시작하지 않음)
+                    friend_ids = recommendation_context.get("friend_ids", [])
+                    friend_names = recommendation_context.get("friend_names", [])
+                    activity = recommendation_context.get("activity")
+                    location = recommendation_context.get("location")
+                    
+                    # 시간 조건 찾기
+                    selected_rec = next((r for r in recommendations if r["date"] == selected_date), None)
+                    time_condition = selected_rec.get("condition") if selected_rec else None
+                    
+                    # 조건에 따른 시간 안내 메시지
+                    if time_condition and "이후" in time_condition:
+                        time_hint = f" ({time_condition}로 가능해요)"
+                    elif time_condition and "이전" in time_condition:
+                        time_hint = f" ({time_condition}로 가능해요)"
+                    else:
+                        time_hint = ""
+                    
+                    # 날짜 포맷팅
+                    from datetime import datetime as dt_cls
+                    try:
+                        dt_obj = dt_cls.strptime(selected_date, "%Y-%m-%d")
+                        weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+                        date_display = f"{dt_obj.month}/{dt_obj.day}({weekdays[dt_obj.weekday()]})"
+                    except:
+                        date_display = selected_date
+                    
+                    time_question = f"📅 {date_display}로 선택하셨습니다!{time_hint}\n원하시는 시간이 있을까요? (예: 6시, 오후 2시)"
+                    
+                    await ChatRepository.create_chat_log(
+                        user_id=user_id,
+                        request_text=None,
+                        response_text=time_question,
+                        friend_id=None,
+                        message_type="ai_response",
+                        session_id=session_id,
+                        metadata={
+                            "date_selected_mode": True,
+                            "selected_date": selected_date,
+                            "time_condition": time_condition,
+                            "friend_ids": friend_ids,
+                            "friend_names": friend_names,
+                            "activity": activity,
+                            "location": location
+                        }
+                    )
+                    
+                    return {
+                        "status": 200,
+                        "data": {
+                            "user_message": message,
+                            "ai_response": time_question,
+                            "schedule_info": {"selected_date": selected_date},
+                            "calendar_event": None,
+                            "usage": None,
+                            "date_selected_mode": True
+                        }
+                    }
+            
+            # 3. 의도 파악 (기존 로직)
             schedule_info = await IntentService.extract_schedule_info(message)
             friend_names_list = schedule_info.get("friend_names")
             friend_name = schedule_info.get("friend_name") if schedule_info.get("has_schedule_request") else None
@@ -226,6 +456,47 @@ class ChatService:
 
             logger.info(f"[CHAT] schedule_info: {schedule_info}")
 
+            # [✅ NEW] Slot Filling Logic
+            # 일정 의도가 확실하지만 필수 정보가 누락된 경우 즉시 되묻기
+            # 단, UI에서 친구를 이미 선택한 경우 friend_name/friend_names는 missing에서 제외
+            missing = list(schedule_info.get("missing_fields") or [])
+            
+            # UI에서 친구 선택했으면 missing_fields에서 제거
+            if selected_friend_ids:
+                missing = [f for f in missing if f not in ["friend_name", "friend_names"]]
+            
+            # activity, title은 없어도 일정 조율 진행 가능하므로 제거
+            missing = [f for f in missing if f not in ["activity", "title"]]
+            
+            # 진짜 중요한 정보(날짜, 시간)만 누락된 경우에만 되묻기
+            if schedule_info.get("has_schedule_request") and missing and not selected_friend_ids:
+                # 친구 선택 없이 일정 요청 + 중요 정보 누락 -> 되묻기
+                logger.info(f"[Slot Filling] 누락된 정보 감지: {missing}")
+                
+                openai_service = OpenAIService()
+                question = await openai_service.generate_slot_filling_question(missing, schedule_info)
+                
+                # 질문 저장 및 반환
+                await ChatRepository.create_chat_log(
+                    user_id=user_id,
+                    request_text=None,
+                    response_text=question,
+                    friend_id=None,
+                    message_type="ai_response",
+                    session_id=session_id,
+                )
+                
+                return {
+                    "status": 200,
+                    "data": {
+                        "user_message": message,
+                        "ai_response": question,
+                        "schedule_info": schedule_info,
+                        "calendar_event": None,
+                        "usage": None
+                    }
+                }
+
             # [✅ 수정 1] 변수 초기화 (500 에러 방지)
             ai_result: Dict[str, Any] = {}
             ai_response: Optional[str] = None
@@ -236,7 +507,7 @@ class ChatService:
             session_ids_for_recoordination: List[str] = []
 
             # --- 재조율 감지 로직 ---
-            from config.database import supabase
+            # from config.database import supabase # [FIX] 상단 global import 사용
             from datetime import timezone
 
             # 이 시간보다 이전에 일어난 '거절'은 이미 해결된(지나간) 일이므로 무시하기 위함입니다.
@@ -461,13 +732,233 @@ class ChatService:
                         response_text=wait_msg,
                         friend_id=first_friend_id if len(friend_ids) == 1 else None,
                         message_type="ai_response",
-                        session_id=session_id,  # ✅ 세션 연결
+                        session_id=session_id,
                     )
                     response_sent_to_db = True
                     ai_response = wait_msg
 
-                    # 요약 메시지
-                    # [FIX] 제목 생성 시 활동(Activity)이 있으면 그것만 제목으로 사용 (깔끔하게)
+                    # [✅ UPDATED] 스마트 추천 vs 바로 협상 결정
+                    # 날짜와 시간이 명확하면 추천 건너뛰고 바로 A2A 협상
+                    has_explicit_date = bool(schedule_info.get("start_date"))
+                    # 시간이 "명시적으로" 언급되었는지 확인 (LLM이 기본값이나 잘못된 값을 넣을 수 있음)
+                    time_text = schedule_info.get("time") or ""
+                    # 실제 시간 표현인지 검증 (시간 키워드가 있어야 함)
+                    time_keywords = ["시", "분", "오전", "오후", "아침", "점심", "저녁", "밤", "새벽"]
+                    is_real_time = any(kw in time_text for kw in time_keywords) if time_text else False
+                    has_explicit_time = bool(schedule_info.get("start_time")) and is_real_time
+                    is_date_range = schedule_info.get("start_date") != schedule_info.get("end_date") if schedule_info.get("end_date") else False
+                    
+                    # 디버그 로깅
+                    logger.info(f"[DEBUG] has_explicit_date={has_explicit_date}, has_explicit_time={has_explicit_time}")
+                    logger.info(f"[DEBUG] time_text='{time_text}', start_time='{schedule_info.get('start_time')}', is_date_range={is_date_range}")
+                    
+                    # 날짜+시간 둘 다 명확하고, 범위가 아닌 특정 날짜면 바로 협상
+                    should_skip_recommendation = has_explicit_date and has_explicit_time and not is_date_range
+                    should_use_recommendation = len(friend_ids) >= 1 and not recoordination_needed and not should_skip_recommendation
+                    
+                    # [✅ NEW] 날짜는 있지만 시간이 없으면 → 시간 물어보기
+                    if has_explicit_date and not has_explicit_time and not is_date_range and len(friend_ids) >= 1:
+                        selected_date = schedule_info.get("start_date")
+                        activity = schedule_info.get("activity")
+                        location = schedule_info.get("location")
+                        
+                        # 날짜 포맷팅
+                        from datetime import datetime as dt_cls
+                        try:
+                            dt_obj = dt_cls.strptime(selected_date, "%Y-%m-%d")
+                            weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+                            date_display = f"{dt_obj.month}/{dt_obj.day}({weekdays[dt_obj.weekday()]})"
+                        except:
+                            date_display = selected_date
+                        
+                        time_question = f"📅 {date_display}로 일정을 잡으려고 해요!\n원하시는 시간이 있을까요? (예: 6시, 오후 2시)"
+                        
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=time_question,
+                            friend_id=None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                            metadata={
+                                "date_selected_mode": True,
+                                "selected_date": selected_date,
+                                "time_condition": None,
+                                "friend_ids": friend_ids,
+                                "friend_names": friend_names,
+                                "activity": activity,
+                                "location": location
+                            }
+                        )
+                        
+                        return {
+                            "status": 200,
+                            "data": {
+                                "user_message": message,
+                                "ai_response": time_question,
+                                "schedule_info": {"selected_date": selected_date},
+                                "calendar_event": None,
+                                "usage": None,
+                                "date_selected_mode": True
+                            }
+                        }
+                    
+                    if should_skip_recommendation and len(friend_ids) >= 1:
+                        # 바로 A2A 협상 시작
+                        from src.a2a.a2a_service import A2AService
+                        
+                        selected_date = schedule_info.get("start_date")
+                        selected_time = schedule_info.get("start_time")
+                        activity = schedule_info.get("activity")
+                        location = schedule_info.get("location")
+                        
+                        confirm_msg = f"✅ {selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=confirm_msg,
+                            friend_id=None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                        )
+                        
+                        # A2A 협상 시작
+                        a2a_result = await A2AService.start_multi_user_session(
+                            initiator_user_id=user_id,
+                            target_user_ids=friend_ids,
+                            summary=activity or "약속",
+                            date=selected_date,
+                            time=selected_time,
+                            location=location,
+                            activity=activity,
+                            duration_minutes=60,
+                            force_new=True,
+                            origin_chat_session_id=session_id
+                        )
+                        
+                        return {
+                            "status": 200,
+                            "data": {
+                                "user_message": message,
+                                "ai_response": confirm_msg,
+                                "schedule_info": {"selected_date": selected_date, "selected_time": selected_time},
+                                "calendar_event": None,
+                                "usage": None,
+                                "a2a_started": True
+                            }
+                        }
+                    
+                    if should_use_recommendation:
+                        # 스마트 추천 모드
+                        from src.a2a.negotiation_engine import NegotiationEngine
+                        
+                        KST = ZoneInfo("Asia/Seoul")
+                        
+                        # 날짜 범위 파싱 (없으면 오늘부터 2주)
+                        try:
+                            if schedule_info.get("start_date"):
+                                start_dt = datetime.strptime(schedule_info.get("start_date"), "%Y-%m-%d").replace(tzinfo=KST)
+                            else:
+                                start_dt = datetime.now(KST)
+                            
+                            if schedule_info.get("end_date"):
+                                end_dt = datetime.strptime(schedule_info.get("end_date"), "%Y-%m-%d").replace(tzinfo=KST)
+                            else:
+                                end_dt = start_dt + timedelta(days=14)
+                        except:
+                            start_dt = datetime.now(KST)
+                            end_dt = start_dt + timedelta(days=14)
+                        
+                        # 시간 선호도
+                        preferred_hour = None
+                        if schedule_info.get("start_time"):
+                            try:
+                                preferred_hour = int(schedule_info.get("start_time").split(":")[0])
+                            except:
+                                pass
+                        
+                        # NegotiationEngine 생성 (실제 협상은 안 함, 분석만)
+                        engine = NegotiationEngine(
+                            session_id="temp_analysis",
+                            initiator_user_id=user_id,
+                            participant_user_ids=friend_ids,
+                            activity=schedule_info.get("activity"),
+                            location=schedule_info.get("location")
+                        )
+                        
+                        # 모든 캘린더 수집
+                        availabilities = await engine.collect_all_availabilities(start_dt, end_dt)
+                        
+                        # 교집합 분석
+                        intersections = engine.find_intersection_slots(availabilities, preferred_hour)
+                        
+                        # 추천 결과 생성
+                        recommendations = engine.recommend_best_dates(intersections, max_count=3)
+                        
+                        if recommendations:
+                            # 추천 메시지 생성
+                            rec_lines = ["📅 일정 조율 결과 추천 날짜입니다:\n"]
+                            for i, rec in enumerate(recommendations):
+                                rec_lines.append(f"{i+1}️⃣ {rec.display_text}")
+                            rec_lines.append("\n번호나 날짜로 선택해주세요!")
+                            
+                            recommendation_msg = "\n".join(rec_lines)
+                            
+                            # 추천 결과 저장 (메타데이터에 저장해서 다음 메시지에서 파싱 가능)
+                            await ChatRepository.create_chat_log(
+                                user_id=user_id,
+                                request_text=None,
+                                response_text=recommendation_msg,
+                                friend_id=None,
+                                message_type="ai_response",
+                                session_id=session_id,
+                                metadata={
+                                    "recommendation_mode": True,
+                                    "recommendations": [
+                                        {"date": r.date, "condition": r.condition} 
+                                        for r in recommendations
+                                    ],
+                                    "friend_ids": friend_ids,
+                                    "friend_names": friend_names,
+                                    "activity": schedule_info.get("activity"),
+                                    "location": schedule_info.get("location")
+                                }
+                            )
+                            
+                            return {
+                                "status": 200,
+                                "data": {
+                                    "user_message": message,
+                                    "ai_response": recommendation_msg,
+                                    "schedule_info": schedule_info,
+                                    "calendar_event": None,
+                                    "usage": None,
+                                    "recommendation_mode": True
+                                }
+                            }
+                        else:
+                            # 가능한 시간이 없음
+                            no_slot_msg = "😅 안타깝게도 해당 기간에 모든 분이 가능한 시간이 없어요. 기간을 넓혀서 다시 찾아볼까요?"
+                            await ChatRepository.create_chat_log(
+                                user_id=user_id,
+                                request_text=None,
+                                response_text=no_slot_msg,
+                                friend_id=None,
+                                message_type="ai_response",
+                                session_id=session_id,
+                            )
+                            return {
+                                "status": 200,
+                                "data": {
+                                    "user_message": message,
+                                    "ai_response": no_slot_msg,
+                                    "schedule_info": schedule_info,
+                                    "calendar_event": None,
+                                    "usage": None
+                                }
+                            }
+
+                    # 요약 메시지 (기존 로직)
                     if schedule_info.get("activity"):
                          summary = schedule_info.get("activity")
                     else:
@@ -534,10 +1025,8 @@ class ChatService:
 
                     if (recoordination_needed or a2a_result.get("status") == 200):
                         if needs_approval and proposal:
-                            date_str = proposal.get("date", "")
-                            time_str = proposal.get("time", "")
-                            confirm_msg = f"✅ 약속 확정: {date_str} {time_str}\n확정하시겠습니까?"
-                            ai_response = confirm_msg
+                            # [FIX] A2A 화면 안내 메시지가 이미 전송되므로 중복 메시지 제거
+                            ai_response = None
                         elif a2a_result.get("needs_recoordination"):
                             # [FIX] a2a_service에서 이미 충돌 알림 메시지를 DB에 저장했으므로
                             # 여기서 또 ai_response로 반환하면 프론트엔드에서 중복으로 표시됨 (폴링 + 로컬 추가)

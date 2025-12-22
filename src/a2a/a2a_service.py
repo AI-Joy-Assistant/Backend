@@ -221,41 +221,10 @@ class A2AService:
                     duration_minutes=duration_minutes
                 )
             
-            # 4) 승인 필요 시 chat_log에 승인 요청 메시지 추가
-            if result.get("needs_approval") and result.get("proposal"):
-                proposal = result.get("proposal")
-                
-                # 시뮬레이션 결과로 나온 시간에 대해 요청자와 타겟 모두 가능한지 최종 체크
-                check_initiator = await A2AService._check_user_availability(
-                    initiator_user_id, proposal["date"], proposal["time"], duration_minutes
-                )
-                check_target = await A2AService._check_user_availability(
-                    target_user_id, proposal["date"], proposal["time"], duration_minutes
-                )
-
-                # 둘 다 가능할 때만 승인 요청 카드 발송
-                if check_initiator["available"] and check_target["available"]:
-                    await A2AService._send_approval_request_to_chat(
-                        user_id=initiator_user_id,
-                        thread_id=None,
-                        session_ids=[session_id],
-                        proposal=proposal,
-                        initiator_name=initiator_name
-                    )
-                    await A2AService._send_approval_request_to_chat(
-                        user_id=target_user_id,
-                        thread_id=None,
-                        session_ids=[session_id],
-                        proposal=proposal,
-                        initiator_name=initiator_name
-                    )
-                else:
-                    # 시간이 그새 찼다면? needs_approval 취소 및 재조율 메시지 (예외 처리)
-                    # 여기서는 간단히 로그만 남기고, 실제로는 재조율 로직을 탈 수 있음
-                    logger.warning("승인 요청 직전 일정이 차버림. 카드 발송 취소.")
-                    result["needs_approval"] = False
-                    # 사용자에게 알림 메시지 추가 로직 필요 시 여기에 구현
+            # 4) 승인 필요 시 처리 (실제 승인 요청은 A2A 화면과 Home 알림으로 전달됨)
+            # [REMOVED] _send_approval_request_to_chat 호출 - 다중 사용자 흐름에서 사용되지 않는 dead code
             
+
             # 5) 세션 상태 업데이트
             if result.get("status") == "pending_approval":
                 # 승인 대기 중이면 in_progress 유지
@@ -1599,7 +1568,7 @@ class A2AService:
                             place_pref.update({
                                 "thread_id": thread_id,
                                 "participants": target_user_ids,
-                                "location": location or place_pref.get("location"),
+                                "location": location,  # [FIX] 기존 세션 location 재사용 안 함
                                 "activity": activity or place_pref.get("activity"),
                                 "date": date or place_pref.get("date"),
                                 "time": time or place_pref.get("time"),
@@ -1714,27 +1683,8 @@ class A2AService:
             # 3) 다중 사용자 일정 조율 시뮬레이션 실행
             # 기존 세션을 재사용하는 경우, 기존 메시지에 이어서 추가
             
-            # [FIX] 재조율 시(reuse_existing=True) location이 None이면 기존 세션의 location 사용
+            # [FIX] 기존 세션에서 location 재사용 안 함 - 현재 요청의 location만 사용
             final_location = location
-            if reuse_existing and not final_location:
-                # 첫 번째 세션의 place_pref에서 location 확인
-                if sessions:
-                    first_session_id = sessions[0]["session_id"]
-                    # DB에서 다시 조회하거나, 위에서 가져온 existing_session_map 활용
-                    # 여기서는 간단히 existing_session_map이 있다고 가정하고 처리 (위에서 조회함)
-                    # 하지만 sessions 리스트는 새로 구성되었으므로, DB 조회가 안전하나 성능상...
-                    # 위 로직에서 place_pref를 업데이트 했으므로, 업데이트된 값을 써야 함.
-                    # sessions 루프에서 place_pref를 저장해두는 것이 좋음.
-                    pass 
-
-            # 위에서 place_pref를 업데이트 할 때 location이 없으면 기존 값을 유지했음.
-            # 따라서 sessions[0]에 해당하는 세션의 place_pref를 조회하면 됨.
-            # 하지만 여기서는 인자로 넘겨야 함.
-            
-            # 간단히: location이 없으면, existing_session_map의 첫 번째 값에서 가져옴
-            if not final_location and existing_session_map:
-                first_existing = list(existing_session_map.values())[0]
-                final_location = first_existing.get("place_pref", {}).get("location")
 
             # True A2A 또는 기존 시뮬레이션 실행
             if use_true_a2a:
@@ -2112,36 +2062,9 @@ class A2AService:
                             else:
                                 logger.info(f"중복된 알림 메시지라 전송 생략: {participant_id} -> {noti_message}")
 
-                    # [기존 코드] 모든 참여자에게 승인 요청 카드(Proposal Card) 전송
-                    for participant_id in all_participant_ids:
-                        # [FIX] 카드 중복 전송 방지
-                        # 최근 메시지가 동일한 proposal card인지 확인
-                        from src.chat.chat_repository import ChatRepository
-                        recent_logs = await ChatRepository.get_recent_chat_logs(participant_id, limit=1)
-                        is_duplicate_card = False
-                        if recent_logs:
-                            last_msg = recent_logs[0]
-                            # 메시지 타입이 'schedule_approval'이고, 메타데이터의 proposal이 동일하면 중복
-                            if last_msg.get('message_type') == 'schedule_approval':
-                                last_meta = last_msg.get('metadata', {})
-                                last_proposal = last_meta.get('proposal', {})
-                                # 날짜, 시간, 참여자가 같으면 동일한 제안으로 간주
-                                if (last_proposal.get('date') == proposal_data.get('date') and
-                                    last_proposal.get('time') == proposal_data.get('time') and
-                                    set(last_proposal.get('participants', [])) == set(proposal_data.get('participants', []))):
-                                    is_duplicate_card = True
-                        
-                        if not is_duplicate_card:
-                            await A2AService._send_approval_request_to_chat(
-                                user_id=participant_id,
-                                thread_id=thread_id,
-                                session_ids=[s["session_id"] for s in sessions],
-                                proposal=proposal_data,
-                                initiator_name=initiator_name
-                            )
-                        else:
-                            logger.info(f"중복된 제안 카드라 전송 생략: {participant_id}")
+                    # [REMOVED] 승인 요청 카드 전송 - dead code (A2A 화면과 Home 알림으로 대체됨)
                     
+
                     return {
                         "messages": messages,
                         "needs_approval": True,
@@ -2972,25 +2895,8 @@ class A2AService:
                             result = supabase.table('a2a_session').update(update_data).eq('id', sid).execute()
                             print(f"✅ Update Result: {result.data if result.data else 'No Data'}")
 
-                            # 6. 채팅방에 알림 메시지 전송 (상대방에겐 새로운 요청처럼 보임)
-                            # _send_approval_request_to_chat 재사용
-                            # proposal 구조 맞춰주기
-                            approval_proposal = {
-                                "date": new_details["proposedDate"],
-                                "time": new_details["proposedTime"],
-                                "location": new_details["location"],
-                                "activity": new_details["purpose"],
-                                "participants": new_details["participants"]
-                            }
-                            
-                            await A2AService._send_approval_request_to_chat(
-                                user_id=new_target, # 상대방에게 전송
-                                thread_id=session.get('thread_id'),
-                                session_ids=[sid],
-                                proposal=approval_proposal,
-                                initiator_name=user_name
-                            )
-                            
+                            # [REMOVED] 채팅방 알림 메시지 전송 - dead code (A2A 화면으로 대체됨)
+
                         except Exception as e:
                             logger.error(f"세션 {session.get('id')} 업데이트 중 오류: {e}")
 
@@ -3143,64 +3049,4 @@ class A2AService:
             logger.error(f"승인 핸들러 오류: {str(e)}", exc_info=True)
             return {"status": 500, "error": str(e)}
 
-
-    @staticmethod
-    async def _send_approval_request_to_chat(
-        user_id: str,
-        thread_id: Optional[str],
-        session_ids: List[str],
-        proposal: Dict[str, Any],
-        initiator_name: str
-    ):
-        """
-        상대방의 Chat 화면에 승인 요청 메시지 전송
-        """
-        try:
-            from src.chat.chat_repository import ChatRepository
-            from src.auth.auth_repository import AuthRepository
-            
-            date_str = proposal.get("date", "")
-            time_str = proposal.get("time", "")
-            location_str = proposal.get("location", "")
-            
-            # 승인 요청을 받는 사용자의 이름 조회
-            user_info = await AuthRepository.find_user_by_id(user_id)
-            user_name = user_info.get("name", "사용자") if user_info else "사용자"
-            
-            # 참여자 목록에서 자신을 제외한 다른 참여자들만 표시
-            all_participants = proposal.get("participants", [])
-            other_participants = [p for p in all_participants if p != user_name]
-            
-            # 다른 참여자가 없으면 initiator_name 사용 (1:1 일정인 경우)
-            if not other_participants:
-                other_participants = [initiator_name] if initiator_name else all_participants
-            
-            participants_str = ", ".join(other_participants) if other_participants else "상대방"
-            
-            approval_message = f"✅ 약속 확정: {date_str} {time_str}"
-            if location_str:
-                approval_message += f" / {location_str}"
-            approval_message += f"\n참여자: {participants_str}\n확정하시겠습니까?"
-            
-            # chat_log에 승인 요청 메시지 저장
-            # friend_id는 initiator_id로 설정 (요청자와의 대화로 표시)
-            # 실제로는 thread_id를 사용하여 모든 참여자와의 대화로 표시해야 함
-            # metadata에 승인에 필요한 정보 저장
-            await ChatRepository.create_chat_log(
-                user_id=user_id,
-                request_text=None,
-                response_text=approval_message,
-                friend_id=None,  # 다중 참여자이므로 None
-                message_type="schedule_approval",
-                metadata={
-                    "proposal": proposal,
-                    "thread_id": thread_id,
-                    "session_ids": session_ids,
-                    "needs_approval": True
-                }
-            )
-            
-            logger.info(f"승인 요청 메시지 전송 완료: user_id={user_id}, thread_id={thread_id}")
-            
-        except Exception as e:
-            logger.error(f"승인 요청 메시지 전송 실패: {str(e)}", exc_info=True)
+    # [REMOVED] _send_approval_request_to_chat 함수 - dead code (A2A 화면과 Home 알림으로 대체됨)
