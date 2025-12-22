@@ -1,0 +1,8 @@
+
+[DEBUG] === Schedule Creation Start ===
+[DEBUG] original_text: 오후 3시
+[DEBUG] initial date_str: 12월29일
+[DEBUG] resolved date_str: 12월29일
+[DEBUG] parsed start_date: 2025-12-29 00:00:00+09:00
+[DEBUG] parsed start_time: 2025-12-29 15:00:00+09:00
+[DEBUG] parsed end_time: 2025-12-29 15:00:00+09:00
