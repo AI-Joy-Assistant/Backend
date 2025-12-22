@@ -307,6 +307,49 @@ class IntentService:
         if "내일" in message and "내일" not in (final_result["date"] or ""):
             # 단순 포함 여부만 보면 위험할 수 있으나(내일은 안돼), 현재 이슈 해결을 위해 우선 적용
             final_result["date"] = "내일"
+        
+        # [NEW] 명시적 날짜 오버라이드 휴리스틱
+        # "25일", "12월 25일" 패턴이 원본 메시지에 있으면 LLM의 "내일" 해석을 무시하고 정확한 날짜로 변환
+        explicit_day_match = re.search(r'(\d{1,2})월?\s*(\d{1,2})일', message)
+        if explicit_day_match:
+            from datetime import datetime
+            today = datetime.now()
+            
+            if explicit_day_match.group(1) and '월' in message[explicit_day_match.start():explicit_day_match.end()+1]:
+                # "12월 25일" 패턴
+                month = int(explicit_day_match.group(1))
+                day = int(explicit_day_match.group(2))
+            else:
+                # "25일" 패턴 (월 없음) - 현재 달 또는 다음 달로 가정
+                day = int(explicit_day_match.group(1)) if not explicit_day_match.group(2) else int(explicit_day_match.group(2))
+                # 단일 숫자+일 패턴 재확인
+                single_day_match = re.search(r'(?<!\d)(\d{1,2})일', message)
+                if single_day_match:
+                    day = int(single_day_match.group(1))
+                month = today.month
+                # 오늘보다 이전 날짜면 다음 달로
+                if day < today.day:
+                    month = today.month + 1 if today.month < 12 else 1
+            
+            year = today.year
+            # 12월인데 1월을 말하면 내년
+            if month < today.month:
+                year += 1
+            
+            # 날짜 유효성 확인
+            try:
+                explicit_date = datetime(year, month, day)
+                explicit_date_str = explicit_date.strftime("%Y-%m-%d")
+                
+                # LLM이 "내일"로 잘못 해석했는지 확인
+                llm_date = final_result.get("start_date") or ""
+                if llm_date != explicit_date_str:
+                    logger.info(f"[DATE FIX] 명시적 날짜 감지: '{message}' → {explicit_date_str} (LLM: {llm_date})")
+                    final_result["start_date"] = explicit_date_str
+                    final_result["end_date"] = explicit_date_str
+                    final_result["date"] = f"{month}월 {day}일"
+            except ValueError:
+                pass  # 유효하지 않은 날짜는 무시
 
         logger.info(f"최종 Intent 추출 결과: {final_result}")
         
