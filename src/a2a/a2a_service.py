@@ -2561,18 +2561,44 @@ class A2AService:
 
             # 모든 참여자 ID 추출 (중복 제거)
             all_participants = set()
+            left_participants_set = set()  # 나간 참여자들
+            
             for session in sessions:
-                # initiator와 target이 동일한 경우(테스트 등)도 고려하여 set으로 처리
-                if session.get("initiator_user_id"): all_participants.add(session.get("initiator_user_id"))
-                if session.get("target_user_id"): all_participants.add(session.get("target_user_id"))
+                # place_pref에서 left_participants 추출
+                place_pref = session.get("place_pref", {})
+                if isinstance(place_pref, str):
+                    import json
+                    try:
+                        place_pref = json.loads(place_pref)
+                    except:
+                        place_pref = {}
+                
+                for lp in place_pref.get("left_participants", []):
+                    left_participants_set.add(str(lp))
+                
+                # participant_user_ids 우선 사용 (다중 참여자 지원)
+                participant_ids = session.get("participant_user_ids") or []
+                if participant_ids:
+                    for pid in participant_ids:
+                        if pid:
+                            all_participants.add(str(pid))
+                else:
+                    # Fallback: initiator + target
+                    if session.get("initiator_user_id"): 
+                        all_participants.add(str(session.get("initiator_user_id")))
+                    if session.get("target_user_id"): 
+                        all_participants.add(str(session.get("target_user_id")))
+            
+            # 나간 참여자 제외
+            active_participants = all_participants - left_participants_set
+            logger.info(f"📌 전체 참여자: {all_participants}, 나간 참여자: {left_participants_set}, 활성 참여자: {active_participants}")
             
             user = await AuthRepository.find_user_by_id(user_id)
             user_name = user.get("name", "사용자") if user else "사용자"
 
-            # [중요] 참여자가 1명뿐인 경우 (자기 자신과의 채팅 등) 즉시 완료 처리 방지를 위한 로직
-            # 실제 배포 환경에서는 최소 2명이어야 의미가 있으나, 테스트 환경을 고려해 로직 유지하되 로그 남김
-            if len(all_participants) < 2:
-                logger.warning(f"참여자가 1명뿐입니다. 즉시 승인될 수 있습니다. Participants: {all_participants}")
+            # [중요] 활성 참여자가 1명뿐인 경우 즉시 완료 처리
+            if len(active_participants) < 2:
+                logger.warning(f"활성 참여자가 1명뿐입니다. 즉시 승인될 수 있습니다. Active: {active_participants}")
 
             if approved:
                 # 2. [수정됨] 승인 현황 재계산 (Source of Truth: 개별 유저의 최신 로그)
@@ -2607,8 +2633,8 @@ class A2AService:
                             real_approved_users.add(str(initiator_id))
                             logger.info(f"📌 원래 요청자(initiator) 자동 승인: {initiator_id}")
             
-                # 다른 참여자들의 승인 상태 확인
-                for pid in all_participants:
+                # 다른 활성 참여자들의 승인 상태 확인 (나간 사람 제외)
+                for pid in active_participants:
                     pid_str = str(pid)
                     if pid_str == str(user_id): continue 
                     if pid_str in real_approved_users: continue 
@@ -2624,14 +2650,14 @@ class A2AService:
                         if str(log_meta.get('approved_by')) == pid_str:
                             real_approved_users.add(pid_str)
             
-                # 전원 승인 여부 판단
-                all_approved = len(real_approved_users) >= len(all_participants)
+                # 전원 승인 여부 판단 (활성 참여자 기준)
+                all_approved = len(real_approved_users) >= len(active_participants)
                 approved_list = list(real_approved_users)
 
-                logger.info(f"승인 현황: {len(real_approved_users)}/{len(all_participants)} - {real_approved_users}")
+                logger.info(f"승인 현황: {len(real_approved_users)}/{len(active_participants)} - {real_approved_users}")
 
-                # 3. 메타데이터 동기화
-                for participant_id in all_participants:
+                # 3. 메타데이터 동기화 (활성 참여자만)
+                for participant_id in active_participants:
                     pid_str = str(participant_id)
                     # 각 참여자의 로그 찾기
                     log_query = supabase.table('chat_log').select('*').eq(
@@ -2683,7 +2709,7 @@ class A2AService:
                 if all_approved:
                     approval_msg_text += " (전원 승인 완료 - 캘린더 등록 중...)"
                 else:
-                    remaining = len(all_participants) - len(real_approved_users)
+                    remaining = len(active_participants) - len(real_approved_users)
                     approval_msg_text += f" (남은 승인: {remaining}명)"
 
                 for session in sessions:
@@ -2719,8 +2745,8 @@ class A2AService:
                     if not start_time:
                          start_time = datetime.now(KST) + timedelta(days=1) # Fallback
 
-                    # 모든 참여자 루프
-                    for pid in all_participants:
+                    # 활성 참여자에게만 캘린더 이벤트 등록
+                    for pid in active_participants:
                         p_name = "알 수 없음"
                         try:
                             # 유저 이름 조회 (에러 메시지용)
@@ -2814,7 +2840,7 @@ class A2AService:
 
                     from src.chat.chat_repository import ChatRepository
 
-                    for pid in all_participants:
+                    for pid in active_participants:
                         await ChatRepository.create_chat_log(
                             user_id=pid,
                             request_text=None,
@@ -2822,6 +2848,11 @@ class A2AService:
                             friend_id=None,
                             message_type="ai_response" # 일반 텍스트 메시지로 저장
                         )
+
+                    # 세션 상태를 completed로 업데이트
+                    for session in sessions:
+                        await A2ARepository.update_session_status(session["id"], "completed")
+                    logger.info(f"✅ 세션 상태 completed로 업데이트 완료")
 
                     return {
                         "status": 200,
@@ -2914,8 +2945,28 @@ class A2AService:
                 
                 reject_msg = f"{user_name}님이 약속에서 나갔습니다."
                 
-                # 1. 각 세션의 참여자 목록(place_pref.participants)에서 거절자 제거
-                for session in sessions:
+                # [중요] thread_id가 있으면 해당 thread의 모든 세션을 업데이트해야 함
+                # 각 참여자가 서로 다른 세션 ID를 보고 있기 때문
+                all_thread_sessions = sessions  # 기본: 전달받은 세션들
+                
+                # thread_id 추출하여 모든 관련 세션 조회
+                first_session = sessions[0] if sessions else {}
+                first_place_pref = first_session.get("place_pref", {})
+                if isinstance(first_place_pref, str):
+                    import json
+                    try:
+                        first_place_pref = json.loads(first_place_pref)
+                    except:
+                        first_place_pref = {}
+                
+                session_thread_id = first_place_pref.get("thread_id")
+                if session_thread_id:
+                    # thread_id로 모든 세션 조회
+                    all_thread_sessions = await A2ARepository.get_thread_sessions(session_thread_id)
+                    logger.info(f"🔴 [거절] thread_id={session_thread_id}, 모든 세션 수: {len(all_thread_sessions)}")
+                
+                # 1. 모든 세션의 참여자 목록(place_pref.participants)에서 거절자 제거
+                for session in all_thread_sessions:
                     try:
                         sid = session["id"]
                         place_pref = session.get("place_pref", {})
@@ -2949,16 +3000,26 @@ class A2AService:
                         
                         logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
                         
-                        # 2. 시스템 메시지: 남은 참여자들에게 거절 알림
-                        await A2ARepository.add_message(
-                            session_id=sid,
-                            sender_user_id=user_id,
-                            receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
-                            message_type="schedule_rejection",
-                            message={"text": reject_msg, "left_user_id": user_id, "left_user_name": user_name}
-                        )
+                        logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
+
                     except Exception as e:
                         logger.error(f"세션 {session.get('id')} 참여자 제거 중 오류: {e}")
+
+                # 2. 시스템 메시지: 남은 참여자들에게 거절 알림 (Loop 밖에서 한 번만 전송)
+                # thread_id로 묶여있으므로 하나의 세션에만 추가하면 됨
+                if all_thread_sessions:
+                    target_session = all_thread_sessions[0]
+                    tsid = target_session["id"]
+                    # 메시지 수신자는 해당 세션의 상대방 (나 자신 제외)
+                    receiver = target_session.get("target_user_id") if target_session.get("target_user_id") != user_id else target_session.get("initiator_user_id")
+                    
+                    await A2ARepository.add_message(
+                        session_id=tsid,
+                        sender_user_id=user_id,
+                        receiver_user_id=receiver,
+                        message_type="schedule_rejection",
+                        message={"text": reject_msg, "left_user_id": user_id, "left_user_name": user_name}
+                    )
 
                 # 3. chat_log 메타데이터 업데이트 (거절 상태 기록)
                 for pid in all_participants:

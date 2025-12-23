@@ -158,9 +158,14 @@ class A2ARepository:
             
             # 모든 세션의 메시지 조회
             all_messages = []
+            seen_ids = set()  # 중복 제거용
             for sid in session_ids:
                 messages = await A2ARepository.get_session_messages(sid)
-                all_messages.extend(messages)
+                for msg in messages:
+                    msg_id = msg.get('id')
+                    if msg_id and msg_id not in seen_ids:
+                        all_messages.append(msg)
+                        seen_ids.add(msg_id)
             
             # 시간순 정렬
             all_messages.sort(key=lambda x: x.get('created_at', ''))

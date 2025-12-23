@@ -81,8 +81,23 @@ async def get_a2a_session(
             raise HTTPException(status_code=403, detail="세션 접근 권한이 없습니다.")
         
         # Details 구성
+        # place_pref에서 thread_id 확인
+        place_pref = session.get("place_pref", {}) or {}
+        import json
+        if isinstance(place_pref, str):
+            try:
+                place_pref = json.loads(place_pref)
+            except:
+                place_pref = {}
+        
+        thread_id = place_pref.get("thread_id")
+        
         # 1. 메시지 조회하여 Process 구성
-        messages = await A2ARepository.get_session_messages(session_id)
+        # thread_id가 있으면 thread의 모든 메시지 조회 (모든 참여자에게 동일한 로그 표시)
+        if thread_id:
+            messages = await A2ARepository.get_thread_messages(thread_id)
+        else:
+            messages = await A2ARepository.get_session_messages(session_id)
         
         # 발신자 이름 조회를 위한 사용자 정보 캐시
         user_names_cache = {}
@@ -241,8 +256,17 @@ async def get_a2a_session(
             
             print(f"🔍 [Attendees] participant_user_ids: {participant_ids}")
             
-            # 3. 모든 참여자 정보 조회
+            # place_pref에서 left_participants 가져오기
+            left_participants = place_pref.get("left_participants", [])
+            print(f"🔍 [Attendees] left_participants: {left_participants}")
+            
+            # 3. 모든 참여자 정보 조회 (나간 사람 제외)
             for participant_id in participant_ids:
+                # 나간 참여자는 제외
+                if participant_id in left_participants:
+                    print(f"🔍 [Attendees] Skipping left participant: {participant_id}")
+                    continue
+                    
                 if participant_id and participant_id not in added_ids:
                     try:
                         participant_info = await AuthRepository.find_user_by_id(participant_id)
@@ -398,11 +422,24 @@ async def get_user_sessions(
         if all_participant_ids:
             user_details_map = await ChatRepository.get_user_details_by_ids(list(all_participant_ids))
 
-        # 4. 이름 매핑 적용
+        # 4. 이름 매핑 적용 (나간 참여자 제외)
         for session in grouped_sessions:
             p_ids = session.get("participant_ids", [])
+            
+            # left_participants 추출
+            place_pref = session.get("place_pref", {}) or {}
+            if isinstance(place_pref, str):
+                try:
+                    place_pref = json.loads(place_pref)
+                except:
+                    place_pref = {}
+            left_participants = place_pref.get("left_participants", [])
+            
             p_names = []
             for pid in p_ids:
+                # 나간 참여자는 제외
+                if pid in left_participants:
+                    continue
                 user_info = user_details_map.get(pid, {})
                 name = user_info.get("name", "알 수 없음")
                 p_names.append(name)

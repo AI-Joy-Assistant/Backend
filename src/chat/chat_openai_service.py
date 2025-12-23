@@ -421,7 +421,7 @@ JSON 반환 형식:
 
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "이 상황에 맞는 자연스러운 한 마디만 해주세요. JSON이 아닌 대화체로 답하세요."}
+                {"role": "user", "content": "위 상황에 맞는 짧은 메시지 한 마디만 작성하세요."}
             ]
             
             # Llama API 우선 사용
@@ -445,7 +445,7 @@ JSON 반환 형식:
                             else:
                                 # JSON 전체인 경우 기본 메시지로 대체
                                 logger.warning(f"[Llama API] JSON 응답 감지, 기본 메시지로 대체: {result[:50]}...")
-                                result = "일정을 확인하고 있어요 😊"
+                                result = "좋아요! 그 시간에 뽙겠습니다 😊"
                     except json.JSONDecodeError:
                         pass
                 
@@ -467,4 +467,4 @@ JSON 반환 형식:
         except Exception as e:
             logger.error(f"A2A 메시지 생성 실패: {str(e)}")
             # 실패 시 기본 메시지 반환 (상황에 따라 다를 수 있지만 안전하게)
-            return "일정을 확인하고 있습니다."
+            return "좋아요! 그 시간에 뽉겠습니다 😊"

@@ -124,11 +124,11 @@ class PersonalAgent:
             while current_date <= end_date:
                 day_start = datetime(
                     current_date.year, current_date.month, current_date.day,
-                    9, 0, 0, tzinfo=KST
+                    0, 0, 0, tzinfo=KST
                 )
                 day_end = datetime(
                     current_date.year, current_date.month, current_date.day,
-                    22, 0, 0, tzinfo=KST
+                    23, 59, 59, tzinfo=KST
                 )
                 
                 # 해당 날짜의 바쁜 시간 필터링
@@ -222,7 +222,7 @@ class PersonalAgent:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"[상황: 상대방이 '{original_formatted}'에 만나자고 제안함. 하지만 내 캘린더에 그 시간 일정이 있음!] 정중히 거절하고 '{counter_formatted}'은 어떠세요? 라고 질문 형태로 역제안하세요. 예: '그 시간은 일정이 있어서요 😅 {counter_formatted}은 어떠세요?'",
+                            context=f"일정 충돌로 대안 시간을 제안합니다. '{counter_formatted}'을 정중하게 제안하는 메시지를 작성하세요.",
                             tone="friendly_counter"
                         )
                     except Exception as e:
@@ -262,7 +262,7 @@ class PersonalAgent:
                     accept_message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"[상황: 상대방이 '{formatted_datetime}'에 만나자고 제안함. 내 캘린더 확인 결과: 그 시간 비어있음!] 흔쾌히 수락하며 '좋아요, {formatted_datetime}에 뵙겠습니다!' 처럼 동의하세요.",
+                        context=f"상대방이 '{formatted_datetime}'에 만나자고 제안했고 캘린더가 비어있어서 수락합니다. '좋아요, {formatted_datetime}에 뵙겠습니다!' 처럼 흔쾌히 동의하는 메시지를 작성하세요.",
                         tone="friendly_accept"
                     )
                 except Exception as e:
@@ -300,7 +300,7 @@ class PersonalAgent:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"[캘린더 확인 결과: {proposal.date} {proposal.time}은 ❌ 일정 있음] 대신 {counter_proposal.date} {counter_proposal.time}을 제안합니다. 기존 시간이 안 되고 새 시간을 제안하는 메시지를 작성하세요.",
+                            context=f"일정 충돌로 대안 시간을 제안합니다. '{counter_proposal.date} {counter_proposal.time}'을 정중하게 제안하는 메시지를 작성하세요.",
                             tone="friendly_counter"
                         )
                     except Exception as e:
@@ -442,7 +442,7 @@ class PersonalAgent:
                     message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"[상황: 원래 요청한 시간은 내 캘린더에 일정이 있음!] '{proposal_formatted}'은 어떠세요? 라고 질문 형태로 제안하세요. 예: '그 시간은 일정이 있어서요, {proposal_formatted}은 어떠세요? 😊'",
+                        context=f"캘린더 충돌로 대체 시간을 제안합니다. '{proposal_formatted}'을 정중하게 제안하는 메시지를 작성하세요.",
                         tone="friendly_alternative"
                     )
                 else:
@@ -450,7 +450,7 @@ class PersonalAgent:
                     message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"[상황: '{proposal_formatted}'에 만남을 제안하려 함. 시간 확인 완료!] '{proposal_formatted}에 {activity or '약속'} 어떠세요?' 처럼 자연스럽게 초대하세요.",
+                        context=f"'{proposal_formatted}'에 {activity or '약속'}을 제안합니다. '어떠세요?' 형식으로 자연스럽게 제안하는 메시지를 작성하세요.",
                         tone="friendly_propose"
                     )
             except Exception as e:
