@@ -55,6 +55,7 @@ def _clean_llm_message(message: str) -> str:
     # JSON 형식인지 확인 (다양한 필드 처리)
     if message.startswith("{"):
         try:
+            # 1. 완벽한 JSON인 경우
             parsed = json.loads(message)
             if isinstance(parsed, dict):
                 # message 필드 우선
@@ -65,16 +66,23 @@ def _clean_llm_message(message: str) -> str:
                         return extracted.strip('"').strip("'")
                 
                 # reason 필드 (message가 없을 때)
-                if "reason" in parsed and "action" not in parsed:
+                if "reason" in parsed:
                     extracted = parsed.get("reason", "")
                     if extracted and not extracted.startswith("{"):
                         logger.info(f"[LLM Cleanup] JSON.reason → Text: {extracted[:30]}...")
                         return extracted.strip('"').strip("'")
-                
-                # JSON 전체가 온 경우 → 기본 메시지로 대체
-                logger.warning(f"[LLM Cleanup] JSON detected, replacing with default: {message[:50]}...")
-                return "일정을 확인하고 있어요 😊"
+            
         except json.JSONDecodeError:
+            # 2. JSON + 텍스트 혼합된 경우 (예: {"action": "accept"} 좋아요!)
+            # 앞부분의 JSON 객체 패턴 제거
+            import re
+            json_match = re.match(r'^(\{.*?\})\s*(.*)', message, re.DOTALL)
+            if json_match:
+                json_part = json_match.group(1)
+                text_part = json_match.group(2)
+                if text_part.strip():
+                    logger.info(f"[LLM Cleanup] Mixed JSON removed. Keeping text: {text_part[:30]}...")
+                    return text_part.strip().strip('"').strip("'")
             pass
     
     # 따옴표 제거
@@ -457,7 +465,7 @@ class NegotiationEngine:
         return msg
     
     async def _save_message(self, msg: A2AMessage):
-        """메시지를 모든 관련 세션 DB에 저장 (다중 세션 지원)"""
+        """메시지를 주 세션 DB에 저장 (중복 방지 - thread 조회로 모든 참여자가 볼 수 있음)"""
         try:
             receiver_id = None
             if msg.sender_agent_id == self.initiator_user_id:
@@ -465,21 +473,19 @@ class NegotiationEngine:
             else:
                 receiver_id = self.initiator_user_id
             
-            # 모든 세션에 메시지 저장 (다중 세션 지원)
-            session_ids_to_save = getattr(self, 'all_session_ids', [self.session_id])
-            
-            for session_id in session_ids_to_save:
-                await A2ARepository.add_message(
-                    session_id=session_id,
-                    sender_user_id=msg.sender_agent_id if msg.sender_agent_id != "system" else self.initiator_user_id,
-                    receiver_user_id=receiver_id,
-                    message_type=msg.type.value.lower(),
-                    message={
-                        "text": msg.message,
-                        "round": msg.round_number,
-                        "proposal": msg.proposal.to_dict() if msg.proposal else None
-                    }
-                )
+            # 주 세션에만 메시지 저장 (중복 방지)
+            # thread_id가 설정되어 있으면 모든 참여자가 get_thread_messages로 조회 가능
+            await A2ARepository.add_message(
+                session_id=self.session_id,  # 주 세션에만 저장
+                sender_user_id=msg.sender_agent_id if msg.sender_agent_id != "system" else self.initiator_user_id,
+                receiver_user_id=receiver_id,
+                message_type=msg.type.value.lower(),
+                message={
+                    "text": msg.message,
+                    "round": msg.round_number,
+                    "proposal": msg.proposal.to_dict() if msg.proposal else None
+                }
+            )
         except Exception as e:
             logger.error(f"메시지 저장 실패: {e}")
     

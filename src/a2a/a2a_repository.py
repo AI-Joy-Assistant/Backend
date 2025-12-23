@@ -158,9 +158,14 @@ class A2ARepository:
             
             # 모든 세션의 메시지 조회
             all_messages = []
+            seen_ids = set()  # 중복 제거용
             for sid in session_ids:
                 messages = await A2ARepository.get_session_messages(sid)
-                all_messages.extend(messages)
+                for msg in messages:
+                    msg_id = msg.get('id')
+                    if msg_id and msg_id not in seen_ids:
+                        all_messages.append(msg)
+                        seen_ids.add(msg_id)
             
             # 시간순 정렬
             all_messages.sort(key=lambda x: x.get('created_at', ''))
@@ -171,13 +176,30 @@ class A2ARepository:
     
     @staticmethod
     async def get_user_sessions(user_id: str) -> List[Dict[str, Any]]:
-        """사용자의 모든 세션 조회"""
+        """사용자의 모든 세션 조회 (나간 세션 제외)"""
         try:
             response = supabase.table('a2a_session').select('*').or_(
                 f'initiator_user_id.eq.{user_id},target_user_id.eq.{user_id}'
             ).order('created_at', desc=True).execute()
             
-            return response.data if response.data else []
+            sessions = response.data if response.data else []
+            
+            # left_participants에 현재 사용자가 있는 세션 필터링
+            filtered_sessions = []
+            for session in sessions:
+                place_pref = session.get('place_pref', {})
+                if isinstance(place_pref, str):
+                    import json
+                    try:
+                        place_pref = json.loads(place_pref)
+                    except:
+                        place_pref = {}
+                
+                left_participants = place_pref.get('left_participants', [])
+                if user_id not in left_participants:
+                    filtered_sessions.append(session)
+            
+            return filtered_sessions
         except Exception as e:
             raise Exception(f"세션 목록 조회 오류: {str(e)}")
     
@@ -205,7 +227,24 @@ class A2ARepository:
             #     for s in response.data:
             #         logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
             
-            return response.data if response.data else []
+            sessions = response.data if response.data else []
+            
+            # left_participants에 현재 사용자가 있는 세션 필터링
+            filtered_sessions = []
+            for session in sessions:
+                place_pref = session.get('place_pref', {})
+                if isinstance(place_pref, str):
+                    import json
+                    try:
+                        place_pref = json.loads(place_pref)
+                    except:
+                        place_pref = {}
+                
+                left_participants = place_pref.get('left_participants', [])
+                if user_id not in left_participants:
+                    filtered_sessions.append(session)
+            
+            return filtered_sessions
         except Exception as e:
             raise Exception(f"pending 요청 조회 오류: {str(e)}")
     
