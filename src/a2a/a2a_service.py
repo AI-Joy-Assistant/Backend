@@ -2906,23 +2906,62 @@ class A2AService:
                         "updated_session_id": sessions[0]["id"] if sessions else None
                     }
 
-                # 거절 로직 (기존 코드 유지)
-                # ... (필요 시 거절 처리 코드도 동일한 동기화 방식 적용 권장)
+                # ========================================================
+                # 거절(방 나가기) 로직 - 세션 삭제 대신 참여자 목록에서 제거
+                # ========================================================
                 
-                # 간단한 거절 처리 예시
-                reject_msg = f"{user_name}님이 일정을 거절했습니다."
-                for session in sessions:
-                     await A2ARepository.add_message(
-                        session_id=session["id"],
-                        sender_user_id=user_id,
-                        receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
-                        message_type="schedule_rejection",
-                        message={"text": reject_msg}
-                    )
                 from src.chat.chat_repository import ChatRepository
+                
+                reject_msg = f"{user_name}님이 약속에서 나갔습니다."
+                
+                # 1. 각 세션의 참여자 목록(place_pref.participants)에서 거절자 제거
+                for session in sessions:
+                    try:
+                        sid = session["id"]
+                        place_pref = session.get("place_pref", {})
+                        if isinstance(place_pref, str):
+                            import json
+                            try:
+                                place_pref = json.loads(place_pref)
+                            except:
+                                place_pref = {}
+                        
+                        # participants 리스트에서 거절자 제거
+                        participants = place_pref.get("participants", [])
+                        if user_id in participants:
+                            participants.remove(user_id)
+                        
+                        # left_participants 리스트에 거절자 추가 (이력 관리)
+                        left_participants = place_pref.get("left_participants", [])
+                        if user_id not in left_participants:
+                            left_participants.append(user_id)
+                        
+                        place_pref["participants"] = participants
+                        place_pref["left_participants"] = left_participants
+                        
+                        logger.info(f"🔴 [거절] 세션 {sid} - left_participants 업데이트: {left_participants}")
+                        
+                        # DB 업데이트 (세션 삭제 X, 참여자 정보만 업데이트)
+                        update_result = supabase.table('a2a_session').update({
+                            "place_pref": place_pref,
+                            "updated_at": dt_datetime.now().isoformat()
+                        }).eq('id', sid).execute()
+                        
+                        logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
+                        
+                        # 2. 시스템 메시지: 남은 참여자들에게 거절 알림
+                        await A2ARepository.add_message(
+                            session_id=sid,
+                            sender_user_id=user_id,
+                            receiver_user_id=session.get("target_user_id") if session.get("target_user_id") != user_id else session.get("initiator_user_id"),
+                            message_type="schedule_rejection",
+                            message={"text": reject_msg, "left_user_id": user_id, "left_user_name": user_name}
+                        )
+                    except Exception as e:
+                        logger.error(f"세션 {session.get('id')} 참여자 제거 중 오류: {e}")
 
+                # 3. chat_log 메타데이터 업데이트 (거절 상태 기록)
                 for pid in all_participants:
-                    # 해당 참여자의 최근 schedule_approval 로그 조회
                     logs_response = supabase.table('chat_log').select('*').eq(
                         'user_id', pid
                     ).eq('message_type', 'schedule_approval').order('created_at', desc=True).limit(1).execute()
@@ -2931,39 +2970,27 @@ class A2AService:
                         target_log = logs_response.data[0]
                         meta = target_log.get('metadata', {})
 
-                        # 같은 일정에 대한 요청인지 확인 (thread_id 일치 여부)
                         if meta.get('thread_id') == thread_id:
+                            left_users = meta.get('left_users', [])
+                            if user_id not in left_users:
+                                left_users.append(user_id)
                             new_meta = {
                                 **meta,
-                                "rejected_by": user_id, # 거절한 사람 기록
-                                "status": "rejected",   # 상태 명시
-                                "needs_approval": False # 더 이상 승인 불가능하게 설정
+                                "left_users": left_users,  # 나간 사람 목록
+                                "last_left_by": user_id,
+                                "last_left_by_name": user_name,
                             }
-                            # 로그 업데이트
                             supabase.table('chat_log').update({'metadata': new_meta}).eq('id', target_log['id']).execute()
                 
+                # 4. 알림 메시지 전송
                 for pid in all_participants:
-                    # 거절한 본인에게는 "거절 처리되었습니다"라고 보내거나 생략 가능
-                    # 여기서는 다른 사람들에게 알리는 것이 중요함
                     if pid == user_id:
-                        # 먼저 거절 확인 메시지
+                        # 거절한 본인에게는 확인 메시지만 (재조율 유도 X)
                         await ChatRepository.create_chat_log(
                             user_id=pid,
                             request_text=None,
-                            response_text=f"일정을 거절했습니다.",
+                            response_text=f"해당 약속에서 나갔습니다.",
                             message_type="system"
-                        )
-                        # [핵심] 재조율 유도 질문
-                        await ChatRepository.create_chat_log(
-                            user_id=pid,
-                            request_text=None,
-                            response_text="재조율을 위해 원하시는 날짜와 시간을 말씀해 주세요.\n(예: 내일 오후 5시)",
-                            message_type="ai_response", # 일반 AI 답변처럼 보이게
-                            metadata={
-                                "needs_recoordination": True,
-                                "thread_id": thread_id,
-                                "session_ids": session_ids
-                            }
                         )
                         continue
 
@@ -2998,18 +3025,17 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
-                    # 상대방(initiator 등)에게 알림 전송
+                    # 상대방에게 알림 전송 (재조율 자동 트리거 X)
                     await ChatRepository.create_chat_log(
                         user_id=pid,
                         request_text=None,
-                        response_text=f"{reject_msg}\n상대방이 새로운 시간을 입력하면 다시 알려드리겠습니다.",
+                        response_text=f"{user_name}님이 약속에서 나갔습니다.",
                         friend_id=target_friend_id,
-                        session_id=target_session_id, # 원본 채팅방 ID 전달
-                        message_type="schedule_rejection", # 이 타입으로 보내야 함
+                        session_id=target_session_id,
+                        message_type="schedule_rejection",
                         metadata={
-                            "needs_recoordination": True, # 재조율 플래그 ON
-                            "rejected_by": user_id,
-                            "rejected_by_name": user_name,
+                            "left_user_id": user_id,
+                            "left_user_name": user_name,
                             "thread_id": thread_id,
                             "session_ids": session_ids,
                             "schedule_date": proposal.get("date"),
@@ -3019,31 +3045,7 @@ class A2AService:
                         }
                     )
                     
-                    # [추가] 거절한 본인(user_id)에게도 시스템 메시지 추가 (내 채팅방에 표시되도록)
-                    # 1:1일 경우 상대방 ID(pid)를 friend_id로 설정
-                    my_friend_id = pid if not target_session_id else None
-                    
-                    await ChatRepository.create_chat_log(
-                        user_id=user_id,
-                        request_text=None,
-                        response_text=f"일정을 거절했습니다.\n재조율이 필요하면 다시 요청해주세요.",
-                        friend_id=my_friend_id,
-                        session_id=target_session_id,
-                        message_type="schedule_rejection",
-                        metadata={
-                            "needs_recoordination": True,
-                            "rejected_by": user_id,
-                            "rejected_by_name": user_name,
-                             "thread_id": thread_id,
-                            "session_ids": session_ids,
-                            "schedule_date": proposal.get("date"),
-                            "schedule_time": proposal.get("time"),
-                            "schedule_activity": proposal.get("activity"),
-                            "schedule_location": proposal.get("location"),
-                        }
-                    )
-                    
-                return {"status": 200, "message": "일정을 거절했습니다."}
+                return {"status": 200, "message": "약속에서 나갔습니다."}
 
         except Exception as e:
             logger.error(f"승인 핸들러 오류: {str(e)}", exc_info=True)

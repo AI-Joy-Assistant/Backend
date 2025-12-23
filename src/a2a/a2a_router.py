@@ -202,7 +202,9 @@ async def get_a2a_session(
             # 재조율 요청 정보
             "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
             "rescheduleRequestedAt": place_pref.get("rescheduleRequestedAt"),  # [NEW] 재조율 요청 시간
-            "rescheduleReason": place_pref.get("rescheduleReason")
+            "rescheduleReason": place_pref.get("rescheduleReason"),
+            # 나간 참여자 정보 (거절한 사람들)
+            "left_participants": place_pref.get("left_participants", [])
         }
         
         # [PERFORMANCE] 캘린더 충돌 확인 비활성화 - Google Calendar API 호출이 ~1초 소요됨
