@@ -1065,8 +1065,97 @@ class ChatService:
             )
             
             if not response_sent_to_db and not recoordination_needed and not friend_ids:
+                # [NEW] 개인 일정인 경우, 날짜+시간이 있으면 먼저 중복 체크
+                early_conflict_warning = None
+                has_date = schedule_info.get("date") or schedule_info.get("start_date")
+                has_time = schedule_info.get("time") or schedule_info.get("start_time")
+                if has_date and has_time and not friend_ids:
+                    try:
+                        from src.auth.auth_service import AuthService
+                        from src.calendar.calender_service import GoogleCalendarService
+                        
+                        # 날짜/시간 파싱 - start_date가 있으면 우선 사용 (더 정확함)
+                        raw_date = schedule_info.get("start_date") or schedule_info.get("date", "")
+                        
+                        # start_date가 YYYY-MM-DD 형식이면 직접 파싱
+                        if raw_date and "-" in raw_date:
+                            try:
+                                from zoneinfo import ZoneInfo
+                                KST = ZoneInfo("Asia/Seoul")
+                                check_date = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=KST)
+                            except:
+                                check_date = ChatService._parse_date(raw_date)
+                        else:
+                            check_date = ChatService._parse_date(raw_date)
+                        
+                        check_start, check_end = ChatService._parse_time(schedule_info.get("time"), check_date, context_text=message)
+                        
+                        # [FIX] start_time/end_time이 있으면 더 정확한 시간 사용
+                        if schedule_info.get("start_time"):
+                            try:
+                                from zoneinfo import ZoneInfo
+                                KST = ZoneInfo("Asia/Seoul")
+                                time_parts = schedule_info["start_time"].split(":")
+                                check_start = check_date.replace(hour=int(time_parts[0]), minute=int(time_parts[1]) if len(time_parts) > 1 else 0, second=0)
+                                
+                                if schedule_info.get("end_time"):
+                                    end_parts = schedule_info["end_time"].split(":")
+                                    check_end = check_date.replace(hour=int(end_parts[0]), minute=int(end_parts[1]) if len(end_parts) > 1 else 0, second=0)
+                                else:
+                                    check_end = check_start + timedelta(hours=1)  # 종료시간 없으면 1시간 후
+                            except Exception as time_err:
+                                logger.warning(f"start_time 파싱 실패: {time_err}")
+                        
+                        logger.info(f"[DATE_DEBUG] IntentService date='{schedule_info.get('date')}', start_date='{schedule_info.get('start_date')}' → parsed={check_date.strftime('%Y-%m-%d') if check_date else 'None'}")
+                        logger.info(f"[TIME_DEBUG] start_time='{schedule_info.get('start_time')}', end_time='{schedule_info.get('end_time')}' → check_start={check_start}, check_end={check_end}")
+                        
+                        if check_start:
+                            user_info = await AuthService.get_user_by_id(user_id)
+                            if user_info and user_info.get("access_token"):
+                                google_calendar = GoogleCalendarService()
+                                day_start = check_start.replace(hour=0, minute=0, second=0)
+                                day_end = check_start.replace(hour=23, minute=59, second=59)
+                                
+                                existing_events = await google_calendar.get_calendar_events(
+                                    access_token=user_info["access_token"],
+                                    time_min=day_start,
+                                    time_max=day_end
+                                )
+                                
+                                # 시간 겹침 확인
+                                logger.info(f"[CONFLICT_CHECK] 요청 날짜: {check_start.strftime('%Y-%m-%d %H:%M')}, 조회 범위: {day_start.strftime('%Y-%m-%d')} ~ {day_end.strftime('%Y-%m-%d')}")
+                                logger.info(f"[CONFLICT_CHECK] 해당 날짜 일정 수: {len(existing_events)}개")
+                                
+                                for evt in existing_events:
+                                    evt_start_str = evt.start.get("dateTime") or evt.start.get("date")
+                                    evt_end_str = evt.end.get("dateTime") or evt.end.get("date")
+                                    logger.info(f"[CONFLICT_CHECK] 발견된 일정: {evt.summary}, 시작: {evt_start_str}, 끝: {evt_end_str}")
+                                    
+                                    if evt_start_str:
+                                        if "T" not in evt_start_str:
+                                            # 종일 이벤트
+                                            user_name = user_info.get("name") or "회원"
+                                            early_conflict_warning = f"⚠️ {user_name}님, 그 날에는 이미 '{evt.summary}' 일정이 있어요. 그래도 등록할까요?"
+                                            break
+                                        else:
+                                            try:
+                                                evt_start_dt = datetime.fromisoformat(evt_start_str.replace("Z", "+00:00"))
+                                                evt_end_dt = datetime.fromisoformat(evt_end_str.replace("Z", "+00:00"))
+                                                if check_start < evt_end_dt and check_end > evt_start_dt:
+                                                    user_name = user_info.get("name") or "회원"
+                                                    early_conflict_warning = f"⚠️ {user_name}님, 그 시간에는 이미 '{evt.summary}' 일정이 있어요. 다른 시간을 선택해 주세요!"
+                                                    break
+                                            except Exception as parse_err:
+                                                logger.warning(f"이벤트 시간 파싱 실패: {parse_err}")
+                    except Exception as e:
+                        logger.warning(f"조기 중복 체크 오류: {e}")
+                
+                # 조기 중복 경고가 있으면 먼저 알려주기
+                if early_conflict_warning:
+                    ai_response = early_conflict_warning
+
                 # Case 1: 현재 메시지에 날짜+시간 정보가 있는 경우
-                if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
+                elif schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
                     # [수정] 단일 시간("3시에")인 경우 바로 등록하지 않고 AI가 종료 시간을 물어보게 함
                     # 범위 표현("부터", "까지", "~")이 있거나, "시작시간만" 같은 강제 키워드가 있을 때만 즉시 등록
                     time_str = schedule_info.get("time", "")
@@ -1076,7 +1165,10 @@ class ChatService:
                     if has_range or force_register:
                         calendar_event = await ChatService._add_schedule_to_calendar(user_id, schedule_info, original_text=message)
                         if calendar_event:
-                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+                            if calendar_event.get("conflict"):
+                                ai_response = f"⚠️ {calendar_event.get('message')}"
+                            else:
+                                ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
                     else:
                         logger.info(f"[CHAT] 단일 시간 감지('{time_str}') -> 즉시 등록 보류하고 AI 질문 유도")
                 
@@ -1125,7 +1217,10 @@ class ChatService:
                             original_text=collected_info.get("title") or collected_info.get("activity") or "일정"
                         )
                         if calendar_event:
-                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+                            if calendar_event.get("conflict"):
+                                ai_response = f"⚠️ {calendar_event.get('message')}"
+                            else:
+                                ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
                     elif collected_info.get("date"):
                         # 시간 없이 날짜만 있는 경우 - 시간 물어보기
                         ai_response = f"날짜는 {collected_info.get('date')}로 확인했어요. 몇 시에 시작하는 일정인가요?"
@@ -1166,7 +1261,10 @@ class ChatService:
                             original_text=message
                         )
                         if calendar_event:
-                            ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
+                            if calendar_event.get("conflict"):
+                                ai_response = f"⚠️ {calendar_event.get('message')}"
+                            else:
+                                ai_response = f"✅ 일정이 추가되었습니다: {calendar_event.get('summary')}"
 
                         # 6. 응답이 없는 경우 (스케줄 정보 부족 또는 일반 대화) -> OpenAI Fallback
             if ai_response is None and not response_sent_to_db:
@@ -1505,6 +1603,68 @@ class ChatService:
             description = "AI Assistant가 추가한 일정"
             if friend_name:
                 description += f"\n친구: {friend_name}"
+
+            # [NEW] 중복 일정 체크 (개인 일정만 - 친구가 없는 경우)
+            if not friend_name:
+                try:
+                    from src.auth.auth_service import AuthService
+                    from src.calendar.calender_service import GoogleCalendarService
+                    
+                    user_info = await AuthService.get_user_by_id(user_id)
+                    if user_info and user_info.get("access_token"):
+                        google_calendar = GoogleCalendarService()
+                        
+                        # [FIX] 해당 날짜의 전체 일정 조회 (종일 이벤트 포함)
+                        day_start = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
+                        day_end = start_time.replace(hour=23, minute=59, second=59, microsecond=0)
+                        
+                        existing_events = await google_calendar.get_calendar_events(
+                            access_token=user_info["access_token"],
+                            time_min=day_start,
+                            time_max=day_end
+                        )
+                        
+                        # 실제로 시간이 겹치는 이벤트만 필터링
+                        conflicting_events = []
+                        for evt in existing_events:
+                            # 이벤트 시작/종료 시간 추출
+                            evt_start_str = evt.start.get("dateTime") or evt.start.get("date")
+                            evt_end_str = evt.end.get("dateTime") or evt.end.get("date")
+                            
+                            if evt_start_str and evt_end_str:
+                                try:
+                                    # 종일 이벤트 (date 형식)
+                                    if "T" not in evt_start_str:
+                                        # 종일 이벤트는 해당 날짜 전체를 차지함 - 무조건 충돌
+                                        conflicting_events.append(evt)
+                                    else:
+                                        # 시간 이벤트 - 실제 겹침 확인
+                                        from datetime import datetime
+                                        evt_start_dt = datetime.fromisoformat(evt_start_str.replace("Z", "+00:00"))
+                                        evt_end_dt = datetime.fromisoformat(evt_end_str.replace("Z", "+00:00"))
+                                        
+                                        # 새 일정과 기존 일정이 겹치는지 확인
+                                        # (새 시작 < 기존 끝) AND (새 끝 > 기존 시작)
+                                        if start_time < evt_end_dt and end_time > evt_start_dt:
+                                            conflicting_events.append(evt)
+                                except Exception as parse_err:
+                                    logger.warning(f"이벤트 시간 파싱 실패: {parse_err}")
+                        
+                        if conflicting_events:
+                            # 중복 일정 발견 - 생성하지 않고 충돌 정보 반환
+                            conflict_names = [e.summary for e in conflicting_events[:3]]
+                            logger.warning(f"중복 일정 발견: {conflict_names}")
+                            
+                            # 사용자 이름 가져오기
+                            user_name = user_info.get("name") or user_info.get("username") or "회원"
+                            
+                            return {
+                                "conflict": True,
+                                "message": f"{user_name}님은 그 시간에 '{', '.join(conflict_names)}' 일정이 있어요. 다른 시간을 선택해 주세요!",
+                                "existing_events": conflict_names
+                            }
+                except Exception as e:
+                    logger.warning(f"중복 체크 중 오류 (무시하고 진행): {e}")
 
             # 캘린더에 일정 추가
             event_data = {
