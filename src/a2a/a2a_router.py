@@ -366,6 +366,11 @@ async def get_user_sessions(
             thread_id = None
             if isinstance(place_pref, dict):
                 thread_id = place_pref.get("thread_id")
+                
+                # [NEW] hidden_by 확인 - 현재 사용자가 숨긴 세션이면 건너뛰기
+                hidden_by = place_pref.get("hidden_by", [])
+                if current_user_id in hidden_by:
+                    continue  # 이 세션은 현재 사용자 목록에서 제외
             
             # thread_id가 없으면 세션 ID를 thread_id로 사용 (1:1 세션)
             if not thread_id:
@@ -444,9 +449,9 @@ async def get_user_sessions(
                 name = user_info.get("name", "알 수 없음")
                 p_names.append(name)
 
-            # 이름이 없으면(탈퇴 등) '대화상대'로 표시
+            # 이름이 없으면(탈퇴 등) '상대 없음'로 표시
             if not p_names:
-                p_names = ["대화상대"]
+                p_names = ["상대 없음"]
 
             session["participant_names"] = p_names
 
@@ -679,34 +684,58 @@ async def get_pending_requests(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"요청 목록 조회 실패: {str(e)}")
 
-@router.delete("/session/{session_id}", summary="A2A 세션 삭제")
+@router.delete("/session/{session_id}", summary="A2A 세션 삭제 (내 화면에서 숨기기)")
 async def delete_a2a_session(
     session_id: str,
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """A2A 세션 삭제 (세션과 관련된 모든 메시지도 함께 삭제)"""
+    """
+    A2A 세션을 내 화면에서 숨깁니다.
+    - 실제로 DB에서 삭제하지 않고, hidden_by에 추가하여 내 화면에서만 숨김 처리
+    - 다른 참여자들은 여전히 해당 세션 및 참여자 목록을 볼 수 있음
+    - left_participants와 다름: hidden_by는 참여자 표시에 영향을 주지 않음
+    """
     try:
+        import json
+        from datetime import datetime
+        from config.database import supabase
+        
         # 세션 존재 및 권한 확인
         session = await A2ARepository.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
         
-        # 권한 확인 (세션 참여자만 삭제 가능)
+        # 권한 확인 (세션 참여자만 숨김 가능)
         if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
-            raise HTTPException(status_code=403, detail="세션 삭제 권한이 없습니다.")
+            raise HTTPException(status_code=403, detail="세션 숨김 권한이 없습니다.")
         
-        # 세션 삭제 (메시지도 함께 삭제)
-        deleted = await A2ARepository.delete_session(session_id)
+        # place_pref에서 hidden_by 업데이트 (left_participants 대신)
+        place_pref = session.get("place_pref", {})
+        if isinstance(place_pref, str):
+            try:
+                place_pref = json.loads(place_pref)
+            except:
+                place_pref = {}
         
-        if deleted:
-            return {"status": "success", "message": "세션이 삭제되었습니다."}
-        else:
-            raise HTTPException(status_code=500, detail="세션 삭제 실패")
+        # hidden_by: 세션을 숨긴 사용자 목록 (참여자 표시에 영향 없음)
+        hidden_by = place_pref.get("hidden_by", [])
+        if current_user_id not in hidden_by:
+            hidden_by.append(current_user_id)
+        
+        place_pref["hidden_by"] = hidden_by
+        
+        # DB 업데이트 (삭제 대신 숨김 처리)
+        supabase.table('a2a_session').update({
+            "place_pref": place_pref,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq('id', session_id).execute()
+        
+        return {"status": "success", "message": "내 화면에서 일정이 숨겨졌습니다."}
             
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"세션 삭제 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"세션 숨김 실패: {str(e)}")
 
 @router.delete("/room/{room_id}", summary="채팅방(스레드 또는 세션) 삭제")
 async def delete_chat_room(
