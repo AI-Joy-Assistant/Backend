@@ -176,7 +176,7 @@ class A2ARepository:
     
     @staticmethod
     async def get_user_sessions(user_id: str) -> List[Dict[str, Any]]:
-        """사용자의 모든 세션 조회 (나간 세션 제외)"""
+        """사용자의 모든 세션 조회 (hidden_by만 필터링, left_participants는 표시에만 영향)"""
         try:
             response = supabase.table('a2a_session').select('*').or_(
                 f'initiator_user_id.eq.{user_id},target_user_id.eq.{user_id}'
@@ -184,7 +184,8 @@ class A2ARepository:
             
             sessions = response.data if response.data else []
             
-            # left_participants에 현재 사용자가 있는 세션 필터링
+            # hidden_by에 현재 사용자가 있는 세션만 필터링 (휴지통 기능)
+            # left_participants는 참여자 표시에만 영향, 세션 목록에서는 계속 표시됨
             filtered_sessions = []
             for session in sessions:
                 place_pref = session.get('place_pref', {})
@@ -195,8 +196,9 @@ class A2ARepository:
                     except:
                         place_pref = {}
                 
-                left_participants = place_pref.get('left_participants', [])
-                if user_id not in left_participants:
+                # hidden_by에 있으면 숨김 (사용자가 직접 숨긴 경우)
+                hidden_by = place_pref.get('hidden_by', [])
+                if user_id not in hidden_by:
                     filtered_sessions.append(session)
             
             return filtered_sessions
@@ -216,11 +218,11 @@ class A2ARepository:
             logger = logging.getLogger(__name__)
             logger.info(f"🔍 Pending 요청 조회 시작 - user_id: {user_id}")
             
-            # initiator 또는 target으로 참여한 pending_approval 세션 조회
+            # initiator 또는 target으로 참여한 세션 조회 (완료/거절된 세션도 포함)
             # Supabase에서 OR 조건 사용: or_(target_user_id.eq.{user_id}, initiator_user_id.eq.{user_id})
             response = supabase.table('a2a_session').select('*').or_(
                 f"target_user_id.eq.{user_id},initiator_user_id.eq.{user_id}"
-            ).in_('status', ['pending', 'pending_approval', 'in_progress']).order('created_at', desc=True).execute()
+            ).in_('status', ['pending', 'pending_approval', 'in_progress', 'completed', 'rejected']).order('created_at', desc=True).execute()
             
             logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
             # if response.data:

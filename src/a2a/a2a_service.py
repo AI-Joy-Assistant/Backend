@@ -665,15 +665,19 @@ class A2AService:
             formatted_end_time = end_time or (formatted_time if formatted_time else "")  # 종료 시간
             
             # place_pref에 재조율 정보 추가 (시간 범위 포함)
+            # [FIX] 재조율 시 기존 승인 목록 및 나간 참여자 초기화
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
-                "rescheduleRequestedAt": datetime.now().isoformat(),  # [NEW] 재조율 요청 시간 저장
+                "rescheduleRequestedAt": datetime.now().isoformat(),
                 "proposedDate": formatted_date,
                 "proposedTime": formatted_time,
                 "proposedEndDate": formatted_end_date,
                 "proposedEndTime": formatted_end_time,
+                "approved_by_list": [user_id],  # 재조율 요청자만 승인 상태로 초기화
+                "left_participants": [],  # [NEW] 나간 참여자 목록도 초기화 (다시 협상 시작)
             }
+            print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants: []")
             
             # 모든 관련 세션에 재조율 정보 업데이트
             for sid in all_session_ids:
@@ -3056,69 +3060,77 @@ class A2AService:
                     all_thread_sessions = await A2ARepository.get_thread_sessions(session_thread_id)
                     logger.info(f"🔴 [거절] thread_id={session_thread_id}, 모든 세션 수: {len(all_thread_sessions)}")
                 
-                # 1. 모든 세션의 참여자 목록(place_pref.participants)에서 거절자 제거
+                # 1. 모든 세션에서 left_participants 수집 후 현재 사용자 추가
+                global_left_participants = set()
+                for session in all_thread_sessions:
+                    sp = session.get("place_pref", {})
+                    if isinstance(sp, str):
+                        try: sp = json.loads(sp)
+                        except: sp = {}
+                    for lp in sp.get("left_participants", []):
+                        global_left_participants.add(str(lp))
+                
+                # 현재 거절자 추가
+                global_left_participants.add(str(user_id))
+                global_left_list = list(global_left_participants)
+                logger.info(f"🔴 [거절] 전체 나간 참여자: {global_left_list}")
+                
+                # 2. 모든 세션에 동기화하여 left_participants 업데이트
                 for session in all_thread_sessions:
                     try:
                         sid = session["id"]
                         place_pref = session.get("place_pref", {})
                         if isinstance(place_pref, str):
-                            import json
-                            try:
-                                place_pref = json.loads(place_pref)
-                            except:
-                                place_pref = {}
+                            try: place_pref = json.loads(place_pref)
+                            except: place_pref = {}
                         
                         # participants 리스트에서 거절자 제거
                         participants = place_pref.get("participants", [])
                         if user_id in participants:
                             participants.remove(user_id)
                         
-                        # left_participants 리스트에 거절자 추가 (이력 관리)
-                        left_participants = place_pref.get("left_participants", [])
-                        if user_id not in left_participants:
-                            left_participants.append(user_id)
-                        
+                        # left_participants 동기화
                         place_pref["participants"] = participants
-                        place_pref["left_participants"] = left_participants
+                        place_pref["left_participants"] = global_left_list
                         
-                        logger.info(f"🔴 [거절] 세션 {sid} - left_participants 업데이트: {left_participants}")
+                        logger.info(f"🔴 [거절] 세션 {sid} - left_participants 동기화: {global_left_list}")
                         
-                        # [NEW] 요청자(initiator)를 제외한 모든 참여자가 나갔는지 확인
-                        # 모두 나갔으면 세션 상태를 'rejected'로 변경
-                        initiator_id = session.get("initiator_user_id")
-                        participant_user_ids = session.get("participant_user_ids", [])
-                        
-                        # 참여자 목록이 없으면 initiator + target으로 구성
-                        if not participant_user_ids:
-                            participant_user_ids = [initiator_id, session.get("target_user_id")]
-                        
-                        # 요청자를 제외한 참여자 수
-                        non_initiator_participants = [p for p in participant_user_ids if str(p) != str(initiator_id)]
-                        
-                        # 요청자를 제외한 모든 참여자가 left_participants에 있는지 확인
-                        all_others_left = all(str(p) in [str(lp) for lp in left_participants] for p in non_initiator_participants)
-                        
-                        new_status = "rejected" if all_others_left and len(non_initiator_participants) > 0 else None
-                        
-                        if new_status:
-                            logger.info(f"🔴 [거절] 모든 참여자가 나감 - 세션 {sid} 상태를 'rejected'로 변경")
-                        
-                        # DB 업데이트 (세션 삭제 X, 참여자 정보만 업데이트)
-                        update_data = {
+                        # DB 업데이트 (아직 status는 변경 안 함)
+                        supabase.table('a2a_session').update({
                             "place_pref": place_pref,
                             "updated_at": dt_datetime.now().isoformat()
-                        }
-                        if new_status:
-                            update_data["status"] = new_status
-                        
-                        update_result = supabase.table('a2a_session').update(update_data).eq('id', sid).execute()
-                        
-                        logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
-                        
-                        logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
+                        }).eq('id', sid).execute()
 
                     except Exception as e:
                         logger.error(f"세션 {session.get('id')} 참여자 제거 중 오류: {e}")
+                
+                # 3. 전원 거절 확인 후 모든 세션 상태 업데이트 (루프 밖에서)
+                first_session = all_thread_sessions[0] if all_thread_sessions else {}
+                first_pref = first_session.get("place_pref", {})
+                if isinstance(first_pref, str):
+                    try: first_pref = json.loads(first_pref)
+                    except: first_pref = {}
+                
+                initiator_id = first_session.get("initiator_user_id")
+                reschedule_requester = first_pref.get("rescheduleRequestedBy")
+                actual_requester = str(reschedule_requester) if reschedule_requester else str(initiator_id)
+                
+                participant_user_ids = first_session.get("participant_user_ids", [])
+                if not participant_user_ids:
+                    participant_user_ids = [initiator_id, first_session.get("target_user_id")]
+                
+                non_requester_participants = [p for p in participant_user_ids if str(p) != actual_requester]
+                all_others_left = all(str(p) in global_left_participants for p in non_requester_participants)
+                
+                logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
+                
+                if all_others_left and len(non_requester_participants) > 0:
+                    logger.info(f"🔴 [거절] 모든 참여자가 나감 - 전체 {len(all_thread_sessions)}개 세션을 'rejected'로 변경")
+                    for session in all_thread_sessions:
+                        supabase.table('a2a_session').update({
+                            "status": "rejected",
+                            "updated_at": dt_datetime.now().isoformat()
+                        }).eq('id', session['id']).execute()
 
                 # 2. 시스템 메시지: 남은 참여자들에게 거절 알림 (Loop 밖에서 한 번만 전송)
                 # thread_id로 묶여있으므로 하나의 세션에만 추가하면 됨
