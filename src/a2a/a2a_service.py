@@ -261,13 +261,14 @@ class A2AService:
     async def approve_session(session_id: str, user_id: str) -> Dict[str, Any]:
         """
         A2A 세션의 일정을 승인합니다.
-        요청 받은 사람(target_user)만 승인하면 바로 확정됩니다.
+        [수정됨] 다인 세션 지원: 모든 참여자가 승인해야 확정됩니다.
         """
         logger.info(f"🔵 approve_session 시작 - session_id: {session_id}, user_id: {user_id}")
         try:
             from zoneinfo import ZoneInfo
             from datetime import timedelta
             import re
+            import json
             
             KST = ZoneInfo("Asia/Seoul")
             
@@ -279,29 +280,101 @@ class A2AService:
             target_user_id = session.get("target_user_id")
             initiator_user_id = session.get("initiator_user_id")
             
-            # place_pref에서 rescheduleRequestedBy 확인
-            place_pref_check = session.get("place_pref", {}) or {}
-            if isinstance(place_pref_check, str):
+            # place_pref 파싱
+            place_pref = session.get("place_pref", {}) or {}
+            if isinstance(place_pref, str):
                 try:
-                    import json
-                    place_pref_check = json.loads(place_pref_check)
+                    place_pref = json.loads(place_pref)
                 except:
-                    place_pref_check = {}
+                    place_pref = {}
             
-            reschedule_requester = place_pref_check.get("rescheduleRequestedBy")
+            # [NEW] 전체 참여자 목록 가져오기 (participant_user_ids 우선)
+            participant_user_ids = session.get("participant_user_ids") or []
+            if not participant_user_ids:
+                # Fallback: initiator + target
+                participant_user_ids = [initiator_user_id, target_user_id]
             
-            # 승인 권한 확인:
-            # - 재조율인 경우: 요청자(rescheduleRequestedBy)가 아닌 사람만 승인 가능
-            # - 일반인 경우: target_user만 승인 가능
-            if reschedule_requester:
-                # 재조율 요청자는 승인할 수 없음 (본인이 요청한 거니까)
-                if str(user_id) == str(reschedule_requester):
-                    return {"status": 403, "error": "본인이 요청한 재조율은 직접 승인할 수 없습니다."}
-                logger.info(f"🔵 재조율 승인 - 요청자: {reschedule_requester}, 승인자: {user_id}")
-            else:
-                # 일반 세션: target_user만 승인 가능
-                if user_id != target_user_id:
-                    return {"status": 403, "error": "요청을 받은 사람만 승인할 수 있습니다."}
+            # 나간 참여자 제외
+            left_participants = set(str(lp) for lp in place_pref.get("left_participants", []))
+            active_participants = [str(pid) for pid in participant_user_ids if str(pid) not in left_participants]
+            
+            logger.info(f"📌 [다인세션] 전체 참여자: {participant_user_ids}, 활성 참여자: {active_participants}")
+            
+            # [FIX] 다인세션의 경우 thread_id로 모든 세션을 조회하여 승인 상태 동기화
+            thread_id = place_pref.get("thread_id")
+            all_thread_sessions = [session]
+            if thread_id:
+                all_thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+                logger.info(f"📌 [다인세션] thread_id={thread_id}, 총 세션 수: {len(all_thread_sessions)}")
+            
+            # 모든 thread 세션에서 approved_by_list 수집 및 현재 사용자 추가
+            approved_by_list = []
+            for ts in all_thread_sessions:
+                ts_pref = ts.get("place_pref", {})
+                if isinstance(ts_pref, str):
+                    try: ts_pref = json.loads(ts_pref)
+                    except: ts_pref = {}
+                for ab in ts_pref.get("approved_by_list", []):
+                    if str(ab) not in approved_by_list:
+                        approved_by_list.append(str(ab))
+            
+            # 현재 사용자 추가
+            if str(user_id) not in approved_by_list:
+                approved_by_list.append(str(user_id))
+            
+            # 요청자(initiator 또는 rescheduleRequestedBy)는 자동 승인
+            reschedule_requester = place_pref.get("rescheduleRequestedBy")
+            auto_approved_user = str(reschedule_requester) if reschedule_requester else str(initiator_user_id)
+            if auto_approved_user and auto_approved_user not in approved_by_list:
+                approved_by_list.append(auto_approved_user)
+            
+            # 승인 현황 확인
+            all_approved = all(str(pid) in approved_by_list for pid in active_participants)
+            remaining_count = len([pid for pid in active_participants if str(pid) not in approved_by_list])
+            
+            logger.info(f"📌 [승인현황] 승인자: {approved_by_list}, 활성참여자: {active_participants}, 전원승인: {all_approved}, 남은수: {remaining_count}")
+            
+            # [FIX] 모든 thread 세션에 approved_by_list 동기화
+            for ts in all_thread_sessions:
+                ts_pref = ts.get("place_pref", {})
+                if isinstance(ts_pref, str):
+                    try: ts_pref = json.loads(ts_pref)
+                    except: ts_pref = {}
+                ts_pref["approved_by_list"] = approved_by_list
+                supabase.table('a2a_session').update({
+                    "place_pref": ts_pref,
+                    "updated_at": datetime.now().isoformat()
+                }).eq('id', ts['id']).execute()
+            
+            # 아직 모든 사람이 승인하지 않았다면 대기 상태 반환
+            if not all_approved:
+                user = await AuthRepository.find_user_by_id(user_id)
+                user_name = user.get("name", "사용자") if user else "사용자"
+                
+                # [NEW] 남은 승인자 이름 조회
+                pending_user_ids = [pid for pid in active_participants if str(pid) not in approved_by_list]
+                pending_names = []
+                for pid in pending_user_ids:
+                    pending_user = await AuthRepository.find_user_by_id(pid)
+                    if pending_user:
+                        pending_names.append(pending_user.get("name", "알 수 없음"))
+                
+                pending_names_str = ", ".join(pending_names) if pending_names else ""
+                
+                return {
+                    "status": 200,
+                    "message": f"{user_name}님이 승인했습니다. {remaining_count}명의 승인을 기다리고 있습니다.",
+                    "all_approved": False,
+                    "approved_count": len(approved_by_list),
+                    "total_count": len(active_participants),
+                    "remaining_count": remaining_count,
+                    "pending_approvers": pending_names  # 프론트엔드가 기대하는 필드명
+                }
+            
+            # ===== 아래부터는 전원 승인 완료 시 실행 =====
+            logger.info(f"📌 [다인세션] 전원 승인 완료! 캘린더 등록 진행")
+            
+            # 승인 권한 확인 (기존 로직 유지하되, 다인세션에서는 참여자면 OK)
             
             # proposal 정보 구성 (여러 소스에서 가져오기)
             details = session.get("details", {}) or {}
@@ -411,10 +484,11 @@ class A2AService:
                 "end_time": end_time.isoformat()
             }
             
-            # 세션 상태를 먼저 completed로 업데이트 (빠른 응답)
-            logger.info(f"🔵 세션 상태 업데이트 시작 - session_id: {session_id}, status: completed")
-            update_result = await A2ARepository.update_session_status(session_id, "completed", confirmed_details)
-            logger.info(f"🔵 세션 상태 업데이트 결과: {update_result}")
+            # 세션 상태를 completed로 업데이트 (모든 thread 세션)
+            logger.info(f"🔵 세션 상태 업데이트 시작 - thread의 모든 세션을 completed로")
+            for ts in all_thread_sessions:
+                await A2ARepository.update_session_status(ts['id'], "completed", confirmed_details)
+            logger.info(f"🔵 세션 상태 업데이트 완료 - {len(all_thread_sessions)}개 세션")
             
             # 캘린더 작업을 백그라운드로 실행 (즉시 응답 후 처리)
             async def sync_calendars_background():
@@ -448,21 +522,33 @@ class A2AService:
                         except Exception as e:
                             logger.error(f"🗑️ 기존 캘린더 일정 삭제 중 오류: {e}")
                     
-                    # 양쪽 캘린더에 새 일정 추가
-                    all_participants = [initiator_user_id, target_user_id]
+                    # [수정됨] 모든 활성 참여자에게 캘린더 일정 추가
+                    # active_participants는 외부 스코프에서 정의됨
                     
-                    for pid in all_participants:
+                    # 참여자 이름 맵 구성
+                    participant_names = {}
+                    for pid in active_participants:
+                        p_user = await AuthRepository.find_user_by_id(pid)
+                        participant_names[str(pid)] = p_user.get("name", "사용자") if p_user else "사용자"
+                    
+                    for pid in active_participants:
                         try:
-                            p_user = await AuthRepository.find_user_by_id(pid)
-                            p_name = p_user.get("name", "사용자") if p_user else "사용자"
+                            p_name = participant_names.get(str(pid), "사용자")
                             
                             access_token = await AuthService.get_valid_access_token_by_user_id(pid)
                             if not access_token:
                                 logger.error(f"유저 {pid} 토큰 갱신 실패")
                                 continue
                             
-                            other_name = target_name if pid == initiator_user_id else initiator_name
-                            evt_summary = f"{other_name}와 {activity}"
+                            # 다른 참여자들 이름 (본인 제외)
+                            other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
+                            if len(other_names) == 1:
+                                evt_summary = f"{other_names[0]}와 {activity}"
+                            elif len(other_names) == 2:
+                                evt_summary = f"{other_names[0]}, {other_names[1]}와 {activity}"
+                            else:
+                                evt_summary = f"{other_names[0]} 외 {len(other_names)-1}명과 {activity}"
+                            
                             if location:
                                 evt_summary += f" ({location})"
                             
@@ -2578,6 +2664,9 @@ class A2AService:
                 
                 # participant_user_ids 우선 사용 (다중 참여자 지원)
                 participant_ids = session.get("participant_user_ids") or []
+                logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - participant_user_ids: {participant_ids}")
+                logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - initiator: {session.get('initiator_user_id')}, target: {session.get('target_user_id')}")
+                
                 if participant_ids:
                     for pid in participant_ids:
                         if pid:
@@ -2591,7 +2680,9 @@ class A2AService:
             
             # 나간 참여자 제외
             active_participants = all_participants - left_participants_set
-            logger.info(f"📌 전체 참여자: {all_participants}, 나간 참여자: {left_participants_set}, 활성 참여자: {active_participants}")
+            logger.info(f"📌 전체 참여자({len(all_participants)}): {all_participants}")
+            logger.info(f"📌 나간 참여자({len(left_participants_set)}): {left_participants_set}")
+            logger.info(f"📌 활성 참여자({len(active_participants)}): {active_participants}")
             
             user = await AuthRepository.find_user_by_id(user_id)
             user_name = user.get("name", "사용자") if user else "사용자"
@@ -2992,11 +3083,35 @@ class A2AService:
                         
                         logger.info(f"🔴 [거절] 세션 {sid} - left_participants 업데이트: {left_participants}")
                         
+                        # [NEW] 요청자(initiator)를 제외한 모든 참여자가 나갔는지 확인
+                        # 모두 나갔으면 세션 상태를 'rejected'로 변경
+                        initiator_id = session.get("initiator_user_id")
+                        participant_user_ids = session.get("participant_user_ids", [])
+                        
+                        # 참여자 목록이 없으면 initiator + target으로 구성
+                        if not participant_user_ids:
+                            participant_user_ids = [initiator_id, session.get("target_user_id")]
+                        
+                        # 요청자를 제외한 참여자 수
+                        non_initiator_participants = [p for p in participant_user_ids if str(p) != str(initiator_id)]
+                        
+                        # 요청자를 제외한 모든 참여자가 left_participants에 있는지 확인
+                        all_others_left = all(str(p) in [str(lp) for lp in left_participants] for p in non_initiator_participants)
+                        
+                        new_status = "rejected" if all_others_left and len(non_initiator_participants) > 0 else None
+                        
+                        if new_status:
+                            logger.info(f"🔴 [거절] 모든 참여자가 나감 - 세션 {sid} 상태를 'rejected'로 변경")
+                        
                         # DB 업데이트 (세션 삭제 X, 참여자 정보만 업데이트)
-                        update_result = supabase.table('a2a_session').update({
+                        update_data = {
                             "place_pref": place_pref,
                             "updated_at": dt_datetime.now().isoformat()
-                        }).eq('id', sid).execute()
+                        }
+                        if new_status:
+                            update_data["status"] = new_status
+                        
+                        update_result = supabase.table('a2a_session').update(update_data).eq('id', sid).execute()
                         
                         logger.info(f"🔴 [거절] DB 업데이트 결과: {update_result.data}")
                         
