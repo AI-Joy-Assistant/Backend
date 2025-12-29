@@ -620,13 +620,12 @@ class A2AService:
                 message=reschedule_message
             )
             
-            # 4. 참여자 정보 수집 (place_pref에는 'participants' 키로 저장됨)
-            participant_user_ids = (
-                place_pref.get("participants") or  # place_pref에서는 'participants' 키 사용
-                place_pref.get("participant_user_ids") or 
-                session.get("participant_user_ids") or
-                []
-            )
+            # 4. 참여자 정보 수집 (UUID만 사용!)
+            # ⚠️ place_pref["participants"]에는 이름이 저장되어 있으므로 사용하지 않음
+            # 오직 session["participant_user_ids"]만 사용 (UUID 저장됨)
+            participant_user_ids = session.get("participant_user_ids") or []
+            
+            # participant_user_ids가 비어있으면 target_user_id로 fallback
             if not participant_user_ids:
                 participant_user_ids = [target_user_id] if target_user_id else []
             

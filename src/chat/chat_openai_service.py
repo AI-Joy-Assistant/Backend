@@ -225,7 +225,7 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
 
 JSON 반환 형식:
 {{
-    "friend_name": "친구 이름",
+    "friend_name": "친구 이름 (⚠️ 언급 없으면 반드시 null!)",
     "friend_names": ["친구1", "친구2"],
     "date": "텍스트 날짜 (예: 이번주 금요일)",
     "start_date": "YYYY-MM-DD (범위 시작)",
@@ -239,6 +239,12 @@ JSON 반환 형식:
     "has_schedule_request": true/false,
     "missing_fields": ["date", "time", "location"] (누락된 필수 정보 리스트)
 }}
+
+## ⚠️ 0. 가장 중요한 규칙: 정보를 만들어내지 마세요!
+- **사용자가 친구 이름을 명시적으로 말하지 않았다면 friend_name은 반드시 null이어야 합니다!**
+- "민서", "규민", "지혜" 등 직접 언급되지 않은 이름을 지어내면 안 됩니다.
+- 예시: "내일 한시에 티켓팅 예약하기 일정 등록해줘" → friend_name: null (친구 언급 없음!)
+- 예시: "민서랑 내일 밥 먹자" → friend_name: "민서" (친구 언급됨)
 
 ## 1. 날짜 범위 변환 규칙 (오늘: {today_str} 기준)
 - "이번 달": 오늘부터 이번 달 말일까지 (start_date ~ end_date)
@@ -274,10 +280,19 @@ JSON 반환 형식:
   }}
 - "내일 오후 5시 강남역" -> 
   {{ 
+    "friend_name": null,
     "date": "내일", "start_date": "{(now_dt + timedelta(days=1)):%Y-%m-%d}", 
     "time": "오후 5시", "start_time": "17:00", 
     "location": "강남역", 
     "missing_fields": [], 
+    "has_schedule_request": true
+  }}
+- "내일 한시에 티켓팅 예약하기 일정 등록해줘" ->
+  {{
+    "friend_name": null,
+    "date": "내일", "start_date": "{(now_dt + timedelta(days=1)):%Y-%m-%d}",
+    "time": "한시", "start_time": "13:00",
+    "title": "티켓팅 예약하기",
     "has_schedule_request": true
   }}
 
