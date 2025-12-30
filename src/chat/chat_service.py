@@ -10,11 +10,27 @@ from datetime import datetime, timedelta
 import re
 from src.intent.service import IntentService
 from config.database import supabase
+from src.websocket.websocket_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
 
 class ChatService:
+    
+    @staticmethod
+    async def send_ws_notification(user_id: str, notification_type: str, data: dict):
+        """WebSocket으로 실시간 알림 전송"""
+        try:
+            message = {
+                "type": notification_type,
+                "data": data,
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+            }
+            await ws_manager.send_personal_message(message, user_id)
+            logger.info(f"[WS] 알림 전송: {user_id} - {notification_type}")
+        except Exception as e:
+            logger.warning(f"[WS] 알림 전송 실패: {e}")
+
 
     @staticmethod
     async def get_chat_rooms(user_id: str) -> Dict[str, Any]:
@@ -1065,97 +1081,8 @@ class ChatService:
             )
             
             if not response_sent_to_db and not recoordination_needed and not friend_ids:
-                # [NEW] 개인 일정인 경우, 날짜+시간이 있으면 먼저 중복 체크
-                early_conflict_warning = None
-                has_date = schedule_info.get("date") or schedule_info.get("start_date")
-                has_time = schedule_info.get("time") or schedule_info.get("start_time")
-                if has_date and has_time and not friend_ids:
-                    try:
-                        from src.auth.auth_service import AuthService
-                        from src.calendar.calender_service import GoogleCalendarService
-                        
-                        # 날짜/시간 파싱 - start_date가 있으면 우선 사용 (더 정확함)
-                        raw_date = schedule_info.get("start_date") or schedule_info.get("date", "")
-                        
-                        # start_date가 YYYY-MM-DD 형식이면 직접 파싱
-                        if raw_date and "-" in raw_date:
-                            try:
-                                from zoneinfo import ZoneInfo
-                                KST = ZoneInfo("Asia/Seoul")
-                                check_date = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=KST)
-                            except:
-                                check_date = ChatService._parse_date(raw_date)
-                        else:
-                            check_date = ChatService._parse_date(raw_date)
-                        
-                        check_start, check_end = ChatService._parse_time(schedule_info.get("time"), check_date, context_text=message)
-                        
-                        # [FIX] start_time/end_time이 있으면 더 정확한 시간 사용
-                        if schedule_info.get("start_time"):
-                            try:
-                                from zoneinfo import ZoneInfo
-                                KST = ZoneInfo("Asia/Seoul")
-                                time_parts = schedule_info["start_time"].split(":")
-                                check_start = check_date.replace(hour=int(time_parts[0]), minute=int(time_parts[1]) if len(time_parts) > 1 else 0, second=0)
-                                
-                                if schedule_info.get("end_time"):
-                                    end_parts = schedule_info["end_time"].split(":")
-                                    check_end = check_date.replace(hour=int(end_parts[0]), minute=int(end_parts[1]) if len(end_parts) > 1 else 0, second=0)
-                                else:
-                                    check_end = check_start + timedelta(hours=1)  # 종료시간 없으면 1시간 후
-                            except Exception as time_err:
-                                logger.warning(f"start_time 파싱 실패: {time_err}")
-                        
-                        logger.info(f"[DATE_DEBUG] IntentService date='{schedule_info.get('date')}', start_date='{schedule_info.get('start_date')}' → parsed={check_date.strftime('%Y-%m-%d') if check_date else 'None'}")
-                        logger.info(f"[TIME_DEBUG] start_time='{schedule_info.get('start_time')}', end_time='{schedule_info.get('end_time')}' → check_start={check_start}, check_end={check_end}")
-                        
-                        if check_start:
-                            user_info = await AuthService.get_user_by_id(user_id)
-                            if user_info and user_info.get("access_token"):
-                                google_calendar = GoogleCalendarService()
-                                day_start = check_start.replace(hour=0, minute=0, second=0)
-                                day_end = check_start.replace(hour=23, minute=59, second=59)
-                                
-                                existing_events = await google_calendar.get_calendar_events(
-                                    access_token=user_info["access_token"],
-                                    time_min=day_start,
-                                    time_max=day_end
-                                )
-                                
-                                # 시간 겹침 확인
-                                logger.info(f"[CONFLICT_CHECK] 요청 날짜: {check_start.strftime('%Y-%m-%d %H:%M')}, 조회 범위: {day_start.strftime('%Y-%m-%d')} ~ {day_end.strftime('%Y-%m-%d')}")
-                                logger.info(f"[CONFLICT_CHECK] 해당 날짜 일정 수: {len(existing_events)}개")
-                                
-                                for evt in existing_events:
-                                    evt_start_str = evt.start.get("dateTime") or evt.start.get("date")
-                                    evt_end_str = evt.end.get("dateTime") or evt.end.get("date")
-                                    logger.info(f"[CONFLICT_CHECK] 발견된 일정: {evt.summary}, 시작: {evt_start_str}, 끝: {evt_end_str}")
-                                    
-                                    if evt_start_str:
-                                        if "T" not in evt_start_str:
-                                            # 종일 이벤트
-                                            user_name = user_info.get("name") or "회원"
-                                            early_conflict_warning = f"⚠️ {user_name}님, 그 날에는 이미 '{evt.summary}' 일정이 있어요. 그래도 등록할까요?"
-                                            break
-                                        else:
-                                            try:
-                                                evt_start_dt = datetime.fromisoformat(evt_start_str.replace("Z", "+00:00"))
-                                                evt_end_dt = datetime.fromisoformat(evt_end_str.replace("Z", "+00:00"))
-                                                if check_start < evt_end_dt and check_end > evt_start_dt:
-                                                    user_name = user_info.get("name") or "회원"
-                                                    early_conflict_warning = f"⚠️ {user_name}님, 그 시간에는 이미 '{evt.summary}' 일정이 있어요. 다른 시간을 선택해 주세요!"
-                                                    break
-                                            except Exception as parse_err:
-                                                logger.warning(f"이벤트 시간 파싱 실패: {parse_err}")
-                    except Exception as e:
-                        logger.warning(f"조기 중복 체크 오류: {e}")
-                
-                # 조기 중복 경고가 있으면 먼저 알려주기
-                if early_conflict_warning:
-                    ai_response = early_conflict_warning
-
                 # Case 1: 현재 메시지에 날짜+시간 정보가 있는 경우
-                elif schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
+                if schedule_info.get("has_schedule_request") and schedule_info.get("date") and schedule_info.get("time"):
                     # [수정] 단일 시간("3시에")인 경우 바로 등록하지 않고 AI가 종료 시간을 물어보게 함
                     # 범위 표현("부터", "까지", "~")이 있거나, "시작시간만" 같은 강제 키워드가 있을 때만 즉시 등록
                     time_str = schedule_info.get("time", "")
@@ -1291,6 +1218,13 @@ class ChatService:
                 )
 
             logger.info(f"AI 대화 완료 - 사용자: {user_id}")
+            
+            # WebSocket으로 실시간 알림 전송
+            await ChatService.send_ws_notification(user_id, "new_message", {
+                "message": ai_response,
+                "session_id": session_id,
+                "sender": "ai"
+            })
 
             # [✅ 수정 1 관련] ai_result.get('usage') 접근 시 안전하게 처리
             return {
@@ -1821,11 +1755,17 @@ class ChatService:
             start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
             return start, start
 
-        # 3) 단일 시간 파싱: N시(분 포함)
-        m = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", t)
+        # 3) 단일 시간 파싱: N시(분 포함 또는 반)
+        m = re.search(r"(\d{1,2})\s*시(?:\s*반)?(?:\s*(\d{1,2})\s*분)?", t)
         if m:
             hh = int(m.group(1))
-            mm = int(m.group(2)) if m.group(2) else 0
+            # "반" 처리 (30분)
+            if "반" in t:
+                mm = 30
+            elif m.group(2):
+                mm = int(m.group(2))
+            else:
+                mm = 0
             hh = parse_hour(hh, ctx)
             start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
             return start, start

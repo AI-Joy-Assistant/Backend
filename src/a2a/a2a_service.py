@@ -18,6 +18,7 @@ from datetime import datetime as dt_datetime
 
 from ..chat.chat_repository import ChatRepository
 from src.chat.chat_openai_service import OpenAIService
+from src.websocket.websocket_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,25 @@ def convert_relative_time(time_str: Optional[str], activity: Optional[str] = Non
     hour = None
     minute = 0
     
-    # "오후 3시", "오전 10시 30분" 등
+    # 콜론 형식 처리 (예: "5:30", "17:30")
+    colon_match = re.search(r'(\d{1,2}):(\d{2})', time_str)
+    if colon_match:
+        hour = int(colon_match.group(1))
+        minute = int(colon_match.group(2))
+        
+        # 오후/오전 처리
+        if "오후" in time_str and hour < 12:
+            hour += 12
+        elif "오전" in time_str and hour == 12:
+            hour = 0
+        elif "오전" not in time_str and "오후" not in time_str:
+            # 1~6시는 대부분 오후
+            if 1 <= hour <= 6:
+                hour += 12
+        
+        return f"{hour:02d}:{minute:02d}"
+    
+    # "오후 3시", "오전 10시 30분", "5시반" 등
     hour_match = re.search(r'(\d{1,2})\s*시', time_str)
     if hour_match:
         hour = int(hour_match.group(1))
@@ -132,10 +151,14 @@ def convert_relative_time(time_str: Optional[str], activity: Optional[str] = Non
             if 1 <= hour <= 6:
                 hour += 12
         
-        # 분 처리
-        min_match = re.search(r'(\d{1,2})\s*분', time_str)
-        if min_match:
-            minute = int(min_match.group(1))
+        # "반" 처리 (30분)
+        if "반" in time_str:
+            minute = 30
+        else:
+            # 분 처리 (예: "5시 15분", "10시30분")
+            min_match = re.search(r'(\d{1,2})\s*분', time_str)
+            if min_match:
+                minute = int(min_match.group(1))
     
     if hour is not None:
         return f"{hour:02d}:{minute:02d}"
@@ -235,6 +258,20 @@ class A2AService:
             else:
                 # 완료
                 await A2ARepository.update_session_status(session_id, "completed")
+            
+            # WebSocket으로 대상자에게 실시간 알림 전송
+            try:
+                await ws_manager.send_personal_message({
+                    "type": "a2a_request",
+                    "session_id": session_id,
+                    "from_user": initiator_name,
+                    "summary": summary or "일정 조율 요청",
+                    "proposal": result.get("proposal"),
+                    "timestamp": datetime.now(KST).isoformat()
+                }, target_user_id)
+                logger.info(f"[WS] A2A 알림 전송: {target_user_id}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] A2A 알림 전송 실패: {ws_err}")
             
             return {
                 "status": 200,
@@ -1816,6 +1853,21 @@ class A2AService:
                 # completed 상태로 변경하지 않고, in_progress 유지 (대화가 계속될 수 있음)
                 # 필요시에만 completed로 변경
                 pass
+            
+            # WebSocket으로 모든 대상자에게 실시간 알림 전송
+            try:
+                for target_id in target_user_ids:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_request",
+                        "thread_id": thread_id,
+                        "from_user": initiator_name,
+                        "summary": summary or "일정 조율 요청",
+                        "proposal": result.get("proposal"),
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, target_id)
+                logger.info(f"[WS] 다중 A2A 알림 전송: {target_user_ids}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] 다중 A2A 알림 전송 실패: {ws_err}")
             
             return {
                 "status": 200,

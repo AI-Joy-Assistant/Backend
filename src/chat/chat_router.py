@@ -536,10 +536,10 @@ async def get_notifications(
         
         for log in (rejection_logs.data or []):
             metadata = log.get("metadata", {})
-            rejected_by = metadata.get("rejected_by")
+            rejected_by = metadata.get("rejected_by") or metadata.get("left_user_id")
             
             # 거절한 사람 이름 조회 (메타데이터에 있으면 사용, 없으면 DB 조회)
-            rejected_by_name = metadata.get("rejected_by_name", "상대방")
+            rejected_by_name = metadata.get("rejected_by_name") or metadata.get("left_user_name") or "상대방"
             if rejected_by_name == "상대방" and rejected_by:
                 try:
                     user_res = supabase.table("user").select("name").eq("id", rejected_by).execute()

@@ -6,3 +6,19 @@
 [DEBUG] parsed start_date: 2025-12-28 00:00:00+09:00
 [DEBUG] parsed start_time: 2025-12-28 15:00:00+09:00
 [DEBUG] parsed end_time: 2025-12-28 15:00:00+09:00
+
+[DEBUG] === Schedule Creation Start ===
+[DEBUG] original_text: 민서와 식사
+[DEBUG] initial date_str: 이번 달
+[DEBUG] resolved date_str: 이번 달
+[DEBUG] parsed start_date: 2025-12-30 00:00:00+09:00
+[DEBUG] parsed start_time: 2025-12-30 17:00:00+09:00
+[DEBUG] parsed end_time: 2025-12-30 17:00:00+09:00
+
+[DEBUG] === Schedule Creation Start ===
+[DEBUG] original_text: 5시 15분부터 6시 45분이야
+[DEBUG] initial date_str: 오늘
+[DEBUG] resolved date_str: 오늘
+[DEBUG] parsed start_date: 2025-12-30 00:00:00+09:00
+[DEBUG] parsed start_time: 2025-12-30 17:15:00+09:00
+[DEBUG] parsed end_time: 2025-12-30 17:15:00+09:00
