@@ -5,18 +5,20 @@ import logging
 import uuid
 import asyncio
 import json
-from typing import Dict, Any, Optional, List, AsyncGenerator
+from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
 from .a2a_protocol import (
     MessageType, Proposal, A2AMessage, AgentDecision,
-    NegotiationStatus, NegotiationResult, HumanInterventionReason, TimeSlot
+    NegotiationStatus, NegotiationResult, HumanInterventionReason, TimeSlot,
+    ConflictInfo, ParticipantAvailability, MajorityRecommendation
 )
 from .personal_agent import PersonalAgent
 from .a2a_repository import A2ARepository
 from src.auth.auth_repository import AuthRepository
+from src.chat.chat_repository import ChatRepository
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -127,6 +129,7 @@ class NegotiationEngine:
         self.last_proposals: Dict[str, Proposal] = {}  # 교착 상태 탐지용
         self.deadlock_counter = 0
         self.user_names: Dict[str, str] = {}  # user_id -> user_name 매핑
+        self.awaiting_choice_from: List[str] = []  # 충돌 선택 대기 중인 사용자 리스트
     
     async def initialize_agents(self):
         """모든 참여자의 에이전트 초기화"""
@@ -156,6 +159,99 @@ class NegotiationEngine:
             results[user_id] = slots
             logger.info(f"[{self.user_names.get(user_id, '사용자')}] 가용 슬롯 {len(slots)}개 수집")
         
+        return results
+    
+    async def analyze_participant_availability(
+        self,
+        target_dt: datetime,
+        proposal: Proposal
+    ) -> Tuple[List[ParticipantAvailability], bool]:
+        """
+        특정 시간에 대한 모든 참여자의 가용성 분석
+        Returns: (참여자별 가용성 리스트, 전원 가능 여부)
+        """
+        all_user_ids = [self.initiator_user_id] + self.participant_user_ids
+        total_count = len(all_user_ids)
+        results: List[ParticipantAvailability] = []
+        all_available = True
+        
+        for user_id in all_user_ids:
+            agent = self.agents.get(user_id)
+            if not agent:
+                continue
+            
+            user_name = self.user_names.get(user_id, "사용자")
+            
+            # 가용성 확인
+            availability = agent._cached_availability or await agent.get_availability(
+                datetime.now(KST), datetime.now(KST) + timedelta(days=14)
+            )
+            
+            is_available = False
+            if target_dt:
+                for slot in availability:
+                    if slot.start <= target_dt < slot.end:
+                        is_available = True
+                        break
+            
+            conflict_info = None
+            if not is_available:
+                all_available = False
+                # 충돌 일정 정보 가져오기
+                conflict_info = agent.find_conflicting_event(target_dt)
+            
+            results.append(ParticipantAvailability(
+                user_id=user_id,
+                user_name=user_name,
+                is_available=is_available,
+                conflict_info=conflict_info,
+                choice=None
+            ))
+        
+        logger.info(f"참여자 가용성 분석: {len([r for r in results if r.is_available])}/{total_count}명 가능")
+        return results, all_available
+    
+    def get_majority_recommendations(
+        self,
+        availabilities: Dict[str, List[TimeSlot]],
+        max_count: int = 3
+    ) -> List[MajorityRecommendation]:
+        """
+        과반수 가능 날짜 추천 (전원 가능 날짜가 없을 때 사용)
+        """
+        recommendations = self.find_intersection_slots(availabilities)
+        
+        # 전원 가능한 날짜가 있는지 확인
+        all_available_dates = [r for r in recommendations if r.is_all_available]
+        if all_available_dates:
+            # 전원 가능 있으면 과반수 추천 필요 없음
+            return []
+        
+        # 과반수 이상 가능한 날짜 필터링
+        total_users = len(availabilities)
+        majority_threshold = total_users // 2 + 1  # 과반수 기준
+        
+        majority_recs = [
+            r for r in recommendations 
+            if len(r.available_users) >= majority_threshold
+        ]
+        
+        results: List[MajorityRecommendation] = []
+        for rec in majority_recs[:max_count]:
+            dt = datetime.strptime(rec.date, "%Y-%m-%d")
+            date_display = f"{dt.month}월 {dt.day}일"
+            
+            results.append(MajorityRecommendation(
+                date=date_display,
+                time_condition=rec.time_condition or "시간 무관",
+                available_count=len(rec.available_users),
+                total_count=total_users,
+                available_names=rec.available_users,
+                unavailable_names=rec.unavailable_users,
+                is_majority=len(rec.available_users) >= majority_threshold
+            ))
+        
+        logger.info(f"과반수 추천: {len(results)}개 (기준: {majority_threshold}명 이상)")
         return results
     
     def find_intersection_slots(
@@ -359,8 +455,84 @@ class NegotiationEngine:
                 if decision.action == MessageType.ACCEPT:
                     continue
                 elif decision.action == MessageType.COUNTER:
-                    all_accepted = False
-                    counter_proposals.append((participant_id, decision.proposal))
+                    # 충돌 정보가 있으면 사용자 선택 대기
+                    if decision.conflict_info:
+                        all_accepted = False
+                        
+                        # 충돌 선택지 메시지 생성
+                        conflict_choice_msg = self._create_message(
+                            msg_type=MessageType.CONFLICT_CHOICE,
+                            sender_id=participant_id,
+                            proposal=current_proposal,
+                            message=f"{self.user_names.get(participant_id, '사용자')}님은 그 시간에 [{decision.conflict_info.event_name}]이 있습니다. 참석 불가 또는 일정 조정을 선택해주세요."
+                        )
+                        # 충돌 정보 추가
+                        conflict_choice_msg.conflict_info = {
+                            "event_name": decision.conflict_info.event_name,
+                            "event_time_display": decision.conflict_info.event_time_display,
+                            "user_id": participant_id,
+                            "user_name": self.user_names.get(participant_id, "사용자")
+                        }
+                        yield conflict_choice_msg
+                        await self._save_message(conflict_choice_msg)
+                        
+                        # 📢 충돌 사용자의 ChatScreen에 알림 메시지 저장
+                        try:
+                            initiator_name = self.user_names.get(self.initiator_user_id, "사용자")
+                            participant_name = self.user_names.get(participant_id, "사용자")
+                            
+                            # 충돌 알림 메시지 JSON
+                            chat_notification = {
+                                "type": "schedule_conflict_choice",
+                                "session_id": self.session_id,
+                                "initiator_name": initiator_name,
+                                "other_count": len(self.participant_user_ids),
+                                "proposed_date": current_proposal.date,
+                                "proposed_time": current_proposal.time,
+                                "conflict_event_name": decision.conflict_info.event_name,
+                                "text": f"🔔 {initiator_name}님이 {current_proposal.date} {current_proposal.time}에 일정을 잡으려 합니다. 그 시간에 [{decision.conflict_info.event_name}]이 있으시네요.",
+                                "choices": [
+                                    {"id": "skip", "label": "참석 불가"},
+                                    {"id": "adjust", "label": "일정 조정 가능"}
+                                ]
+                            }
+                            
+                            # 참여자의 기본 채팅 세션에 알림 저장
+                            default_session = await ChatRepository.get_default_session(participant_id)
+                            if default_session:
+                                await ChatRepository.add_message(
+                                    session_id=default_session["id"],
+                                    user_message=None,
+                                    ai_response=json.dumps(chat_notification, ensure_ascii=False),
+                                    intent="a2a_conflict_notification"
+                                )
+                                logger.info(f"[협상] 충돌 알림을 {participant_name}의 ChatScreen에 저장")
+                        except Exception as chat_err:
+                            logger.warning(f"[협상] 채팅 알림 저장 실패: {chat_err}")
+                        
+                        # 사용자 선택 대기 상태로 전환
+                        self.status = NegotiationStatus.AWAITING_USER_CHOICE
+                        self.awaiting_choice_from = [participant_id]
+                        
+                        # 협상 일시 중단 - 사용자 응답 후 재개
+                        logger.info(f"[협상] 충돌 감지 - {participant_id} 사용자 선택 대기")
+                        
+                        # 세션 상태 업데이트
+                        await A2ARepository.update_session_status(
+                            self.session_id,
+                            "awaiting_user_choice",
+                            details={
+                                "awaiting_from": participant_id,
+                                "conflict_event": decision.conflict_info.event_name,
+                                "proposed_date": current_proposal.date,
+                                "proposed_time": current_proposal.time
+                            }
+                        )
+                        return
+                    else:
+                        # 충돌 정보 없는 일반 COUNTER - 기존 로직 유지
+                        all_accepted = False
+                        counter_proposals.append((participant_id, decision.proposal))
                 elif decision.action == MessageType.NEED_HUMAN:
                     self.status = NegotiationStatus.NEED_HUMAN
                     return
@@ -538,10 +710,13 @@ class NegotiationEngine:
                 intervention_reason = HumanInterventionReason.MAX_ROUNDS_EXCEEDED
             elif self.deadlock_counter >= 2:
                 intervention_reason = HumanInterventionReason.DEADLOCK
+        elif self.status == NegotiationStatus.AWAITING_USER_CHOICE:
+            intervention_reason = HumanInterventionReason.CONFLICT_CHOICE_NEEDED
         
         return NegotiationResult(
             status=self.status,
             intervention_reason=intervention_reason,
             total_rounds=self.current_round,
-            messages=self.messages
+            messages=self.messages,
+            awaiting_choice_from=self.awaiting_choice_from if self.awaiting_choice_from else None
         )

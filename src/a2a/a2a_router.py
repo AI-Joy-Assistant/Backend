@@ -132,6 +132,16 @@ async def get_a2a_session(
                 })
                 continue
             
+            # [NEW] 충돌 경고 메시지 처리
+            if msg_type == "conflict_warning":
+                process.append({
+                    "step": "⚠️ 시간 충돌 알림",
+                    "description": msg_data.get("description", "같은 시간대에 다른 일정이 확정되었습니다. 재조율이 필요합니다."),
+                    "created_at": created_at,
+                    "type": "conflict_warning"
+                })
+                continue
+            
             # 기존 형식: step + text
             step = msg_data.get("step")
             text = msg_data.get("text")
@@ -207,8 +217,10 @@ async def get_a2a_session(
             "agreedTime": place_pref.get("agreedTime") or "",
             "location": place_pref.get("location") or "미정",
             "process": process,
-            "has_conflict": False,
-            "conflicting_event": None,
+            # [FIX] place_pref에서 충돌 정보 읽어오기
+            "has_conflict": place_pref.get("has_conflict", False),
+            "conflicting_sessions": place_pref.get("conflicting_sessions", []),
+            "conflicting_event": place_pref.get("conflicting_event"), # 레거시 호환
             # 종료 시간 (시간 범위 지원)
             "proposedEndDate": place_pref.get("proposedEndDate") or "",
             "proposedEndTime": place_pref.get("proposedEndTime") or "",
@@ -241,6 +253,7 @@ async def get_a2a_session(
         # 참여자 정보 추가 (Attendees) - 다중 참여자 지원
         attendees = []
         added_ids = set()  # 중복 방지
+        approved_user_ids = set()  # 승인한 사용자 ID 목록
         
         try:
             # 1. participant_user_ids 컬럼 우선 사용 (새 방식)
@@ -260,6 +273,31 @@ async def get_a2a_session(
             left_participants = place_pref.get("left_participants", [])
             print(f"🔍 [Attendees] left_participants: {left_participants}")
             
+            # [NEW] 승인된 사용자 목록 조회 (place_pref에서 approved_by_list 확인)
+            if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
+                # 1. 명시적 승인 목록 추가
+                approved_list = place_pref.get("approved_by_list", [])
+                if approved_list:
+                    for uid in approved_list:
+                        approved_user_ids.add(str(uid))
+                    print(f"🔍 [Attendees] place_pref approved_by_list: {approved_list}")
+                
+                # 2. 요청자(Initiator 또는 Rescheduler) 자동 추가 (항상 승인 상태)
+                # approved_by_list의 유무와 관계없이, 제안자는 항상 승인자로 포함해야 함
+                reschedule_requested_by = place_pref.get("rescheduleRequestedBy")
+                if reschedule_requested_by:
+                    approved_user_ids.add(str(reschedule_requested_by))
+                elif initiator_id:
+                    # 원래 요청자(initiator)는 자동 승인
+                    approved_user_ids.add(str(initiator_id))
+            elif session_status == "completed":
+                # 완료된 세션은 모든 참여자가 승인됨
+                for pid in participant_ids:
+                    if pid not in left_participants:
+                        approved_user_ids.add(str(pid))
+            
+            print(f"🔍 [Attendees] approved_user_ids: {approved_user_ids}")
+            
             # 3. 모든 참여자 정보 조회 (나간 사람 제외)
             for participant_id in participant_ids:
                 # 나간 참여자는 제외
@@ -275,7 +313,8 @@ async def get_a2a_session(
                                 "id": participant_id,
                                 "name": participant_info.get("name") or "알 수 없음",
                                 "avatar": participant_info.get("profile_image") or "https://picsum.photos/150",
-                                "isCurrentUser": participant_id == current_user_id
+                                "isCurrentUser": participant_id == current_user_id,
+                                "is_approved": str(participant_id) in approved_user_ids  # NEW
                             })
                             added_ids.add(participant_id)
                     except Exception as e:
@@ -285,6 +324,8 @@ async def get_a2a_session(
         
         print(f"📋 [Attendees Final] Total: {len(attendees)}, IDs: {added_ids}")
         details["attendees"] = attendees
+        details["approved_user_ids"] = list(approved_user_ids)  # NEW
+
 
         session["details"] = details
         session["title"] = summary if summary else "일정 조율"
@@ -502,16 +543,119 @@ async def get_user_sessions(
             
             process = [] 
             
+            # [NEW] conflict_reason이 있으면 프로세스에 경고 추가
+            conflict_reason = place_pref.get("conflict_reason")
+            if conflict_reason:
+                process.append({
+                    "step": "⚠️ 충돌 알림",
+                    "description": conflict_reason,
+                    "type": "conflict_warning"
+                })
+            
             # place_pref에서 직접 날짜/시간 정보 추출 (details 컬럼은 DB에 없음)
             # 재조율 시 proposedDate/proposedTime 키, 초기 생성 시 date/time 키 사용
+            proposed_date = place_pref.get("proposedDate") or place_pref.get("date")
+            proposed_time = place_pref.get("proposedTime") or place_pref.get("time") or "미정"
+            
+            # [OPTIMIZED] 충돌 감지: 메모리 내에서 비교 (N개 DB 쿼리 대신)
+            # [FIX] DB에 저장된 충돌 정보 우선 로드
+            db_has_conflict = place_pref.get("has_conflict", False)
+            db_conflicts = place_pref.get("conflicting_sessions", [])
+            if not isinstance(db_conflicts, list): db_conflicts = []
+            
+            has_conflict = db_has_conflict
+            conflicting_sessions = list(db_conflicts)
+
+            session_status = session.get("status", "").lower()
+            session_id = session.get("id")
+            
+            if proposed_date and session_status in ["pending", "in_progress", "pending_approval", "needs_reschedule"]:
+                import re
+                from datetime import datetime as dt
+                
+                # 날짜/시간 정규화 함수 (인라인)
+                def norm_date(d):
+                    if not d: return ""
+                    m = re.search(r'(\d{1,2})월\s*(\d{1,2})일', d)
+                    if m: return f"{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+                    m = re.search(r'\d{4}-(\d{2})-(\d{2})', d)
+                    if m: return f"{m.group(1)}-{m.group(2)}"
+                    return d
+                
+                def norm_time(t):
+                    if not t: return -1
+                    t = t.replace(" ", "")
+                    m = re.search(r'(\d{1,2}):\d{2}', t)
+                    if m: return int(m.group(1))
+                    is_pm = "오후" in t
+                    m = re.search(r'(\d{1,2})시', t)
+                    if m:
+                        h = int(m.group(1))
+                        if is_pm and h != 12: h += 12
+                        elif not is_pm and h == 12: h = 0
+                        return h
+                    return -1
+                
+                my_date = norm_date(proposed_date)
+                my_hour = norm_time(proposed_time)
+                
+                # print(f"🔍 [충돌체크] session={session_id[:8]}, proposed_date={proposed_date}, proposed_time={proposed_time}, my_date={my_date}, my_hour={my_hour}")
+                
+                # 시간이 유효하면 충돌 비교 실행 (과거 날짜 스킵 제거 - 연도 경계 문제 방지)
+                if my_hour >= 0:
+                    # 동일 날짜+시간 세션 찾기 (디버그)
+                    same_time_sessions = [s for s in grouped_sessions if s.get("id") != session_id]
+                    # print(f"🔍 [충돌비교] session={session_id[:8]}, 날짜={my_date}, 시간={my_hour}, 비교대상={len(same_time_sessions)}개")
+                    
+                    for other in grouped_sessions:
+                        if other.get("id") == session_id:
+                            continue
+                        other_status = other.get("status", "").lower()
+                        if other_status not in ["pending", "in_progress", "pending_approval", "needs_reschedule", "completed"]:
+                            continue
+                        
+                        other_pref = other.get("place_pref", {})
+                        if isinstance(other_pref, str):
+                            try: other_pref = json.loads(other_pref)
+                            except: continue
+                        
+                        other_date = other_pref.get("proposedDate") or other_pref.get("date") or ""
+                        other_time = other_pref.get("proposedTime") or other_pref.get("time") or ""
+                        other_date_norm = norm_date(other_date)
+                        other_hour = norm_time(other_time)
+                        
+                        if other_date_norm == my_date and other_hour >= 0 and other_hour == my_hour:
+                            # print(f"✅ [충돌발견] {session_id[:8]} <-> {other.get('id')[:8]}, 날짜={my_date}, 시간={my_hour}")
+                            # [FIX] 중복 추가 방지
+                            # stored items might use 'session_id', dynamic uses 'id'
+                            is_dup = False
+                            other_id = other.get("id")
+                            for c in conflicting_sessions:
+                                if c.get("id") == other_id or c.get("session_id") == other_id:
+                                    is_dup = True
+                                    break
+                            
+                            if not is_dup:
+                                conflicting_sessions.append({
+                                    "id": other_id,
+                                    "title": other_pref.get("purpose") or other_pref.get("summary") or "일정",
+                                    "date": other_date,
+                                    "time": other_time,
+                                    "participant_names": other.get("participant_names", [])
+                                })
+                    
+                    has_conflict = len(conflicting_sessions) > 0
+            
             details = {
                 "proposer": initiator_name,
                 "proposerAvatar": initiator_avatar,
                 "purpose": place_pref.get("purpose") or summary or "일정 조율",
-                "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or "미정",
-                "proposedDate": place_pref.get("proposedDate") or place_pref.get("date"),
+                "proposedTime": proposed_time,
+                "proposedDate": proposed_date,
                 "location": place_pref.get("location") or "미정",
-                "process": process
+                "process": process,
+                "has_conflict": has_conflict,
+                "conflicting_sessions": conflicting_sessions
             }
 
             session["title"] = title
@@ -609,16 +753,31 @@ async def get_pending_requests(
         if not sessions:
             return {"requests": []}
         
-        # 요청자 정보 조회를 위한 ID 수집
-        initiator_ids = list(set(s.get("initiator_user_id") for s in sessions if s.get("initiator_user_id")))
+        # 1. 모든 관련 사용자 ID 수집 (참여자 정보 일괄 조회를 위해)
+        all_user_ids = set()
+        for session in sessions:
+            p_ids = session.get("participant_user_ids")
+            if not p_ids:
+                p_ids = [session.get("initiator_user_id"), session.get("target_user_id")]
+            for uid in p_ids:
+                if uid: all_user_ids.add(str(uid))
+        
         user_details_map = {}
-        if initiator_ids:
-            user_details_map = await ChatRepository.get_user_details_by_ids(initiator_ids)
+        if all_user_ids:
+            user_details_map = await ChatRepository.get_user_details_by_ids(list(all_user_ids))
         
         # 응답 데이터 구성
         requests = []
         for session in sessions:
+            # place_pref 파싱
             place_pref = session.get("place_pref", {}) or {}
+            if isinstance(place_pref, str):
+                try:
+                    import json
+                    place_pref = json.loads(place_pref)
+                except:
+                    place_pref = {}
+            
             thread_id = place_pref.get("thread_id") if isinstance(place_pref, dict) else None
             summary = place_pref.get("summary") if isinstance(place_pref, dict) else None
             
@@ -628,35 +787,59 @@ async def get_pending_requests(
             initiator_name = initiator_info.get("name", "알 수 없음")
             initiator_avatar = initiator_info.get("profile_image", "https://picsum.photos/150")
             
-            # 참여자 정보 (place_pref에 있을 수 있음)
-            participants = place_pref.get("participants", []) if isinstance(place_pref, dict) else []
-            participant_count = len(participants) if participants else 1
+            # 참여자 목록 구성 및 승인 여부 계산
+            participant_ids = session.get("participant_user_ids") or [initiator_id, session.get("target_user_id")]
+            participant_count = len(participant_ids)
             
-            # 날짜/시간 정보 (협상 완료 시 details에 저장, 초기 요청 시 place_pref에 저장)
-            # 우선순위: details (협상 결과) > place_pref (초기 요청)
-            proposed_date = None
-            proposed_time = None
-            
-            # details에서 협상 완료된 날짜/시간 먼저 확인
+            # [Copied Logic] 승인된 사용자 목록 계산
+            approved_user_ids = set()
+            session_status = session.get("status")
+            if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
+                # 1. 명시적 승인 목록
+                approved_list = place_pref.get("approved_by_list", [])
+                if approved_list:
+                    for uid in approved_list:
+                        approved_user_ids.add(str(uid))
+                
+                # 2. 요청자/제안자 자동 승인
+                reschedule_requested_by = place_pref.get("rescheduleRequestedBy")
+                if reschedule_requested_by:
+                    approved_user_ids.add(str(reschedule_requested_by))
+                elif initiator_id:
+                    approved_user_ids.add(str(initiator_id))
+            elif session_status == "completed":
+                 for pid in participant_ids:
+                     approved_user_ids.add(str(pid))
+
+            # Attendees 리스트 생성
+            attendees = []
+            for pid in participant_ids:
+                p_info = user_details_map.get(pid, {})
+                attendees.append({
+                    "id": pid,
+                    "name": p_info.get("name", "알 수 없음"),
+                    "avatar": p_info.get("profile_image", "https://picsum.photos/150"),
+                    "isCurrentUser": str(pid) == str(current_user_id),
+                    "is_approved": str(pid) in approved_user_ids
+                })
+
+            # 날짜/시간 정보 (우선순위: details > place_pref)
+            proposed_date, proposed_time = None, None
             details = session.get("details", {}) or {}
             if isinstance(details, str):
-                try:
-                    import json
-                    details = json.loads(details)
-                except:
-                    details = {}
+                try: import json; details = json.loads(details)
+                except: details = {}
             
             if isinstance(details, dict):
                 proposed_date = details.get("proposedDate")
                 proposed_time = details.get("proposedTime")
             
-            # details에 없으면 place_pref에서 가져옴 (초기 요청)
             if not proposed_date or not proposed_time:
                 if isinstance(place_pref, dict):
                     proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
                     proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
             
-            # 재조율 요청 여부 판별 (rescheduleRequestedBy 필드 존재 시 재조율)
+            # 재조율 요청 여부 판별
             is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
             reschedule_requested_at = place_pref.get("rescheduleRequestedAt") if isinstance(place_pref, dict) else None
 
@@ -673,8 +856,13 @@ async def get_pending_requests(
                 "proposed_time": proposed_time,
                 "status": session.get("status"),
                 "created_at": session.get("created_at"),
-                "reschedule_requested_at": reschedule_requested_at,  # [NEW] 재조율 요청 시간
-                "type": "reschedule" if is_reschedule else "new"
+                "reschedule_requested_at": reschedule_requested_at,
+                "type": "reschedule" if is_reschedule else "new",
+                # [NEW] Frontend 'details.attendees' 접근을 위한 구조 추가
+                "details": {
+                    "attendees": attendees,
+                    "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy") if isinstance(place_pref, dict) else None
+                }
             })
         
         # 최신순 정렬
@@ -1033,3 +1221,179 @@ async def submit_human_decision(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"결정 처리 실패: {str(e)}")
+
+
+@router.post("/session/{session_id}/conflict-choice", summary="충돌 선택 응답")
+async def submit_conflict_choice(
+    session_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    일정 충돌 시 사용자 선택 처리
+    - choice: "skip" (참석 불가) | "adjust" (일정 조정 가능)
+    """
+    try:
+        body = await request.json()
+        choice = body.get("choice")  # "skip" | "adjust"
+        
+        if choice not in ["skip", "adjust"]:
+            raise HTTPException(status_code=400, detail="choice는 'skip' 또는 'adjust'여야 합니다.")
+        
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        # 참여자 확인
+        participant_ids = session.get("participant_user_ids") or []
+        if current_user_id != session["initiator_user_id"] and \
+           current_user_id != session["target_user_id"] and \
+           current_user_id not in participant_ids:
+            raise HTTPException(status_code=403, detail="세션 참여자가 아닙니다.")
+        
+        user = await AuthRepository.find_user_by_id(current_user_id)
+        user_name = user.get("name", "사용자") if user else "사용자"
+        
+        if choice == "skip":
+            # 참석 불가 - 세션에서 제외
+            place_pref = session.get("place_pref") or {}
+            left_participants = place_pref.get("left_participants") or []
+            if current_user_id not in left_participants:
+                left_participants.append(current_user_id)
+                place_pref["left_participants"] = left_participants
+                
+                # 세션 업데이트 - 협상 재개 상태로
+                await A2ARepository.update_session_status(
+                    session_id, 
+                    "in_progress",  # 협상 재개
+                    details={
+                        "left_participants": left_participants,
+                        "skip_user_id": current_user_id,
+                        "skip_user_name": user_name
+                    }
+                )
+            
+            # 제외된 사용자 수 확인 - 남은 참여자로 진행 가능 여부 판단
+            participant_ids = session.get("participant_user_ids") or []
+            all_user_ids = [session["initiator_user_id"]] + participant_ids
+            if session.get("target_user_id"):
+                all_user_ids.append(session["target_user_id"])
+            
+            remaining_count = len([uid for uid in all_user_ids if uid not in left_participants])
+            
+            # 메시지 추가
+            await A2ARepository.add_message(
+                session_id=session_id,
+                sender_user_id=current_user_id,
+                receiver_user_id=session["initiator_user_id"],
+                message_type="system",
+                message={
+                    "type": "participant_left",
+                    "text": f"{user_name}님이 참석 불가를 선택했습니다. 남은 {remaining_count}명으로 일정을 진행합니다."
+                }
+            )
+            
+            return {
+                "status": 200,
+                "message": f"참석 불가로 처리되었습니다. 남은 {remaining_count}명이 협상을 계속합니다.",
+                "choice": "skip",
+                "remaining_count": remaining_count
+            }
+            
+        elif choice == "adjust":
+            # 일정 조정 가능 - 협상 계속
+            await A2ARepository.add_message(
+                session_id=session_id,
+                sender_user_id=current_user_id,
+                receiver_user_id=session["initiator_user_id"],
+                message_type="system",
+                message={
+                    "type": "adjust_schedule",
+                    "text": f"{user_name}님이 일정 조정을 선택했습니다."
+                }
+            )
+            
+            return {
+                "status": 200,
+                "message": "일정 조정이 선택되었습니다. 캐린더에서 일정을 수정해주세요.",
+                "choice": "adjust"
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"충돌 선택 처리 실패: {str(e)}")
+
+
+@router.post("/session/{session_id}/send-conflict-notification", summary="충돌 알림 메시지 전송")
+async def send_conflict_notification(
+    session_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user_id)
+):
+    """
+    충돌하는 참여자에게 선택지 알림 메시지 전송
+    """
+    try:
+        body = await request.json()
+        target_user_id = body.get("target_user_id")
+        conflict_event_name = body.get("conflict_event_name", "일정")
+        proposed_date = body.get("proposed_date")
+        proposed_time = body.get("proposed_time")
+        
+        if not target_user_id:
+            raise HTTPException(status_code=400, detail="target_user_id가 필요합니다.")
+        
+        session = await A2ARepository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        
+        # 초대자 이름 가져오기
+        initiator = await AuthRepository.find_user_by_id(session["initiator_user_id"])
+        initiator_name = initiator.get("name", "사용자") if initiator else "사용자"
+        
+        # 참여자 수 계산
+        participant_ids = session.get("participant_user_ids") or []
+        participant_count = len(participant_ids) + 1  # +1 for initiator
+        
+        other_count = participant_count - 1  # target 제외
+        
+        # 알림 메시지 생성
+        notification_message = {
+            "type": "schedule_conflict_choice",
+            "session_id": session_id,
+            "initiator_name": initiator_name,
+            "other_count": other_count,
+            "proposed_date": proposed_date,
+            "proposed_time": proposed_time,
+            "conflict_event_name": conflict_event_name,
+            "text": f"🔔 {initiator_name}님 외 {other_count}명이 {proposed_date} {proposed_time}에 일정을 잡으려 합니다. 그 시간에 [{conflict_event_name}]이 있으시네요.",
+            "choices": [
+                {"id": "skip", "label": "참석 불가"},
+                {"id": "adjust", "label": "일정 조정 가능"}
+            ]
+        }
+        
+        # 대상 사용자의 채팅 세션에 알림 추가
+        # origin_chat_session_id를 사용하여 해당 사용자의 채팅에 메시지 전송
+        origin_session_id = session.get("origin_chat_session_id")
+        
+        if origin_session_id:
+            # 대상 사용자의 채팅 세션 찾기 (또는 새로 생성)
+            await ChatRepository.add_message(
+                session_id=origin_session_id,
+                user_message=None,
+                ai_response=json.dumps(notification_message, ensure_ascii=False),
+                intent="a2a_conflict_notification"
+            )
+        
+        return {
+            "status": 200,
+            "message": "충돌 알림이 전송되었습니다.",
+            "notification": notification_message
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"알림 전송 실패: {str(e)}")

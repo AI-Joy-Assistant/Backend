@@ -10,12 +10,12 @@ from src.a2a.a2a_router import router as a2a_router
 from src.intent.router import router as intent_router
 import logging
 
-# # httpx (Supabase 통신) 로그 숨기기
-# logging.getLogger("httpx").setLevel(logging.WARNING)
-# logging.getLogger("httpcore").setLevel(logging.WARNING)
-#
-# # uvicorn 접속 로그 (GET /chat/history ... 200 OK) 숨기기
-# logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+# httpx (Supabase 통신) 로그 숨기기
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# uvicorn 접속 로그 (GET /chat/history ... 200 OK) 숨기기
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 # FastAPI 애플리케이션 생성
 app = FastAPI(
     title="AI Joy Assistant Backend API",

@@ -45,7 +45,7 @@ class OpenAIService:
             "max_tokens": max_tokens
         }
         
-        logger.info(f"[Llama API] 요청 전송: {url}")
+        # logger.info(f"[Llama API] 요청 전송: {url}")
         logger.debug(f"[Llama API] Payload: {len(messages)}개 메시지")
         
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -53,7 +53,7 @@ class OpenAIService:
             resp.raise_for_status()
             data = resp.json()
             response_text = data.get("response", "")
-            logger.info(f"[Llama API] 응답 수신: {len(response_text)}자")
+            # logger.info(f"[Llama API] 응답 수신: {len(response_text)}자")
             return response_text
 
     def _get_current_time_info(self) -> str:
@@ -149,7 +149,7 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
             if conversation_history:
                 # 최근 10개 대화를 컨텍스트로 사용 (TPM 제한 고려하여 축소)
                 recent_history = conversation_history[-10:]
-                logger.info(f"[OpenAI] 대화 히스토리 {len(recent_history)}개 사용")
+                # logger.info(f"[OpenAI] 대화 히스토리 {len(recent_history)}개 사용")
                 for msg in recent_history:
                     if msg.get("type") == "user":
                         messages.append({"role": "user", "content": msg["message"]})
@@ -159,12 +159,12 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
                         logger.debug(f"[OpenAI] 히스토리 - AI: {msg['message'][:50]}...")
             
             messages.append({"role": "user", "content": user_message})
-            logger.info(f"[OpenAI] 현재 메시지: {user_message}")
+            # logger.info(f"[OpenAI] 현재 메시지: {user_message}")
             
             # Llama API 우선 사용
             if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
                 ai_response = await self._call_custom_model(messages, temperature=0.7, max_tokens=500)
-                logger.info(f"[Llama API] 응답 생성 완료: {len(ai_response)}자")
+                # logger.info(f"[Llama API] 응답 생성 완료: {len(ai_response)}자")
                 return {
                     "status": "success",
                     "message": ai_response,
@@ -180,7 +180,7 @@ AI: "네, 내일 오후 2시 '동생 데리기' 일정으로 등록했습니다!
             
             ai_response = response.choices[0].message.content
             
-            logger.info(f"OpenAI API 응답 생성 완료: {len(ai_response)}자")
+            # logger.info(f"OpenAI API 응답 생성 완료: {len(ai_response)}자")
             
             return {
                 "status": "success",
@@ -264,6 +264,8 @@ JSON 반환 형식:
   - "오후 3시" = "15:00"
   - "오후 6시" = "18:00"
   - "오후 9시" = "21:00" (절대 18:00이 아님!)
+  - "오후 10시" = "22:00" (10 + 12 = 22!)
+  - "오후 11시" = "23:00" (11 + 12 = 23!)
   - "오후 12시" = "12:00" (예외: 12는 그대로)
 - "오전 10시" = "10:00"
 - "오전 9시" = "09:00"
@@ -315,7 +317,7 @@ JSON 반환 형식:
                     temperature=0.1,
                     max_tokens=200
                 )
-                logger.info(f"[Llama API] 일정 정보 추출 완료")
+                # logger.info(f"[Llama API] 일정 정보 추출 완료")
             else:
                 # OpenAI 폴백
                 response = await self.client.chat.completions.create(
@@ -459,11 +461,11 @@ JSON 반환 형식:
                             # message 필드 우선
                             if "message" in parsed and parsed["message"]:
                                 result = parsed["message"]
-                                logger.info(f"[Llama API] JSON.message 추출: {result[:30]}...")
+                                # logger.info(f"[Llama API] JSON.message 추출: {result[:30]}...")
                             # reason 필드 (message가 없을 때, action이 없을 때만)
                             elif "reason" in parsed and "action" not in parsed:
                                 result = parsed.get("reason", "")
-                                logger.info(f"[Llama API] JSON.reason 추출: {result[:30]}...")
+                                # logger.info(f"[Llama API] JSON.reason 추출: {result[:30]}...")
                             else:
                                 # JSON 전체인 경우 기본 메시지로 대체
                                 logger.warning(f"[Llama API] JSON 응답 감지, 기본 메시지로 대체: {result[:50]}...")
@@ -473,7 +475,7 @@ JSON 반환 형식:
                 
                 # 따옴표 제거
                 result = result.strip('"').strip("'")
-                logger.info(f"[Llama API] A2A 메시지 생성 완료: {result[:30]}...")
+                # logger.info(f"[Llama API] A2A 메시지 생성 완료: {result[:30]}...")
                 return result
 
             # OpenAI 폴백

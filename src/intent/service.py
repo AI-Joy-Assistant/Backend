@@ -231,7 +231,7 @@ class IntentService:
             # LLM 결과가 유효한지 확인
             if isinstance(llm_result, dict) and "has_schedule_request" in llm_result:
                 raw = llm_result
-                logger.info(f"LLM 추출 성공: has_schedule={raw.get('has_schedule_request')}, friend={raw.get('friend_name')}")
+                # logger.info(f"LLM 추출 성공: has_schedule={raw.get('has_schedule_request')}, friend={raw.get('friend_name')}")
             else:
                 logger.warning(f"LLM 결과 형식 오류, 휴리스틱 사용: {llm_result}")
         except Exception as e:
@@ -244,7 +244,7 @@ class IntentService:
         
         # LLM이 일정 의도를 못 잡았지만 휴리스틱이 잡은 경우
         if not raw.get("has_schedule_request") and heuristic_result.get("has_schedule_request"):
-            logger.info(f"휴리스틱이 일정 의도 감지: friend_name={friend_name}")
+            # logger.info(f"휴리스틱이 일정 의도 감지: friend_name={friend_name}")
             # 휴리스틱 결과를 우선 사용하되, LLM 결과의 다른 필드는 보존
             raw = {**heuristic_result, **{k: v for k, v in raw.items() if v not in [None, "", False]}}
             has_schedule = True
@@ -344,14 +344,74 @@ class IntentService:
                 # LLM이 "내일"로 잘못 해석했는지 확인
                 llm_date = final_result.get("start_date") or ""
                 if llm_date != explicit_date_str:
-                    logger.info(f"[DATE FIX] 명시적 날짜 감지: '{message}' → {explicit_date_str} (LLM: {llm_date})")
+                    # logger.info(f"[DATE FIX] 명시적 날짜 감지: '{message}' → {explicit_date_str} (LLM: {llm_date})")
                     final_result["start_date"] = explicit_date_str
                     final_result["end_date"] = explicit_date_str
                     final_result["date"] = f"{month}월 {day}일"
             except ValueError:
                 pass  # 유효하지 않은 날짜는 무시
 
-        logger.info(f"최종 Intent 추출 결과: {final_result}")
+        # [NEW] 시간 보정 휴리스틱: LLM이 '오후 10시'를 잘못 파싱할 경우 보정
+        # 원본 메시지에서 '오후' + 숫자시 패턴을 직접 확인해서 start_time 보정
+        if final_result.get("start_time"):
+            time_text = final_result.get("time", "") or ""
+            start_time = final_result.get("start_time", "")
+            
+            # 원본 메시지에서 "오후 XX시" 패턴 직접 추출
+            pm_time_match = re.search(r'오후\s*(\d{1,2})\s*시', message)
+            am_time_match = re.search(r'오전\s*(\d{1,2})\s*시', message)
+            
+            if pm_time_match:
+                pm_hour = int(pm_time_match.group(1))
+                # 오후인데 12를 더하지 않은 경우 보정
+                if pm_hour != 12:  # 오후 12시는 그대로 12:00
+                    correct_hour = pm_hour + 12 if pm_hour < 12 else pm_hour
+                else:
+                    correct_hour = 12
+                correct_time = f"{correct_hour:02d}:00"
+                
+                # LLM이 반환한 시간이 틀렸으면 보정
+                if start_time != correct_time:
+                    logger.info(f"[TIME FIX] 오후 시간 보정: '{start_time}' → '{correct_time}' (원문: 오후 {pm_hour}시)")
+                    final_result["start_time"] = correct_time
+                    
+            elif am_time_match:
+                am_hour = int(am_time_match.group(1))
+                # 오전 12시는 00:00
+                correct_hour = 0 if am_hour == 12 else am_hour
+                correct_time = f"{correct_hour:02d}:00"
+                
+                if start_time != correct_time:
+                    logger.info(f"[TIME FIX] 오전 시간 보정: '{start_time}' → '{correct_time}' (원문: 오전 {am_hour}시)")
+                    final_result["start_time"] = correct_time
+        
+        # end_time도 같은 로직으로 보정
+        if final_result.get("end_time"):
+            end_time = final_result.get("end_time", "")
+            
+            # 원본 메시지에서 끝 시간 패턴 추출 (예: "~오후 11시", "오후 11시까지")
+            pm_end_match = re.search(r'오후\s*(\d{1,2})\s*시(?:까지)?', message)
+            end_keyword_match = re.search(r'[~\-]\s*오후\s*(\d{1,2})\s*시', message) or re.search(r'(\d{1,2})\s*시까지', message)
+            
+            if end_keyword_match or pm_end_match:
+                match = end_keyword_match or pm_end_match
+                end_hour = int(match.group(1))
+                
+                # 끝 시간에 "오후"가 있거나 메시지에 "오후"가 있으면 PM으로 변환
+                if "오후" in message and end_hour < 12:
+                    correct_end_hour = end_hour + 12
+                elif end_hour == 12:
+                    correct_end_hour = 12
+                else:
+                    correct_end_hour = end_hour
+                    
+                correct_end_time = f"{correct_end_hour:02d}:00"
+                
+                if end_time != correct_end_time and correct_end_hour >= 12:  # 오후 시간일 때만 보정
+                    logger.info(f"[TIME FIX] 끝 시간 보정: '{end_time}' → '{correct_end_time}'")
+                    final_result["end_time"] = correct_end_time
+
+        # logger.info(f"최종 Intent 추출 결과: {final_result}")
         
         result = IntentParseResult(**final_result)
         return result.model_dump()

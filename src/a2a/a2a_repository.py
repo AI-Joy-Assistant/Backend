@@ -222,7 +222,7 @@ class A2ARepository:
             # Supabase에서 OR 조건 사용: or_(target_user_id.eq.{user_id}, initiator_user_id.eq.{user_id})
             response = supabase.table('a2a_session').select('*').or_(
                 f"target_user_id.eq.{user_id},initiator_user_id.eq.{user_id}"
-            ).in_('status', ['pending', 'pending_approval', 'in_progress', 'completed', 'rejected']).order('created_at', desc=True).execute()
+            ).in_('status', ['pending', 'pending_approval', 'in_progress', 'completed', 'rejected', 'needs_reschedule']).order('created_at', desc=True).execute()
             
             logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
             # if response.data:

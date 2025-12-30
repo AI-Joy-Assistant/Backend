@@ -4,7 +4,7 @@ PersonalAgent - 각 사용자별 독립 AI 에이전트
 import logging
 import json
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,7 +13,7 @@ from src.auth.auth_repository import AuthRepository
 from src.auth.auth_service import AuthService
 from src.calendar.calender_service import GoogleCalendarService
 from .a2a_protocol import (
-    MessageType, TimeSlot, Proposal, AgentDecision, A2AMessage
+    MessageType, TimeSlot, Proposal, AgentDecision, A2AMessage, ConflictInfo
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ class PersonalAgent:
         self.openai = OpenAIService()
         self.style = "flexible"  # 유연한 협상 스타일
         self._cached_availability: Optional[List[TimeSlot]] = None
+        self._cached_events: Optional[List[Dict]] = None  # 충돌 감지용 캘린더 이벤트 캐시
     
     async def get_availability(
         self,
@@ -157,12 +158,83 @@ class PersonalAgent:
                 current_date += timedelta(days=1)
             
             self._cached_availability = available_slots
-            logger.info(f"[{self.user_name}] 가용 슬롯 {len(available_slots)}개 발견")
+            self._cached_events = events  # 캐린더 이벤트 캐시
+            # logger.info(f"[{self.user_name}] 가용 슬롯 {len(available_slots)}개 발견, 이벤트 {len(events) if events else 0}개 캐시")
             return available_slots
             
         except Exception as e:
             logger.error(f"[{self.user_name}] 가용 시간 조회 실패: {e}")
             return []
+    
+    def find_conflicting_event(self, target_dt: datetime) -> Optional[ConflictInfo]:
+        """
+        지정된 시간에 충돌하는 캐린더 이벤트 찾기
+        Returns: ConflictInfo 또는 None (충돌 없음)
+        """
+        if not self._cached_events:
+            logger.warning(f"[{self.user_name}] 캐시된 이벤트 없음")
+            return None
+        
+        # logger.info(f"[{self.user_name}] 충돌 이벤트 검색 - target: {target_dt}, 이벤트 수: {len(self._cached_events)}")
+        
+        for event in self._cached_events:
+            try:
+                # Google Calendar API 반환값은 dict
+                start_info = event.start if hasattr(event, 'start') else event.get('start', {})
+                end_info = event.end if hasattr(event, 'end') else event.get('end', {})
+                
+                # dateTime 필드 추출
+                if isinstance(start_info, dict):
+                    start_str = start_info.get("dateTime")
+                    end_str = end_info.get("dateTime") if isinstance(end_info, dict) else None
+                else:
+                    start_str = getattr(start_info, 'dateTime', None) or start_info.get("dateTime") if hasattr(start_info, 'get') else None
+                    end_str = getattr(end_info, 'dateTime', None) or end_info.get("dateTime") if hasattr(end_info, 'get') else None
+                
+                if not start_str or not end_str:
+                    continue
+                
+                event_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                event_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                
+                # target_dt이 이벤트 시간 범위 내에 있는지 확인
+                if event_start <= target_dt < event_end:
+                    # summary 필드 추출 (다양한 형식 지원)
+                    if hasattr(event, 'summary'):
+                        event_name = event.summary or "일정"
+                    elif hasattr(event, 'get'):
+                        event_name = event.get('summary', '일정')
+                    else:
+                        event_name = "일정"
+                    
+                    logger.info(f"[{self.user_name}] 충돌 이벤트 발견: {event_name} ({event_start} ~ {event_end})")
+                    
+                    # 시간 표시 형식 생성
+                    start_hour = event_start.astimezone(KST).hour
+                    end_hour = event_end.astimezone(KST).hour
+                    if start_hour < 12:
+                        start_display = f"오전 {start_hour}시"
+                    else:
+                        start_display = f"오후 {start_hour - 12 if start_hour > 12 else 12}시"
+                    if end_hour < 12:
+                        end_display = f"오전 {end_hour}시"
+                    else:
+                        end_display = f"오후 {end_hour - 12 if end_hour > 12 else 12}시"
+                    
+                    time_display = f"{start_display}~{end_display}"
+                    
+                    return ConflictInfo(
+                        event_name=event_name,
+                        event_start=event_start,
+                        event_end=event_end,
+                        event_time_display=time_display
+                    )
+            except Exception as e:
+                logger.warning(f"[이벤트 파싱] 실패: {e}, event type: {type(event)}")
+                continue
+        
+        logger.info(f"[{self.user_name}] 충돌 이벤트 없음")
+        return None
     
     async def evaluate_proposal(
         self,
@@ -199,6 +271,9 @@ class PersonalAgent:
             
             # 🚨 강제 차단: 캘린더 충돌 시 GPT 호출 없이 즉시 COUNTER
             if not is_available and availability:
+                # 충돌하는 이벤트 찾기 (일정명 포함)
+                conflict_info = self.find_conflicting_event(proposed_dt) if proposed_dt else None
+                
                 # 제안 시간과 가장 가까운 가용 슬롯 찾기
                 best_slot = self._find_best_alternative_slot(proposed_dt, availability)
                 
@@ -211,29 +286,32 @@ class PersonalAgent:
                         duration_minutes=proposal.duration_minutes
                     )
                     
-                    logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! 강제 COUNTER - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
+                    # 충돌 일정명 표시
+                    conflict_event_name = conflict_info.event_name if conflict_info else "일정"
+                    logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! [{conflict_event_name}] - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
                     
                     # 정확한 요일 포함 날짜 형식
                     original_formatted = _format_date_with_weekday(proposal.date, proposal.time)
                     counter_formatted = _format_date_with_weekday(counter_proposal.date, counter_proposal.time)
                     
-                    # 메시지만 LLM으로 생성 (팩트 주입 - 정확한 요일 포함)
+                    # 메시지만 LLM으로 생성 (팩트 주입 - 충돌 일정명 포함)
                     try:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"일정 충돌로 대안 시간을 제안합니다. '{counter_formatted}'을 정중하게 제안하는 메시지를 작성하세요.",
+                            context=f"그 시간에 [{conflict_event_name}] 일정이 있어서 '{counter_formatted}'을 대안으로 정중하게 제안하는 메시지를 작성하세요.",
                             tone="friendly_counter"
                         )
                     except Exception as e:
                         logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
-                        counter_message = f"그 시간은 일정이 있어요 😅 {counter_formatted}은 어떠세요?"
+                        counter_message = f"그 시간엔 [{conflict_event_name}]이 있어요 😅 {counter_formatted}은 어떠세요?"
                     
                     return AgentDecision(
                         action=MessageType.COUNTER,
                         proposal=counter_proposal,
-                        reason="캘린더 충돌 - 팩트 기반 역제안",
-                        message=counter_message
+                        reason=f"캘린더 충돌: {conflict_event_name}",
+                        message=counter_message,
+                        conflict_info=conflict_info  # 충돌 일정 정보 포함
                     )
             
             # 가용 시간이 전혀 없는 경우

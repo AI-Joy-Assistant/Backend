@@ -353,3 +353,104 @@ class ChatRepository:
         except Exception as e:
             logger.error(f"세션 제목 업데이트 실패: {str(e)}")
             # 에러 발생해도 로직 중단하지 않음
+
+    @staticmethod
+    async def get_default_session(user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        사용자의 기본 채팅 세션 조회 또는 생성
+        - chat_sessions 테이블에서 is_default=true인 세션 찾기
+        - 없으면 새로 생성
+        """
+        try:
+            # 기본 세션 조회
+            response = (
+                supabase
+                .table('chat_sessions')
+                .select('*')
+                .eq('user_id', user_id)
+                .eq('is_default', True)
+                .limit(1)
+                .execute()
+            )
+            
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            
+            # 기본 세션이 없으면 가장 최근 세션 반환
+            response = (
+                supabase
+                .table('chat_sessions')
+                .select('*')
+                .eq('user_id', user_id)
+                .order('created_at', desc=True)
+                .limit(1)
+                .execute()
+            )
+            
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            
+            # 세션이 아예 없으면 새로 생성
+            new_session_id = str(uuid.uuid4())
+            new_session = {
+                "id": new_session_id,
+                "user_id": user_id,
+                "title": "새 채팅",
+                "is_default": True
+            }
+            
+            insert_response = supabase.table('chat_sessions').insert(new_session).execute()
+            if insert_response.data:
+                return insert_response.data[0]
+            
+            return {"id": new_session_id, "user_id": user_id}
+            
+        except Exception as e:
+            logger.error(f"기본 세션 조회/생성 오류: {str(e)}")
+            return None
+
+    @staticmethod
+    async def add_message(
+        session_id: str,
+        user_message: Optional[str],
+        ai_response: Optional[str],
+        intent: str = "general"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        채팅 세션에 메시지 추가
+        """
+        try:
+            # 세션 정보 조회
+            session_response = (
+                supabase
+                .table('chat_sessions')
+                .select('user_id')
+                .eq('id', session_id)
+                .limit(1)
+                .execute()
+            )
+            
+            if not session_response.data:
+                logger.warning(f"메시지 추가 실패: 세션 없음 (session_id={session_id})")
+                return None
+            
+            user_id = session_response.data[0]['user_id']
+            
+            # chat_log에 메시지 추가
+            payload = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "request_text": user_message,
+                "response_text": ai_response,
+                "message_type": intent
+            }
+            
+            insert_response = supabase.table('chat_log').insert(payload).execute()
+            if insert_response.data:
+                return insert_response.data[0]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"메시지 추가 오류: {str(e)}")
+            return None
