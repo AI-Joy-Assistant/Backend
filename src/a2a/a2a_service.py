@@ -542,14 +542,21 @@ class A2AService:
                             
                             # 다른 참여자들 이름 (본인 제외)
                             other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
-                            if len(other_names) == 1:
-                                evt_summary = f"{other_names[0]}와 {activity}"
-                            elif len(other_names) == 2:
-                                evt_summary = f"{other_names[0]}, {other_names[1]}와 {activity}"
-                            else:
-                                evt_summary = f"{other_names[0]} 외 {len(other_names)-1}명과 {activity}"
                             
-                            if location:
+                            # [수정] 사용자가 입력한 제목(activity)을 우선 사용
+                            # activity가 있으면 그대로 사용, 없으면 기존 형식 유지
+                            logger.info(f"📅 [Calendar Event] activity값: {activity}, location: {location}")
+                            if activity and activity != "약속":
+                                evt_summary = activity
+                            else:
+                                if len(other_names) == 1:
+                                    evt_summary = f"{other_names[0]}와 약속"
+                                elif len(other_names) == 2:
+                                    evt_summary = f"{other_names[0]}, {other_names[1]}와 약속"
+                                else:
+                                    evt_summary = f"{other_names[0]} 외 {len(other_names)-1}명과 약속"
+                            
+                            if location and location not in evt_summary:
                                 evt_summary += f" ({location})"
                             
                             event_req = CreateEventRequest(
@@ -1578,12 +1585,14 @@ class A2AService:
         duration_minutes: int = 60,
         force_new: bool = False,
         use_true_a2a: bool = True,
-        origin_chat_session_id: Optional[str] = None  # 원본 채팅 세션 ID 추가
+        origin_chat_session_id: Optional[str] = None,  # 원본 채팅 세션 ID 추가
+        duration_nights: int = 0  # ✅ 박 수 (0이면 당일, n박이면 n+1일 연속 확인)
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 세션 시작
         - force_new: True이면 기존 세션을 재사용하지 않고 무조건 새로 생성
         - use_true_a2a: True이면 NegotiationEngine 사용, False이면 기존 시뮬레이션
+        - duration_nights: 박 수 (0이면 당일, 1이상이면 n박 n+1일 연속 가용성 확인)
         여러 참여자와 동시에 일정을 조율합니다.
         기존 세션이 있으면 재사용합니다.
         """
@@ -1690,7 +1699,9 @@ class A2AService:
                             "requestedTime": formatted_requested_time,
                             "purpose": activity,
                             # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
-                            "origin_chat_session_id": origin_chat_session_id
+                            "origin_chat_session_id": origin_chat_session_id,
+                            # ✅ 박 수 저장 (0이면 당일, n이면 n박 n+1일)
+                            "duration_nights": duration_nights
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1749,7 +1760,9 @@ class A2AService:
                         "requestedTime": formatted_requested_time,
                         "purpose": activity,  # [FIX] purpose 추가
                         # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
-                        "origin_chat_session_id": origin_chat_session_id
+                        "origin_chat_session_id": origin_chat_session_id,
+                        # ✅ 박 수 저장 (0이면 당일, n이면 n박 n+1일)
+                        "duration_nights": duration_nights
                     }
                     
                     session = await A2ARepository.create_session(
@@ -1808,7 +1821,8 @@ class A2AService:
                     location=final_location,
                     activity=activity,
                     duration_minutes=duration_minutes,
-                    reuse_existing=reuse_existing
+                    reuse_existing=reuse_existing,
+                    duration_nights=duration_nights  # ✅ 박 수 전달
                 )
             
             # 4) 모든 세션 완료 처리 (기존 세션 재사용 시에도 상태 업데이트)
@@ -1845,11 +1859,13 @@ class A2AService:
         location: Optional[str],
         activity: Optional[str],
         duration_minutes: int,
-        reuse_existing: bool = False
+        reuse_existing: bool = False,
+        duration_nights: int = 0  # ✅ 박 수 (0이면 당일, n이면 n박 n+1일)
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 시뮬레이션 실행
         각 참여자의 Agent가 캘린더를 확인하고 일정을 조율합니다.
+        duration_nights가 1 이상이면 연속된 날짜들에 대해 모두 가용성을 확인합니다.
         """
         messages = []
         openai_service = OpenAIService()
@@ -1923,21 +1939,69 @@ class A2AService:
                 "text": text_init_check
             })
             
-            # 요청자 캘린더 확인
-            initiator_availability = await A2AService._check_user_availability(
-                user_id=initiator_user_id,
-                date=date,
-                time=time,
-                duration_minutes=duration_minutes
-            )
+            # ✅ [다박 일정] 연속 일수 체크를 위한 날짜 목록 생성
+            dates_to_check = [date]
+            if duration_nights > 0 and date:
+                try:
+                    from datetime import datetime as dt_cls
+                    from zoneinfo import ZoneInfo
+                    KST = ZoneInfo("Asia/Seoul")
+                    
+                    # 시작 날짜 파싱
+                    base_date = None
+                    date_str = date.strip()
+                    today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+                    # YYYY-MM-DD 형식 파싱
+                    date_match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+                    if date_match:
+                        year = int(date_match.group(1))
+                        month = int(date_match.group(2))
+                        day = int(date_match.group(3))
+                        base_date = datetime(year, month, day, tzinfo=KST)
+                    else:
+                        # MM월 DD일 형식 파싱
+                        date_match = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
+                        if date_match:
+                            month = int(date_match.group(1))
+                            day = int(date_match.group(2))
+                            year = today.year
+                            base_date = datetime(year, month, day, tzinfo=KST)
+                    
+                    if base_date:
+                        # duration_nights + 1 일 동안의 날짜 목록 생성
+                        dates_to_check = []
+                        for i in range(duration_nights + 1):
+                            check_date = base_date + timedelta(days=i)
+                            dates_to_check.append(check_date.strftime("%Y년 %m월 %d일"))
+                        
+                        logger.info(f"🗓️ [다박 일정] {duration_nights}박 {duration_nights + 1}일 - 체크할 날짜: {dates_to_check}")
+                except Exception as e:
+                    logger.warning(f"다박 일정 날짜 파싱 실패: {e}")
+                    dates_to_check = [date]
+            
+            # 요청자 캘린더 확인 (다박일 경우 모든 날짜 확인)
+            initiator_all_available = True
+            initiator_conflict_events = []
+            
+            for check_date in dates_to_check:
+                day_availability = await A2AService._check_user_availability(
+                    user_id=initiator_user_id,
+                    date=check_date,
+                    time=time,
+                    duration_minutes=duration_minutes
+                )
+                if not day_availability.get("available", True):
+                    initiator_all_available = False
+                    initiator_conflict_events.extend(day_availability.get("conflict_events", []))
             
             availability_results.append({
                 "user_id": initiator_user_id,
                 "user_name": initiator_name,
                 "session_id": sessions[0]["session_id"] if sessions else None,
-                "available": initiator_availability["available"],
-                "conflict_events": initiator_availability.get("conflict_events", []),
-                "available_slots": initiator_availability.get("available_slots", [])
+                "available": initiator_all_available,  # ✅ 다박 일정 체크 결과
+                "conflict_events": initiator_conflict_events,  # ✅ 다박 일정 충돌 이벤트
+                "available_slots": []
             })
             
             # 각 참여자의 Agent가 자신의 캘린더 확인
@@ -1966,21 +2030,28 @@ class A2AService:
                     "text": text_target_check
                 })
                 
-                # 캘린더 확인
-                availability = await A2AService._check_user_availability(
-                    user_id=target_id,
-                    date=date,
-                    time=time,
-                    duration_minutes=duration_minutes
-                )
+                # ✅ [다박 일정] 각 참여자도 모든 날짜에 대해 가용성 확인
+                target_all_available = True
+                target_conflict_events = []
+                
+                for check_date in dates_to_check:
+                    day_availability = await A2AService._check_user_availability(
+                        user_id=target_id,
+                        date=check_date,
+                        time=time,
+                        duration_minutes=duration_minutes
+                    )
+                    if not day_availability.get("available", True):
+                        target_all_available = False
+                        target_conflict_events.extend(day_availability.get("conflict_events", []))
                 
                 availability_results.append({
                     "user_id": target_id,
                     "user_name": target_name,
                     "session_id": session_info["session_id"],
-                    "available": availability["available"],
-                    "conflict_events": availability.get("conflict_events", []),
-                    "available_slots": availability.get("available_slots", [])
+                    "available": target_all_available,  # ✅ 다박 일정 체크 결과
+                    "conflict_events": target_conflict_events,  # ✅ 다박 일정 충돌 이벤트
+                    "available_slots": []
                 })
             
             # 3) 시간이 지정된 경우: 모든 참여자(요청자 포함) 가능 여부 확인

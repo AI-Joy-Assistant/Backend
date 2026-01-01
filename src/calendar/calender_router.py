@@ -427,6 +427,342 @@ async def get_common_free_slots(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"공통 가용 시간 계산 실패: {str(e)}")
 
+
+# ---------------------------
+# 다중 사용자 가용 시간 분석 (Request 화면용)
+# ---------------------------
+@router.post("/multi-user-free", summary="다중 사용자 공통 가용 시간 분석")
+async def get_multi_user_free_slots(
+        payload: dict,
+        current_user: dict = Depends(AuthService.get_current_user),
+):
+    """
+    여러 사용자의 캘린더를 분석하여 공통 가용 시간을 찾습니다.
+    각 슬롯에 대해 참여 가능 인원수와 상태(최적/안정/협의 필요)를 반환합니다.
+    
+    Request body:
+    - user_ids: list of user IDs to check availability
+    - duration_minutes: meeting duration (default 60)
+    - time_min: start of date range (ISO8601)
+    - time_max: end of date range (ISO8601)
+    - preferred_start_time: earliest meeting time (e.g., "09:00")
+    - preferred_end_time: latest meeting end time (e.g., "18:00")
+    """
+    try:
+        user_ids = payload.get("user_ids", [])
+        duration_minutes = int(payload.get("duration_minutes", 60))
+        time_min = payload.get("time_min")
+        time_max = payload.get("time_max")
+        preferred_start = payload.get("preferred_start_time", "09:00")  # e.g., "09:00"
+        preferred_end = payload.get("preferred_end_time", "18:00")  # e.g., "18:00"
+        limit = int(payload.get("limit", 5))
+        duration_nights = int(payload.get("duration_nights", 0))  # ✅ 박 수 (0이면 당일, n이면 n박 n+1일)
+        
+        if not user_ids:
+            raise HTTPException(status_code=400, detail="user_ids가 필요합니다.")
+        
+        # 현재 사용자 + 선택된 친구들
+        all_user_ids = [current_user["id"]] + user_ids
+        total_participants = len(all_user_ids)
+        
+        service = GoogleCalendarService()
+        kst = dt.timezone(dt.timedelta(hours=9))
+        now_kst = dt.datetime.now(dt.timezone.utc).astimezone(kst)
+        
+        # 기본 조회 기간: 오늘 ~ 14일 후
+        default_min = now_kst.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        default_max = (now_kst + dt.timedelta(days=14)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        
+        query_time_min = time_min or default_min
+        query_time_max = time_max or default_max
+        
+        # 각 사용자별 바쁜 시간 수집
+        user_busy_map = {}  # user_id -> list of (start, end) tuples
+        
+        def to_busy_intervals(events):
+            intervals = []
+            for e in events:
+                try:
+                    s = e.start.get("dateTime")
+                    e_ = e.end.get("dateTime")
+                    if not s or not e_:
+                        continue
+                    start = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    end = dt.datetime.fromisoformat(e_.replace("Z", "+00:00"))
+                    intervals.append((start, end))
+                except Exception:
+                    continue
+            return intervals
+        
+        for user_id in all_user_ids:
+            try:
+                if user_id == current_user["id"]:
+                    access_token = await _ensure_access_token(current_user)
+                else:
+                    access_token = await _ensure_access_token_by_user_id(user_id)
+                
+                events = await service.get_calendar_events(
+                    access_token=access_token,
+                    time_min=query_time_min,
+                    time_max=query_time_max,
+                )
+                user_busy_map[user_id] = to_busy_intervals(events)
+            except Exception as e:
+                logger.warning(f"[MULTI-FREE] 사용자 {user_id} 캘린더 조회 실패: {e}")
+                user_busy_map[user_id] = []  # 조회 실패 시 빈 리스트
+        
+        # 시간 경계 파싱
+        min_boundary = dt.datetime.fromisoformat(query_time_min.replace("Z", "+00:00"))
+        max_boundary = dt.datetime.fromisoformat(query_time_max.replace("Z", "+00:00"))
+        
+        # 선호 시간대 파싱 (HH:MM -> int)
+        pref_start_h, pref_start_m = map(int, preferred_start.split(":"))
+        pref_end_h, pref_end_m = map(int, preferred_end.split(":"))
+        
+        delta = dt.timedelta(minutes=duration_minutes)
+        daynames = ['월', '화', '수', '목', '금', '토', '일']
+        
+        # 모든 가능한 슬롯 생성 (날짜별, 선호 시간대 내)
+        all_candidates = []
+        current_date = min_boundary.date()
+        max_date = max_boundary.date()
+        
+        logger.info(f"[MULTI-FREE] 탐색 시작: {current_date} ~ {max_date}, 시간: {preferred_start}~{preferred_end}, 박수: {duration_nights}")
+
+        # ✅ [여행 모드] duration_nights > 0이면 연속 일수 체크
+        if duration_nights > 0:
+            # 여행 모드: 시작 날짜별로 연속 N+1일 동안 모든 사용자의 가용성 체크
+            needed_days = duration_nights + 1
+            
+            while current_date <= max_date:
+                # 이 시작 날짜로부터 N+1일 동안의 날짜 목록 생성
+                trip_dates = []
+                for i in range(needed_days):
+                    trip_date = current_date + dt.timedelta(days=i)
+                    if trip_date > max_date:
+                        break
+                    trip_dates.append(trip_date)
+                
+                # 필요한 일수가 안 되면 스킵
+                if len(trip_dates) < needed_days:
+                    current_date += dt.timedelta(days=1)
+                    continue
+                
+                # 각 사용자가 연속된 모든 날에 가능한지 확인
+                available_users = []
+                unavailable_users = []
+                
+                for user_id in all_user_ids:
+                    busy_intervals = user_busy_map.get(user_id, [])
+                    user_available_all_days = True
+                    
+                    # 모든 날짜에 대해 확인
+                    for trip_date in trip_dates:
+                        # ✅ [여행 모드] 해당 날짜의 전체 시간 범위 (00:00 ~ 23:59:59)
+                        # 여행 중에는 하루 전체가 비어있어야 함
+                        day_start = dt.datetime(
+                            trip_date.year, trip_date.month, trip_date.day,
+                            0, 0, 0, tzinfo=kst
+                        )
+                        day_end = dt.datetime(
+                            trip_date.year, trip_date.month, trip_date.day,
+                            23, 59, 59, tzinfo=kst
+                        )
+                        
+                        # 이 날짜에 어떤 일정이라도 있으면 불가능
+                        day_is_busy = False
+                        for busy_start, busy_end in busy_intervals:
+                            # 바쁜 시간이 이 날짜와 겹치면 불가능
+                            if busy_start < day_end and busy_end > day_start:
+                                day_is_busy = True
+                                logger.info(f"[MULTI-FREE 여행] 사용자 {user_id}가 {trip_date}에 일정 있음: {busy_start} ~ {busy_end}")
+                                break
+                        
+                        if day_is_busy:
+                            user_available_all_days = False
+                            break  # 하루라도 불가능하면 전체 불가능
+                    
+                    if user_available_all_days:
+                        available_users.append(user_id)
+                    else:
+                        unavailable_users.append(user_id)
+                
+                available_count = len(available_users)
+                half = total_participants / 2
+                
+                # 상태 결정
+                if available_count == total_participants:
+                    status = "최적"
+                    score = 100
+                elif available_count > half:
+                    status = "안정"
+                    score = 50 + available_count 
+                else:
+                    status = "협의 필요"
+                    score = available_count
+                
+                # 후보 추가 (시작 날짜와 종료 날짜 모두 표시)
+                start_date = trip_dates[0]
+                end_date = trip_dates[-1]
+                start_weekday = daynames[start_date.weekday()]
+                end_weekday = daynames[end_date.weekday()]
+                
+                all_candidates.append({
+                    "displayDate": f"{start_date.month}월 {start_date.day:02d}일 ({start_weekday}) ~ {end_date.month}월 {end_date.day:02d}일 ({end_weekday})",
+                    "date": start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                    "timeStart": preferred_start,
+                    "timeEnd": preferred_end,
+                    "availableCount": available_count,
+                    "totalParticipants": total_participants,
+                    "status": status,
+                    "availableIds": available_users,
+                    "unavailableIds": unavailable_users,
+                    "score": score,
+                    "datetime": dt.datetime(start_date.year, start_date.month, start_date.day, tzinfo=kst),
+                    "duration_nights": duration_nights
+                })
+                
+                current_date += dt.timedelta(days=1)
+        else:
+            # 일반 모드: 기존 로직 (단일 슬롯 체크)
+            while current_date <= max_date:
+                # 이 날짜의 선호 시간대 시작/끝
+                day_start = dt.datetime(
+                    current_date.year, current_date.month, current_date.day,
+                    pref_start_h, pref_start_m, tzinfo=kst
+                )
+                day_end = dt.datetime(
+                    current_date.year, current_date.month, current_date.day,
+                    pref_end_h, pref_end_m, tzinfo=kst
+                )
+                
+                # 슬롯 단위로 확인
+                slot_start = day_start
+                while slot_start + delta <= day_end:
+                    slot_end = slot_start + delta
+                    
+                    # 각 사용자가 이 슬롯에 가능한지 확인
+                    available_users = []
+                    unavailable_users = []
+                    
+                    for user_id in all_user_ids:
+                        busy_intervals = user_busy_map.get(user_id, [])
+                        is_busy = False
+                        for busy_start, busy_end in busy_intervals:
+                            # 슬롯과 바쁜 시간이 겹치는지 확인
+                            if busy_start < slot_end and busy_end > slot_start:
+                                is_busy = True
+                                break
+                        
+                        if is_busy:
+                            unavailable_users.append(user_id)
+                        else:
+                            available_users.append(user_id)
+                    
+                    available_count = len(available_users)
+                    half = total_participants / 2
+                    
+                    # 상태 결정
+                    if available_count == total_participants:
+                        status = "최적"
+                        score = 100
+                    elif available_count > half:
+                        status = "안정"
+                        score = 50 + available_count 
+                    else:
+                        status = "협의 필요"
+                        score = available_count
+                    
+                    # 후보 추가
+                    weekday_idx = current_date.weekday()
+                    day_name = daynames[weekday_idx]
+                    
+                    all_candidates.append({
+                        "displayDate": f"{current_date.month}월 {current_date.day:02d}일 ({day_name})",
+                        "date": current_date.isoformat(),
+                        "timeStart": slot_start.strftime("%H:%M"),
+                        "timeEnd": slot_end.strftime("%H:%M"),
+                        "availableCount": available_count,
+                        "totalParticipants": total_participants,
+                        "status": status,
+                        "availableIds": available_users,
+                        "unavailableIds": unavailable_users,
+                        "score": score,
+                        "datetime": slot_start
+                    })
+                    
+                    # 다음 슬롯 (30분 단위로 이동)
+                    slot_start += dt.timedelta(minutes=30)
+                
+                current_date += dt.timedelta(days=1)
+        
+        logger.info(f"[MULTI-FREE] 후보 슬롯 {len(all_candidates)}개 발견")
+        
+        # 정렬: 점수 높은 순 -> 날짜 빠른 순 -> 시간 빠른 순
+        all_candidates.sort(key=lambda x: (-x["score"], x["date"], x["timeStart"]))
+        
+        # 다양성 확보: 같은 날짜, 인접한 시간대는 피해서 상위 5개 선정
+        final_recommendations = []
+        selected_dates = {} # date -> count
+        
+        for cand in all_candidates:
+            if len(final_recommendations) >= limit:
+                break
+                
+            date_key = cand["date"]
+            
+            # 같은 날짜에 이미 2개 이상 추천되었으면 패스 (다양성)
+            if selected_dates.get(date_key, 0) >= 2:
+                continue
+                
+            # 이미 선택된 시간대와 너무 가까우면(1시간 이내) 패스
+            is_too_close = False
+            for selected in final_recommendations:
+                if selected["date"] == date_key:
+                    time_diff = abs((cand["datetime"] - selected["datetime"]).total_seconds())
+                    if time_diff < 3600: # 1시간 미만 차이
+                        is_too_close = True
+                        break
+            
+            if is_too_close:
+                continue
+                
+            # 선택 (datetime 유지)
+            final_recommendations.append(cand)
+            selected_dates[date_key] = selected_dates.get(date_key, 0) + 1
+            
+        # 결과가 limit 미만이면 남은 후보 중에서 채움 (단, 중복 제외)
+        if len(final_recommendations) < limit:
+            # datetime 객체는 비교가 어려우므로 식별자로 비교
+            existing_keys = set(f"{r['date']}_{r['timeStart']}" for r in final_recommendations)
+            for cand in all_candidates:
+                if len(final_recommendations) >= limit:
+                    break
+                key = f"{cand['date']}_{cand['timeStart']}"
+                if key not in existing_keys:
+                    final_recommendations.append(cand)
+                    existing_keys.add(key)
+        
+        # 최종 반환은 시간순 정렬 및 불필요 필드 제거
+        final_recommendations.sort(key=lambda x: (x["date"], x["timeStart"]))
+        
+        # 클라이언트에 보낼 때는 datetime, score 제거
+        cleaned_recommendations = []
+        for r in final_recommendations:
+            r_copy = r.copy()
+            if "score" in r_copy: r_copy.pop("score")
+            if "datetime" in r_copy: r_copy.pop("datetime")
+            cleaned_recommendations.append(r_copy)
+
+        return {"recommendations": cleaned_recommendations}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[MULTI-FREE] 다중 사용자 가용 시간 분석 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"다중 사용자 가용 시간 분석 실패: {str(e)}")
+
 @router.post("/meet-with-friend")
 async def create_meeting_with_friend(
         payload: dict,
