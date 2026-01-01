@@ -694,8 +694,15 @@ async def get_user_sessions(
                     if korean_date_match:
                         month = int(korean_date_match.group(1))
                         day = int(korean_date_match.group(2))
-                        # [FIX] 과거 날짜 필터링이 목적이므로 무조건 현재 연도 사용 (내년으로 넘기지 않음)
-                        target_date_str = f"{now.year}-{month:02d}-{day:02d}"
+                        year = now.year
+                        
+                        # 연도 보정: 현재 월보다 3개월 이상 큰 월은 이전 해로 간주
+                        # 예: 1월에 "12월 30일" → 작년 12월 30일
+                        current_month = now.month
+                        if month > current_month + 3:
+                            year = now.year - 1
+                        
+                        target_date_str = f"{year}-{month:02d}-{day:02d}"
                     elif re.match(r'^\d{4}-\d{2}-\d{2}$', p_date):
                         target_date_str = p_date
                     else:
