@@ -100,7 +100,7 @@ class A2ARepository:
                     merged['requestedTime'] = existing_place_pref['requestedTime']
                 
                 update_data["place_pref"] = merged  # JSONB 컬럼에는 dict 직접 저장
-                logger.info(f"세션 {session_id} - details 저장: {details}, merged: {merged}")
+                # logger.info(f"세션 {session_id} - details 저장: {details}, merged: {merged}")
             
             response = supabase.table('a2a_session').update(update_data).eq('id', session_id).execute()
             return len(response.data) > 0
@@ -216,15 +216,19 @@ class A2ARepository:
         try:
             import logging
             logger = logging.getLogger(__name__)
-            logger.info(f"🔍 Pending 요청 조회 시작 - user_id: {user_id}")
+            # logger.info(f"🔍 Pending 요청 조회 시작 - user_id: {user_id}")
+            
+            # [OPTIMIZED] 최근 3개월 데이터만 조회 (너무 오래된 데이터 제외)
+            from datetime import datetime, timedelta
+            three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
             
             # initiator 또는 target으로 참여한 세션 조회 (완료/거절된 세션도 포함)
             # Supabase에서 OR 조건 사용: or_(target_user_id.eq.{user_id}, initiator_user_id.eq.{user_id})
             response = supabase.table('a2a_session').select('*').or_(
                 f"target_user_id.eq.{user_id},initiator_user_id.eq.{user_id}"
-            ).in_('status', ['pending', 'pending_approval', 'in_progress', 'completed', 'rejected', 'needs_reschedule']).order('created_at', desc=True).execute()
+            ).gte('created_at', three_months_ago).in_('status', ['pending', 'pending_approval', 'in_progress', 'completed', 'rejected', 'needs_reschedule']).order('created_at', desc=True).execute()
             
-            logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
+            # logger.info(f"🔍 Pending 요청 조회 결과: {len(response.data) if response.data else 0}건")
             # if response.data:
             #     for s in response.data:
             #         logger.info(f"   - 세션: {s.get('id')}, status: {s.get('status')}, initiator: {s.get('initiator_user_id')}, target: {s.get('target_user_id')}")
@@ -407,7 +411,7 @@ class A2ARepository:
             ids_list = list(session_ids_to_delete)
 
             if ids_list:
-                logger.info(f"삭제할 세션 ID 목록: {ids_list}")
+                # logger.info(f"삭제할 세션 ID 목록: {ids_list}")
 
                 # 3. 종속 데이터 삭제 (순서 중요)
 

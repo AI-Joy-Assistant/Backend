@@ -802,10 +802,63 @@ async def get_pending_requests(
     try:
         print(f"🔍 [Pending Requests] Fetching for user: {current_user_id}")
         sessions = await A2ARepository.get_pending_requests_for_user(current_user_id)
-        print(f"🔍 [Pending Requests] Found {len(sessions) if sessions else 0} sessions")
-        # if sessions:
-        #     for s in sessions:
-                # print(f"   - Session {s.get('id')}: status={s.get('status')}, initiator={s.get('initiator_user_id')}, target={s.get('target_user_id')}")
+        raw_count = len(sessions) if sessions else 0
+        
+        # [OPTIMIZED] 날짜 기반 사전 필터링: 오늘 이전 날짜의 세션 제외
+        if sessions:
+            import json
+            import re
+            from datetime import datetime as dt
+            today = dt.now().date()
+            
+            filtered_sessions = []
+            for session in sessions:
+                place_pref = session.get("place_pref", {}) or {}
+                if isinstance(place_pref, str):
+                    try:
+                        place_pref = json.loads(place_pref)
+                    except:
+                        place_pref = {}
+                
+                # 날짜 추출 (우선순위: proposedDate > date)
+                proposed_date = None
+                if isinstance(place_pref, dict):
+                    proposed_date = place_pref.get("proposedDate") or place_pref.get("date")
+                
+                # 날짜가 없으면 조율 중이므로 포함
+                if not proposed_date:
+                    filtered_sessions.append(session)
+                    continue
+                
+                # 날짜 파싱 및 필터링
+                try:
+                    is_future_or_today = True  # 기본값: 표시
+                    
+                    # 1. YYYY-MM-DD 형식
+                    if "-" in proposed_date and len(proposed_date.split("-")) == 3:
+                        p_date_obj = dt.strptime(proposed_date, "%Y-%m-%d").date()
+                        is_future_or_today = p_date_obj >= today
+                    
+                    # 2. 한글 날짜 형식 (예: "1월 1일")
+                    elif "월" in proposed_date and "일" in proposed_date:
+                        match = re.search(r'(\d+)월\s*(\d+)일', proposed_date)
+                        if match:
+                            month, day = map(int, match.groups())
+                            try:
+                                p_date_obj = dt(today.year, month, day).date()
+                                is_future_or_today = p_date_obj >= today
+                            except:
+                                pass
+                    
+                    if is_future_or_today:
+                        filtered_sessions.append(session)
+                except:
+                    # 파싱 실패 시 안전하게 포함
+                    filtered_sessions.append(session)
+            
+            sessions = filtered_sessions
+        
+        print(f"🔍 [Pending Requests] DB: {raw_count}개 → 필터링 후: {len(sessions)}개 (오늘 이전 제외)")
         
         if not sessions:
             return {"requests": []}
@@ -895,6 +948,8 @@ async def get_pending_requests(
                 if isinstance(place_pref, dict):
                     proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
                     proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
+            
+            # NOTE: 날짜 기반 필터링은 이미 사전 필터링 단계에서 수행됨 (라인 805-858)
             
             # 재조율 요청 여부 판별
             is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
