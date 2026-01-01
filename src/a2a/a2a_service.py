@@ -222,6 +222,20 @@ class A2AService:
             initiator_name = initiator.get("name", "사용자")
             target_name = target.get("name", "상대방")
             
+            # [NEW] 세션 생성 직후 즉시 WebSocket 알림 전송 (카드가 바로 뜨도록)
+            try:
+                await ws_manager.send_personal_message({
+                    "type": "a2a_request",
+                    "session_id": session_id,
+                    "from_user": initiator_name,
+                    "summary": summary or "일정 조율 요청",
+                    "status": "in_progress",
+                    "timestamp": datetime.now(KST).isoformat()
+                }, target_user_id)
+                logger.info(f"[WS] A2A 세션 생성 알림 전송: {target_user_id}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] A2A 알림 전송 실패: {ws_err}")
+            
             # 3) True A2A 또는 기존 시뮬레이션 실행
             if use_true_a2a:
                 # 새로운 NegotiationEngine 사용
@@ -259,17 +273,16 @@ class A2AService:
                 # 완료
                 await A2ARepository.update_session_status(session_id, "completed")
             
-            # WebSocket으로 대상자에게 실시간 알림 전송
+            # [MOVED] WebSocket 알림은 세션 생성 직후로 이동했으므로 여기서는 협상 완료 후 상태 업데이트 알림만 전송
             try:
                 await ws_manager.send_personal_message({
-                    "type": "a2a_request",
+                    "type": "a2a_status_changed",
                     "session_id": session_id,
-                    "from_user": initiator_name,
-                    "summary": summary or "일정 조율 요청",
+                    "new_status": "pending_approval" if result.get("status") == "pending_approval" else "in_progress",
                     "proposal": result.get("proposal"),
                     "timestamp": datetime.now(KST).isoformat()
                 }, target_user_id)
-                logger.info(f"[WS] A2A 알림 전송: {target_user_id}")
+                logger.info(f"[WS] A2A 협상 완료 알림 전송: {target_user_id}")
             except Exception as ws_err:
                 logger.warning(f"[WS] A2A 알림 전송 실패: {ws_err}")
             
@@ -3175,13 +3188,28 @@ class A2AService:
                 
                 logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
                 
-                if all_others_left and len(non_requester_participants) > 0:
-                    logger.info(f"🔴 [거절] 모든 참여자가 나감 - 전체 {len(all_thread_sessions)}개 세션을 'rejected'로 변경")
-                    for session in all_thread_sessions:
-                        supabase.table('a2a_session').update({
-                            "status": "rejected",
-                            "updated_at": dt_datetime.now().isoformat()
-                        }).eq('id', session['id']).execute()
+                # [수정] 한 명이라도 거절하면 즉시 status를 rejected로 변경
+                logger.info(f"🔴 [거절] 세션을 즉시 'rejected'로 변경")
+                for session in all_thread_sessions:
+                    supabase.table('a2a_session').update({
+                        "status": "rejected",
+                        "updated_at": dt_datetime.now().isoformat()
+                    }).eq('id', session['id']).execute()
+                
+                # [추가] WebSocket으로 상대방에게 거절 알림 전송
+                for pid in all_participants:
+                    if str(pid) != str(user_id):  # 거절한 본인 제외
+                        try:
+                            await ws_manager.send_personal_message({
+                                "type": "a2a_rejected",
+                                "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
+                                "thread_id": thread_id,
+                                "rejected_by": user_id,
+                                "rejected_by_name": user_name
+                            }, str(pid))
+                            logger.info(f"[WS] 거절 알림 전송: {pid}")
+                        except Exception as ws_err:
+                            logger.warning(f"[WS] 거절 알림 전송 실패 ({pid}): {ws_err}")
 
                 # 2. 시스템 메시지: 남은 참여자들에게 거절 알림 (Loop 밖에서 한 번만 전송)
                 # thread_id로 묶여있으므로 하나의 세션에만 추가하면 됨

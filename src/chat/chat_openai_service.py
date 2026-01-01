@@ -447,12 +447,48 @@ JSON 반환 형식:
                             else:
                                 # JSON 전체인 경우 기본 메시지로 대체
                                 logger.warning(f"[Llama API] JSON 응답 감지, 기본 메시지로 대체: {result[:50]}...")
-                                result = "일정을 확인하고 있어요 😊"
+                                result = None  # 템플릿 사용하도록 표시
                     except json.JSONDecodeError:
                         pass
                 
                 # 따옴표 제거
-                result = result.strip('"').strip("'")
+                if result:
+                    result = result.strip('"').strip("'")
+                
+                # ⚠️ 응답 유효성 검증 - 이상한 응답 감지
+                invalid_patterns = [
+                    "약속 잡아줘", "일정 등록", "예약해 줘", "만나기로 했어",  # 원래 요청 패턴
+                    "has_schedule_request", "friend_names", "action\":",  # JSON 필드 이름
+                    "대표님과", "팀장님과", "회의 약속"  # 맥락 오염 패턴
+                ]
+                
+                is_invalid = False
+                if result:
+                    # 1. 너무 긴 메시지 (30자 초과)
+                    if len(result) > 50:
+                        logger.warning(f"[Llama API] 메시지가 너무 김: {len(result)}자")
+                        is_invalid = True
+                    # 2. 이상한 패턴 포함
+                    for pattern in invalid_patterns:
+                        if pattern in result:
+                            logger.warning(f"[Llama API] 이상한 패턴 감지: '{pattern}' in '{result[:50]}...'")
+                            is_invalid = True
+                            break
+                else:
+                    is_invalid = True
+                
+                # 유효하지 않은 응답이면 tone에 따른 템플릿 사용
+                if is_invalid:
+                    logger.info(f"[Llama API] 템플릿 기반 메시지 사용 (tone={tone})")
+                    if "accept" in tone.lower():
+                        result = "좋아요! 그 시간에 뵐게요 😊"
+                    elif "counter" in tone.lower() or "alternative" in tone.lower():
+                        result = "그 시간은 일정이 있어요 😅 다른 시간은 어때요?"
+                    elif "propose" in tone.lower():
+                        result = "이 시간은 어떠세요? 😊"
+                    else:
+                        result = "일정 확인해볼게요! 📅"
+                
                 logger.info(f"[Llama API] A2A 메시지 생성 완료: {result[:30]}...")
                 return result
 

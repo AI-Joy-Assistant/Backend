@@ -84,8 +84,19 @@ class PersonalAgent:
             # 캘린더 토큰 확보
             access_token = await AuthService.get_valid_access_token_by_user_id(self.user_id)
             if not access_token:
-                logger.warning(f"[{self.user_name}] 캘린더 토큰 없음")
-                return []
+                logger.warning(f"[{self.user_name}] 캘린더 토큰 없음 - 전체 시간 가용으로 처리")
+                # 토큰이 없으면 일정이 없는 것으로 가정 (모든 시간 가용)
+                available_slots = []
+                current_date = date_range_start.date()
+                end_date = date_range_end.date()
+                while current_date <= end_date:
+                    slot_start = datetime(current_date.year, current_date.month, current_date.day, 9, 0, 0, tzinfo=KST)
+                    slot_end = datetime(current_date.year, current_date.month, current_date.day, 22, 0, 0, tzinfo=KST)
+                    available_slots.append(TimeSlot(start=slot_start, end=slot_end))
+                    current_date += timedelta(days=1)
+                self._cached_availability = available_slots
+                logger.info(f"[{self.user_name}] (토큰 없음) 기본 가용 슬롯 {len(available_slots)}개 생성")
+                return available_slots
             
             service = GoogleCalendarService()
             events = await service.get_calendar_events(
@@ -161,8 +172,17 @@ class PersonalAgent:
             return available_slots
             
         except Exception as e:
-            logger.error(f"[{self.user_name}] 가용 시간 조회 실패: {e}")
-            return []
+            logger.error(f"[{self.user_name}] 가용 시간 조회 실패: {e} - 기본 가용 슬롯 생성")
+            # 오류 발생 시에도 기본 가용 슬롯 생성 (9시~22시)
+            available_slots = []
+            now = datetime.now(KST)
+            for i in range(14):
+                current_date = (now + timedelta(days=i)).date()
+                slot_start = datetime(current_date.year, current_date.month, current_date.day, 9, 0, 0, tzinfo=KST)
+                slot_end = datetime(current_date.year, current_date.month, current_date.day, 22, 0, 0, tzinfo=KST)
+                available_slots.append(TimeSlot(start=slot_start, end=slot_end))
+            self._cached_availability = available_slots
+            return available_slots
     
     async def evaluate_proposal(
         self,

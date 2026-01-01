@@ -498,9 +498,69 @@ async def get_user_sessions(
             
             # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
             # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
-            # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 기본 구조만 잡음
+            # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 실제 메시지 조회
             
-            process = [] 
+            # 메시지 조회하여 process 채우기
+            messages = await A2ARepository.get_session_messages(session.get("id"))
+            process = []
+            for msg in messages:
+                msg_content = msg.get('message', {})
+                sender_id = msg.get('sender_user_id')
+                
+                # 발신자 이름 찾기
+                sender_name = "System"
+                if sender_id and sender_id in user_details_map:
+                    sender_name = user_details_map[sender_id].get("name", "Unknown")
+                
+                # 메시지 텍스트 추출 (중첩된 구조 처리)
+                description = ""
+                if isinstance(msg_content, dict):
+                    # text 필드 추출
+                    text_value = msg_content.get('text', '') or msg_content.get('message', '')
+                    # text가 다시 dict인 경우 재귀적으로 text 추출
+                    if isinstance(text_value, dict):
+                        text_value = text_value.get('text', '') or text_value.get('message', '') or str(text_value)
+                    # 여전히 dict 문자열처럼 보이면 str()로 변환되었을 수 있음
+                    if text_value and not str(text_value).startswith('{'):
+                        description = str(text_value)
+                    elif text_value:
+                        # JSON 문자열인 경우 파싱 시도
+                        import json
+                        try:
+                            parsed = json.loads(str(text_value)) if isinstance(text_value, str) else text_value
+                            if isinstance(parsed, dict):
+                                description = parsed.get('text', '') or parsed.get('message', '') or str(parsed)
+                            else:
+                                description = str(parsed)
+                        except:
+                            description = str(text_value)
+                    else:
+                        description = "메시지 없음"
+                else:
+                    description = str(msg_content) if msg_content else "메시지 없음"
+                
+                # 단계 이름 설정
+                step_name = f"[{sender_name}의 AI]"
+                msg_type = msg.get('type')
+                
+                if msg_type == 'proposal':
+                    round_num = msg_content.get('round', '?') if isinstance(msg_content, dict) else '?'
+                    step_name = f"[{sender_name}의 AI] Round {round_num}"
+                elif msg_type == 'accept':
+                    step_name = f"[{sender_name}의 AI] 수락"
+                elif msg_type == 'reject' or msg_type == 'schedule_rejection':
+                    step_name = f"[{sender_name}의 AI] 거절"
+                elif msg_type == 'info':
+                    step_name = "[알림]"
+                
+                process.append({
+                    "step": step_name,
+                    "description": description,
+                    "created_at": msg.get('created_at')
+                })
+            
+            # left_participants 정보 추출
+            left_participants = place_pref.get("left_participants", [])
             
             # place_pref에서 직접 날짜/시간 정보 추출 (details 컬럼은 DB에 없음)
             # 재조율 시 proposedDate/proposedTime 키, 초기 생성 시 date/time 키 사용
@@ -511,7 +571,8 @@ async def get_user_sessions(
                 "proposedTime": place_pref.get("proposedTime") or place_pref.get("time") or "미정",
                 "proposedDate": place_pref.get("proposedDate") or place_pref.get("date"),
                 "location": place_pref.get("location") or "미정",
-                "process": process
+                "process": process,
+                "left_participants": left_participants  # 프론트엔드 필터링용
             }
 
             session["title"] = title
