@@ -724,21 +724,21 @@ class A2AService:
                             except Exception as dup_err:
                                 logger.warning(f"중복 체크 중 오류 (진행함): {dup_err}")
                             
-                            # 충돌 세션에 경고 메시지 추가 (고유 세션당 1회만)
-                            warning_message = {
-                                "type": "conflict_warning",
-                                "title": "⚠️ 시간 충돌 알림",
-                                "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')})",
-                                "confirmed_session_id": session_id,
-                                "confirmed_time": f"{confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')}"
-                            }
-                            await A2ARepository.add_message(
-                                session_id=conflict_sid,
-                                sender_user_id=session.get("initiator_user_id"),
-                                receiver_user_id=session.get("initiator_user_id"),
-                                message_type="conflict_warning",
-                                message=warning_message
-                            )
+                            # [DISABLED] 충돌 세션에 경고 메시지 추가 - 협상 로그에 표시하지 않음
+                            # warning_message = {
+                            #     "type": "conflict_warning",
+                            #     "title": "⚠️ 시간 충돌 알림",
+                            #     "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')})",
+                            #     "confirmed_session_id": session_id,
+                            #     "confirmed_time": f"{confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')}"
+                            # }
+                            # await A2ARepository.add_message(
+                            #     session_id=conflict_sid,
+                            #     sender_user_id=session.get("initiator_user_id"),
+                            #     receiver_user_id=session.get("initiator_user_id"),
+                            #     message_type="conflict_warning",
+                            #     message=warning_message
+                            # )
                             
                             # [NEW] 충돌 세션 상태를 needs_reschedule로 변경하고 충돌 정보 업데이트
                             try:
@@ -769,10 +769,10 @@ class A2AService:
                                 if not any(c.get("session_id") == session_id for c in existing_conflicts):
                                     existing_conflicts.append({
                                         "session_id": session_id,
-                                        "title": "확정된 일정",
+                                        "title": activity,  # [FIX] 실제 일정 제목 사용
                                         "date": confirmed_details.get("proposedDate"),
                                         "time": confirmed_details.get("proposedTime"),
-                                        "participant_names": []
+                                        "participant_names": [initiator_name, target_name]  # [NEW] 참여자 이름 추가
                                     })
                                 
                                 update_details = {
@@ -875,6 +875,7 @@ class A2AService:
             
             # place_pref에 재조율 정보 추가 (시간 범위 포함)
             # [FIX] 재조율 시 기존 승인 목록 및 나간 참여자 초기화
+            # [NEW] 재조율 시 충돌 플래그도 초기화 (새 시간으로 재협상하므로 충돌 상태 리셋)
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
@@ -885,6 +886,9 @@ class A2AService:
                 "proposedEndTime": formatted_end_time,
                 "approved_by_list": [user_id],  # 재조율 요청자만 승인 상태로 초기화
                 "left_participants": [],  # [NEW] 나간 참여자 목록도 초기화 (다시 협상 시작)
+                "has_conflict": False,  # [NEW] 충돌 플래그 초기화
+                "conflicting_sessions": [],  # [NEW] 충돌 세션 목록 초기화
+                "conflict_reason": None,  # [NEW] 충돌 사유 초기화
             }
             print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants: []")
             
@@ -2047,21 +2051,21 @@ class A2AService:
                         for conflict in conflicting:
                             conflict_sid = conflict.get("id")
                             if conflict_sid:
-                                # 기존 세션에 충돌 알림 추가
-                                warning_message = {
-                                    "type": "conflict_warning",
-                                    "title": "⚠️ 시간 충돌 알림",
-                                    "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({date} {time})",
-                                    "conflicting_session_id": new_session_id,
-                                    "conflicting_time": f"{date} {time}"
-                                }
-                                await A2ARepository.add_message(
-                                    session_id=conflict_sid,
-                                    sender_user_id=pid,
-                                    receiver_user_id=pid,
-                                    message_type="conflict_warning",
-                                    message=warning_message
-                                )
+                                # [DISABLED] 기존 세션에 충돌 알림 추가 - 협상 로그에 표시하지 않음
+                                # warning_message = {
+                                #     "type": "conflict_warning",
+                                #     "title": "⚠️ 시간 충돌 알림",
+                                #     "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({date} {time})",
+                                #     "conflicting_session_id": new_session_id,
+                                #     "conflicting_time": f"{date} {time}"
+                                # }
+                                # await A2ARepository.add_message(
+                                #     session_id=conflict_sid,
+                                #     sender_user_id=pid,
+                                #     receiver_user_id=pid,
+                                #     message_type="conflict_warning",
+                                #     message=warning_message
+                                # )
                                 
                                 # [FIX] 기존 세션의 place_pref를 DB에서 직접 조회하여 올바르게 병합
                                 try:
@@ -2085,7 +2089,9 @@ class A2AService:
                                             existing_conflicts = []
                                         existing_conflicts.append({
                                             "session_id": new_session_id,
-                                            "time": f"{date} {time}"
+                                            "title": summary or activity or "새 일정",  # [FIX] 일정 제목 추가
+                                            "time": f"{date} {time}",
+                                            "participant_names": [initiator_name]  # [NEW] 참여자 이름 추가
                                         })
                                         existing_pref["conflicting_sessions"] = existing_conflicts
                                         

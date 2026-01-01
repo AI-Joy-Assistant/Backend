@@ -132,15 +132,16 @@ async def get_a2a_session(
                 })
                 continue
             
-            # [NEW] 충돌 경고 메시지 처리
+            # [DISABLED] 충돌 경고 메시지 처리 - 협상 로그에 표시하지 않음
             if msg_type == "conflict_warning":
-                process.append({
-                    "step": "⚠️ 시간 충돌 알림",
-                    "description": msg_data.get("description", "같은 시간대에 다른 일정이 확정되었습니다. 재조율이 필요합니다."),
-                    "created_at": created_at,
-                    "type": "conflict_warning"
-                })
-                continue
+                continue  # 충돌 알림은 로그에서 제외
+                # process.append({
+                #     "step": "⚠️ 시간 충돌 알림",
+                #     "description": msg_data.get("description", "같은 시간대에 다른 일정이 확정되었습니다. 재조율이 필요합니다."),
+                #     "created_at": created_at,
+                #     "type": "conflict_warning"
+                # })
+                # continue
             
             # 기존 형식: step + text
             step = msg_data.get("step")
@@ -563,8 +564,43 @@ async def get_user_sessions(
             db_conflicts = place_pref.get("conflicting_sessions", [])
             if not isinstance(db_conflicts, list): db_conflicts = []
             
+            # [NEW] DB에 저장된 충돌 세션의 제목을 동적으로 보완
+            # 기존 데이터에 "일정" 또는 "확정된 일정"만 있는 경우 실제 제목으로 대체
+            enriched_conflicts = []
+            for conflict in db_conflicts:
+                conflict_id = conflict.get("id") or conflict.get("session_id")
+                conflict_title = conflict.get("title", "")
+                
+                # 제목이 없거나 기본값인 경우 grouped_sessions에서 찾아서 보완
+                if not conflict_title or conflict_title in ["일정", "확정된 일정", "새 일정"]:
+                    # grouped_sessions에서 해당 세션 찾기
+                    for gs in grouped_sessions:
+                        if gs.get("id") == conflict_id:
+                            gs_pref = gs.get("place_pref", {})
+                            if isinstance(gs_pref, str):
+                                try: gs_pref = json.loads(gs_pref)
+                                except: gs_pref = {}
+                            
+                            # 제목 결정 (purpose > summary > 참여자 이름)
+                            new_title = gs_pref.get("purpose") or gs_pref.get("summary") or gs_pref.get("activity")
+                            if not new_title:
+                                p_names = gs.get("participant_names", [])
+                                if p_names:
+                                    new_title = f"{', '.join(p_names)}와 약속"
+                            
+                            if new_title:
+                                conflict_title = new_title
+                            
+                            # 참여자 이름도 보완
+                            if not conflict.get("participant_names"):
+                                conflict["participant_names"] = gs.get("participant_names", [])
+                            break
+                
+                conflict["title"] = conflict_title or "일정"
+                enriched_conflicts.append(conflict)
+            
             has_conflict = db_has_conflict
-            conflicting_sessions = list(db_conflicts)
+            conflicting_sessions = enriched_conflicts
 
             session_status = session.get("status", "").lower()
             session_id = session.get("id")
@@ -636,9 +672,23 @@ async def get_user_sessions(
                                     break
                             
                             if not is_dup:
+                                # 충돌 세션의 제목 결정 (purpose > summary > 참여자 이름 기반)
+                                conflict_title = (
+                                    other_pref.get("purpose") or 
+                                    other_pref.get("summary") or 
+                                    other_pref.get("activity")
+                                )
+                                # 제목이 없으면 참여자 이름으로 생성
+                                if not conflict_title:
+                                    participant_names = other.get("participant_names", [])
+                                    if participant_names:
+                                        conflict_title = f"{', '.join(participant_names)}와 약속"
+                                    else:
+                                        conflict_title = "일정"
+                                
                                 conflicting_sessions.append({
                                     "id": other_id,
-                                    "title": other_pref.get("purpose") or other_pref.get("summary") or "일정",
+                                    "title": conflict_title,
                                     "date": other_date,
                                     "time": other_time,
                                     "participant_names": other.get("participant_names", [])
