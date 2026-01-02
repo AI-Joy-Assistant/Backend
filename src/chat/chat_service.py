@@ -2015,9 +2015,10 @@ class ChatService:
             except:
                 pass
 
-            # [수정] 종료 시간이 명시되지 않은 경우(start==end), 사용자가 "시작 시간만" 원했으므로 그대로 유지
+            # [수정] 종료 시간이 명시되지 않은 경우(start==end), 최소 1시간 추가 (Google Calendar API는 0분 일정 허용 안 함)
             if start_time == end_time:
-                logger.info(f"종료 시간 미지정 -> 시작 시간과 동일하게 등록 (0분 일정): {end_time}")
+                end_time = start_time + timedelta(hours=1)
+                logger.info(f"종료 시간 미지정 → 1시간 추가: {start_time} ~ {end_time}")
 
             # [수정] 일정 제목 생성 로직 개선 (title -> activity -> original_text)
             title = schedule_info.get("title")
