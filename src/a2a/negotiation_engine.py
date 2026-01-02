@@ -658,6 +658,26 @@ class NegotiationEngine:
                     "proposal": msg.proposal.to_dict() if msg.proposal else None
                 }
             )
+            
+            # [NEW] WebSocket 알림: 모든 참여자에게 새 협상 메시지 알림 (실시간 로그 업데이트)
+            from src.websocket.websocket_manager import manager as ws_manager
+            all_participants = [self.initiator_user_id] + self.participant_user_ids
+            logger.info(f"[WS DEBUG] 협상 메시지 알림 전송 시작: 참여자={all_participants}, session_id={self.session_id}")
+            for pid in all_participants:
+                try:
+                    ws_payload = {
+                        "type": "a2a_message",
+                        "session_id": self.session_id,
+                        "message_type": msg.type.value.lower(),
+                        "sender_name": msg.sender_name,
+                        "message": msg.message[:100] if msg.message else "",
+                        "round": msg.round_number
+                    }
+                    logger.info(f"[WS DEBUG] 전송 시도: {pid} -> {ws_payload}")
+                    await ws_manager.send_personal_message(ws_payload, str(pid))
+                    logger.info(f"[WS DEBUG] 전송 성공: {pid}")
+                except Exception as ws_err:
+                    logger.warning(f"[WS] 협상 메시지 알림 전송 실패 ({pid}): {ws_err}")
         except Exception as e:
             logger.error(f"메시지 저장 실패: {e}")
     

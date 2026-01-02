@@ -294,7 +294,7 @@ class IntentService:
             "time": raw.get("time") or heuristic_result.get("time"),
             "start_time": raw.get("start_time"),
             "end_time": raw.get("end_time"),
-            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 else heuristic_result.get("activity"),
+            "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 and raw.get("activity") in message else heuristic_result.get("activity"),
             "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
             "has_schedule_request": bool(has_schedule),

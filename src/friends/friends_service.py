@@ -1,6 +1,10 @@
 from typing import Dict, Any, List
+from datetime import datetime, timezone, timedelta
 from .friends_repository import FriendsRepository
 from .friends_models import AddFriendRequest
+from src.websocket.websocket_manager import manager as ws_manager
+
+KST = timezone(timedelta(hours=9))
 
 class FriendsService:
     def __init__(self):
@@ -35,6 +39,24 @@ class FriendsService:
             
             if result["success"]:
                 print(f"✅ 친구 요청 생성 성공")
+                
+                # WebSocket으로 상대방에게 실시간 알림 전송
+                try:
+                    # 요청자 이름 조회
+                    from_user = await self.repository.get_user_by_id(current_user_id)
+                    from_name = from_user.get('name', '사용자') if from_user else '사용자'
+                    
+                    await ws_manager.send_personal_message({
+                        "type": "friend_request",
+                        "request_id": result["data"]["id"],
+                        "from_user_id": current_user_id,
+                        "from_user_name": from_name,
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, user['id'])
+                    print(f"[WS] 친구 요청 알림 전송: {user['id']}")
+                except Exception as ws_err:
+                    print(f"[WS] 친구 요청 알림 전송 실패: {ws_err}")
+                
                 return {
                     "status": 200,
                     "message": "친구 요청을 보냈습니다.",
@@ -101,6 +123,19 @@ class FriendsService:
             result = await self.repository.accept_friend_request(request_id, user_id)
             
             if result["success"]:
+                # WebSocket으로 요청자에게 수락 알림 전송
+                try:
+                    if result.get("from_user_id"):
+                        await ws_manager.send_personal_message({
+                            "type": "friend_accepted",
+                            "request_id": request_id,
+                            "accepted_by": user_id,
+                            "timestamp": datetime.now(KST).isoformat()
+                        }, result["from_user_id"])
+                        print(f"[WS] 친구 수락 알림 전송: {result['from_user_id']}")
+                except Exception as ws_err:
+                    print(f"[WS] 친구 수락 알림 전송 실패: {ws_err}")
+                
                 return {
                     "status": 200,
                     "message": result["message"]
