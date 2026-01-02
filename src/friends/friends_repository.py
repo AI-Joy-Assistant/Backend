@@ -35,6 +35,15 @@ class FriendsRepository:
             print(f"사용자 조회 오류: {e}")
             return None
     
+    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """사용자 ID로 조회"""
+        try:
+            response = self.supabase.table('user').select('*').eq('id', user_id).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"사용자 조회 오류: {e}")
+            return None
+    
     async def create_friend_request(self, from_user_id: str, to_user_id: str) -> Dict[str, Any]:
         """친구 요청 생성"""
         try:
@@ -103,7 +112,7 @@ class FriendsRepository:
             
             self.supabase.table('friend_list').insert([friend_data1, friend_data2]).execute()
             
-            return {"success": True, "message": "친구 요청을 수락했습니다."}
+            return {"success": True, "message": "친구 요청을 수락했습니다.", "from_user_id": request['request_id']}
         except Exception as e:
             print(f"친구 요청 수락 오류: {e}")
             return {"success": False, "message": "친구 요청 수락 중 오류가 발생했습니다."}

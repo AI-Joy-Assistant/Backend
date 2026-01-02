@@ -51,7 +51,7 @@ class GoogleCalendarService:
                 r = await client.post(token_url, data=data)
                 r.raise_for_status()
             token_data = r.json()
-            logger.info("Google OAuth 토큰 발급 성공")
+            # logger.info("Google OAuth 토큰 발급 성공")
             return token_data
         except httpx.HTTPStatusError as e:
             logger.error(f"OAuth 토큰 발급 실패: {e.response.status_code} - {e.response.text}")
@@ -97,7 +97,7 @@ class GoogleCalendarService:
             "Content-Type": "application/json",
         }
 
-        logger.info(f"[CAL][LIST] GET {url} params={params}")
+        # logger.info(f"[CAL][LIST] GET {url} params={params}")
 
         try:
             async with httpx.AsyncClient(timeout=20) as client:
@@ -122,7 +122,7 @@ class GoogleCalendarService:
                 except Exception as e:
                     logger.warning(f"이벤트 파싱 실패: {str(e)}, 원본: {json.dumps(item)[:300]}")
 
-            logger.info(f"[CAL][LIST] {len(events)}개 이벤트 조회 성공")
+            # logger.info(f"[CAL][LIST] {len(events)}개 이벤트 조회 성공")
             return events
 
         except httpx.HTTPStatusError as e:
@@ -185,7 +185,7 @@ class GoogleCalendarService:
 
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
-        logger.info(f"[CAL][CREATE] POST {url} body={json.dumps(event_body)[:400]}")
+        # logger.info(f"[CAL][CREATE] POST {url} body={json.dumps(event_body)[:400]}")
 
         try:
             async with httpx.AsyncClient(timeout=20) as client:
@@ -202,7 +202,7 @@ class GoogleCalendarService:
                 location=data.get("location"),
                 htmlLink=data.get("htmlLink"),
             )
-            logger.info(f"[CAL][CREATE] 성공: {evt.summary} ({evt.id})")
+            # logger.info(f"[CAL][CREATE] 성공: {evt.summary} ({evt.id})")
             return evt
 
         except httpx.HTTPStatusError as e:
@@ -219,12 +219,12 @@ class GoogleCalendarService:
     async def delete_calendar_event(self, access_token: str, event_id: str, calendar_id: str = "primary") -> bool:
         url = f"{self.base_url}/calendars/{calendar_id}/events/{event_id}"
         headers = {"Authorization": f"Bearer {access_token}"}
-        logger.info(f"[CAL][DELETE] DELETE {url}")
+        # logger.info(f"[CAL][DELETE] DELETE {url}")
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.delete(url, headers=headers)
             if r.status_code in (200, 204):
-                logger.info(f"[CAL][DELETE] 성공: {event_id}")
+                # logger.info(f"[CAL][DELETE] 성공: {event_id}")
                 return True
             logger.error(f"[CAL][DELETE] 실패: {r.status_code} - {r.text}")
             return False
@@ -260,7 +260,7 @@ class GoogleCalendarService:
         from urllib.parse import urlencode
         qs = urlencode(params)
         auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{qs}"
-        logger.info(f"Google OAuth 인증 URL 생성: {auth_url}")
+        # logger.info(f"Google OAuth 인증 URL 생성: {auth_url}")
         return auth_url
 
     async def refresh_access_token(self, refresh_token: str) -> dict:
@@ -276,7 +276,7 @@ class GoogleCalendarService:
                 r = await client.post(token_url, data=data)
                 r.raise_for_status()
             token_data = r.json()
-            logger.info("Google OAuth 토큰 갱신 성공")
+            # logger.info("Google OAuth 토큰 갱신 성공")
             return token_data
         except httpx.HTTPStatusError as e:
             logger.error(f"토큰 갱신 실패: {e.response.status_code} - {e.response.text}")

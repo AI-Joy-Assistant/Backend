@@ -18,6 +18,7 @@ from datetime import datetime as dt_datetime
 
 from ..chat.chat_repository import ChatRepository
 from src.chat.chat_openai_service import OpenAIService
+from src.websocket.websocket_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,25 @@ def convert_relative_time(time_str: Optional[str], activity: Optional[str] = Non
     hour = None
     minute = 0
     
-    # "오후 3시", "오전 10시 30분" 등
+    # 콜론 형식 처리 (예: "5:30", "17:30")
+    colon_match = re.search(r'(\d{1,2}):(\d{2})', time_str)
+    if colon_match:
+        hour = int(colon_match.group(1))
+        minute = int(colon_match.group(2))
+        
+        # 오후/오전 처리
+        if "오후" in time_str and hour < 12:
+            hour += 12
+        elif "오전" in time_str and hour == 12:
+            hour = 0
+        elif "오전" not in time_str and "오후" not in time_str:
+            # 1~6시는 대부분 오후
+            if 1 <= hour <= 6:
+                hour += 12
+        
+        return f"{hour:02d}:{minute:02d}"
+    
+    # "오후 3시", "오전 10시 30분", "5시반" 등
     hour_match = re.search(r'(\d{1,2})\s*시', time_str)
     if hour_match:
         hour = int(hour_match.group(1))
@@ -132,10 +151,14 @@ def convert_relative_time(time_str: Optional[str], activity: Optional[str] = Non
             if 1 <= hour <= 6:
                 hour += 12
         
-        # 분 처리
-        min_match = re.search(r'(\d{1,2})\s*분', time_str)
-        if min_match:
-            minute = int(min_match.group(1))
+        # "반" 처리 (30분)
+        if "반" in time_str:
+            minute = 30
+        else:
+            # 분 처리 (예: "5시 15분", "10시30분")
+            min_match = re.search(r'(\d{1,2})\s*분', time_str)
+            if min_match:
+                minute = int(min_match.group(1))
     
     if hour is not None:
         return f"{hour:02d}:{minute:02d}"
@@ -199,6 +222,20 @@ class A2AService:
             initiator_name = initiator.get("name", "사용자")
             target_name = target.get("name", "상대방")
             
+            # [NEW] 세션 생성 직후 즉시 WebSocket 알림 전송 (카드가 바로 뜨도록)
+            try:
+                await ws_manager.send_personal_message({
+                    "type": "a2a_request",
+                    "session_id": session_id,
+                    "from_user": initiator_name,
+                    "summary": summary or "일정 조율 요청",
+                    "status": "in_progress",
+                    "timestamp": datetime.now(KST).isoformat()
+                }, target_user_id)
+                logger.info(f"[WS] A2A 세션 생성 알림 전송: {target_user_id}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] A2A 알림 전송 실패: {ws_err}")
+            
             # 3) True A2A 또는 기존 시뮬레이션 실행
             if use_true_a2a:
                 # 새로운 NegotiationEngine 사용
@@ -236,6 +273,19 @@ class A2AService:
                 # 완료
                 await A2ARepository.update_session_status(session_id, "completed")
             
+            # [MOVED] WebSocket 알림은 세션 생성 직후로 이동했으므로 여기서는 협상 완료 후 상태 업데이트 알림만 전송
+            try:
+                await ws_manager.send_personal_message({
+                    "type": "a2a_status_changed",
+                    "session_id": session_id,
+                    "new_status": "pending_approval" if result.get("status") == "pending_approval" else "in_progress",
+                    "proposal": result.get("proposal"),
+                    "timestamp": datetime.now(KST).isoformat()
+                }, target_user_id)
+                logger.info(f"[WS] A2A 협상 완료 알림 전송: {target_user_id}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] A2A 알림 전송 실패: {ws_err}")
+            
             return {
                 "status": 200,
                 "session_id": session_id,
@@ -258,12 +308,118 @@ class A2AService:
             }
     
     @staticmethod
+    async def get_conflicting_sessions(user_id: str, target_date: str, target_time: str, exclude_session_id: str = None) -> List[Dict[str, Any]]:
+        """
+        특정 사용자의 진행 중인 세션 중 시간이 겹치는 세션 목록 반환
+        Args:
+            user_id: 사용자 ID
+            target_date: 확인할 날짜 (예: "12월 29일", "2025-01-05")
+            target_time: 확인할 시간 (예: "오후 2시", "14:00")
+            exclude_session_id: 제외할 세션 ID (자기 자신)
+        Returns:
+            겹치는 세션 목록
+        """
+        try:
+            from src.a2a.a2a_repository import A2ARepository
+            import re
+            
+            # 사용자의 진행 중인 세션 조회
+            sessions = await A2ARepository.get_pending_requests_for_user(user_id)
+            
+            if not sessions:
+                return []
+            
+            # 날짜/시간 정규화 함수
+            def normalize_date(date_str: str) -> str:
+                if not date_str:
+                    return ""
+                # "12월 29일" -> "12-29", "2025-01-05" -> "01-05"
+                match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+                if match:
+                    return f"{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+                match = re.search(r'\d{4}-(\d{2})-(\d{2})', date_str)
+                if match:
+                    return f"{match.group(1)}-{match.group(2)}"
+                return date_str
+            
+            def normalize_time(time_str: str) -> int:
+                if not time_str:
+                    return -1
+                # "오후 2시" -> 14, "14:00" -> 14, "오전 10시" -> 10
+                time_str = time_str.replace(" ", "")
+                
+                # 24시간 형식
+                match = re.search(r'(\d{1,2}):\d{2}', time_str)
+                if match:
+                    return int(match.group(1))
+                
+                # 한국어 형식
+                is_pm = "오후" in time_str
+                match = re.search(r'(\d{1,2})시', time_str)
+                if match:
+                    hour = int(match.group(1))
+                    if is_pm and hour != 12:
+                        hour += 12
+                    elif not is_pm and hour == 12:
+                        hour = 0
+                    return hour
+                
+                return -1
+            
+            target_date_norm = normalize_date(target_date)
+            target_hour = normalize_time(target_time)
+            
+            if not target_date_norm or target_hour < 0:
+                return []
+            
+            conflicting = []
+            for session in sessions:
+                if exclude_session_id and session.get("id") == exclude_session_id:
+                    continue
+                
+                # 진행 중인 세션만 (pending, in_progress, pending_approval)
+                status = session.get("status", "").lower()
+                if status not in ["pending", "in_progress", "pending_approval"]:
+                    continue
+                
+                place_pref = session.get("place_pref", {})
+                if isinstance(place_pref, str):
+                    try:
+                        place_pref = json.loads(place_pref)
+                    except:
+                        continue
+                
+                session_date = place_pref.get("proposedDate") or place_pref.get("date") or ""
+                session_time = place_pref.get("proposedTime") or place_pref.get("time") or ""
+                
+                session_date_norm = normalize_date(session_date)
+                session_hour = normalize_time(session_time)
+                
+                # 같은 날짜, 시간이 겹치면 (±1시간도 경고)
+                if session_date_norm == target_date_norm:
+                    if session_hour >= 0 and session_hour == target_hour:
+                        conflicting.append({
+                            "id": session.get("id"),
+                            "title": place_pref.get("purpose") or place_pref.get("summary") or "일정 조율",
+                            "date": session_date,
+                            "time": session_time,
+                            "status": status
+                        })
+            
+            # logger.info(f"📌 [충돌감지] user={user_id}, 날짜={target_date}, 시간={target_time} -> 충돌 {len(conflicting)}건")
+            return conflicting
+            
+        except Exception as e:
+            logger.error(f"충돌 감지 오류: {e}")
+            return []
+
+    @staticmethod
     async def approve_session(session_id: str, user_id: str) -> Dict[str, Any]:
         """
         A2A 세션의 일정을 승인합니다.
         [수정됨] 다인 세션 지원: 모든 참여자가 승인해야 확정됩니다.
         """
-        logger.info(f"🔵 approve_session 시작 - session_id: {session_id}, user_id: {user_id}")
+        # logger.info(f"🔵 appr ove_session 시작 - session_id: {session_id}, user_id: {user_id}")
         try:
             from zoneinfo import ZoneInfo
             from datetime import timedelta
@@ -298,14 +454,14 @@ class A2AService:
             left_participants = set(str(lp) for lp in place_pref.get("left_participants", []))
             active_participants = [str(pid) for pid in participant_user_ids if str(pid) not in left_participants]
             
-            logger.info(f"📌 [다인세션] 전체 참여자: {participant_user_ids}, 활성 참여자: {active_participants}")
+            # logger.info(f"📌 [다인세션] 전체 참여자: {participant_user_ids}, 활성 참여자: {active_participants}")
             
             # [FIX] 다인세션의 경우 thread_id로 모든 세션을 조회하여 승인 상태 동기화
             thread_id = place_pref.get("thread_id")
             all_thread_sessions = [session]
             if thread_id:
                 all_thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
-                logger.info(f"📌 [다인세션] thread_id={thread_id}, 총 세션 수: {len(all_thread_sessions)}")
+                # logger.info(f"📌 [다인세션] thread_id={thread_id}, 총 세션 수: {len(all_thread_sessions)}")
             
             # 모든 thread 세션에서 approved_by_list 수집 및 현재 사용자 추가
             approved_by_list = []
@@ -332,7 +488,7 @@ class A2AService:
             all_approved = all(str(pid) in approved_by_list for pid in active_participants)
             remaining_count = len([pid for pid in active_participants if str(pid) not in approved_by_list])
             
-            logger.info(f"📌 [승인현황] 승인자: {approved_by_list}, 활성참여자: {active_participants}, 전원승인: {all_approved}, 남은수: {remaining_count}")
+            # logger.info(f"📌 [승인현황] 승인자: {approved_by_list}, 활성참여자: {active_participants}, 전원승인: {all_approved}, 남은수: {remaining_count}")
             
             # [FIX] 모든 thread 세션에 approved_by_list 동기화
             for ts in all_thread_sessions:
@@ -372,7 +528,7 @@ class A2AService:
                 }
             
             # ===== 아래부터는 전원 승인 완료 시 실행 =====
-            logger.info(f"📌 [다인세션] 전원 승인 완료! 캘린더 등록 진행")
+            # logger.info(f"📌 [다인세션] 전원 승인 완료! 캘린더 등록 진행")
             
             # 승인 권한 확인 (기존 로직 유지하되, 다인세션에서는 참여자면 OK)
             
@@ -392,7 +548,7 @@ class A2AService:
                 try: time_window = json.loads(time_window)
                 except: time_window = {}
             
-            logger.info(f"세션 정보 확인 - details: {details}, place_pref: {place_pref}, time_window: {time_window}")
+            # logger.info(f"세션 정보 확인 - details: {details}, place_pref: {place_pref}, time_window: {time_window}")
             
             # 날짜/시간 정보를 여러 소스에서 찾기
             # 협상 완료 시 place_pref에 proposedDate/proposedTime으로 저장됨
@@ -407,7 +563,7 @@ class A2AService:
             activity = (place_pref.get("purpose") or details.get("purpose") or 
                        place_pref.get("summary") or place_pref.get("activity") or "약속")
             
-            logger.info(f"추출된 정보 - date: {date_str}, time: {time_str}, location: {location}, activity: {activity}")
+            # logger.info(f"추출된 정보 - date: {date_str}, time: {time_str}, location: {location}, activity: {activity}")
             
             # 메시지에서 날짜/시간 정보 찾기 (details와 time_window가 비어있을 경우)
             if not date_str or not time_str:
@@ -429,7 +585,7 @@ class A2AService:
                                     time_str = time_match.group(0)
                             if date_str and time_str:
                                 break
-                logger.info(f"메시지에서 추출된 정보 - date: {date_str}, time: {time_str}")
+                # logger.info(f"메시지에서 추출된 정보 - date: {date_str}, time: {time_str}")
             
             # 시간 파싱
             start_time = None
@@ -447,8 +603,10 @@ class A2AService:
                         if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
                             combined_iso = f"{date_str}T{time_str}:00"
                             start_time = datetime.fromisoformat(combined_iso).replace(tzinfo=KST)
-                            end_time = start_time + timedelta(hours=1)
-                            logger.info(f"표준 형식 파싱 성공: {start_time}")
+                            # [✅ FIX] place_pref에서 duration_minutes 가져와서 end_time 계산
+                            saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                            end_time = start_time + timedelta(minutes=saved_duration)
+                            # logger.info(f"표준 형식 파싱 성공: {start_time}, duration={saved_duration}min")
                 except Exception as e:
                     logger.warning(f"표준 형식 파싱 실패: {e}")
                 
@@ -464,7 +622,9 @@ class A2AService:
             # 시간 정보가 없으면 기본값 (내일 오후 2시)
             if not start_time:
                 start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                end_time = start_time + timedelta(hours=1)
+                # [✅ FIX] 기본값에서도 duration_minutes 사용
+                saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                end_time = start_time + timedelta(minutes=saved_duration)
             
             # 참여자 이름 조회
             initiator = await AuthRepository.find_user_by_id(initiator_user_id)
@@ -485,10 +645,10 @@ class A2AService:
             }
             
             # 세션 상태를 completed로 업데이트 (모든 thread 세션)
-            logger.info(f"🔵 세션 상태 업데이트 시작 - thread의 모든 세션을 completed로")
+            # logger.info(f"🔵 세션 상태 업데이트 시작 - thread의 모든 세션을 completed로")
             for ts in all_thread_sessions:
                 await A2ARepository.update_session_status(ts['id'], "completed", confirmed_details)
-            logger.info(f"🔵 세션 상태 업데이트 완료 - {len(all_thread_sessions)}개 세션")
+            # logger.info(f"🔵 세션 상태 업데이트 완료 - {len(all_thread_sessions)}개 세션")
             
             # 캘린더 작업을 백그라운드로 실행 (즉시 응답 후 처리)
             async def sync_calendars_background():
@@ -498,7 +658,7 @@ class A2AService:
                     # [재조율 시] 기존 캘린더 일정 삭제
                     reschedule_requester = place_pref.get("rescheduleRequestedBy")
                     if reschedule_requester:
-                        logger.info(f"🗑️ 재조율 감지 - 기존 캘린더 일정 삭제 시작 (session_id: {session_id})")
+                        # logger.info(f"🗑️ 재조율 감지 - 기존 캘린더 일정 삭제 시작 (session_id: {session_id})")
                         try:
                             existing_events = supabase.table('calendar_event').select('*').eq('session_id', session_id).execute()
                             
@@ -513,12 +673,12 @@ class A2AService:
                                             owner_token = await AuthService.get_valid_access_token_by_user_id(owner_id)
                                             if owner_token:
                                                 await gc_service.delete_calendar_event(owner_token, old_google_id)
-                                                logger.info(f"🗑️ 구글 캘린더 일정 삭제 성공: {old_google_id}")
+                                                # logger.info(f"🗑️ 구글 캘린더 일정 삭제 성공: {old_google_id}")
                                         except Exception as del_error:
                                             logger.warning(f"🗑️ 구글 캘린더 일정 삭제 실패 (무시): {del_error}")
                                 
                                 supabase.table('calendar_event').delete().eq('session_id', session_id).execute()
-                                logger.info(f"🗑️ calendar_event DB 레코드 삭제 완료")
+                                # logger.info(f"🗑️ calendar_event DB 레코드 삭제 완료")
                         except Exception as e:
                             logger.error(f"🗑️ 기존 캘린더 일정 삭제 중 오류: {e}")
                     
@@ -542,14 +702,21 @@ class A2AService:
                             
                             # 다른 참여자들 이름 (본인 제외)
                             other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
-                            if len(other_names) == 1:
-                                evt_summary = f"{other_names[0]}와 {activity}"
-                            elif len(other_names) == 2:
-                                evt_summary = f"{other_names[0]}, {other_names[1]}와 {activity}"
-                            else:
-                                evt_summary = f"{other_names[0]} 외 {len(other_names)-1}명과 {activity}"
                             
-                            if location:
+                            # [수정] 사용자가 입력한 제목(activity)을 우선 사용
+                            # activity가 있으면 그대로 사용, 없으면 기존 형식 유지
+                            logger.info(f"📅 [Calendar Event] activity값: {activity}, location: {location}")
+                            if activity and activity != "약속":
+                                evt_summary = activity
+                            else:
+                                if len(other_names) == 1:
+                                    evt_summary = f"{other_names[0]}와 약속"
+                                elif len(other_names) == 2:
+                                    evt_summary = f"{other_names[0]}, {other_names[1]}와 약속"
+                                else:
+                                    evt_summary = f"{other_names[0]} 외 {len(other_names)-1}명과 약속"
+                            
+                            if location and location not in evt_summary:
                                 evt_summary += f" ({location})"
                             
                             event_req = CreateEventRequest(
@@ -575,12 +742,111 @@ class A2AService:
                                     end_at=end_time.isoformat(),
                                     html_link=evt.htmlLink
                                 )
-                                logger.info(f"✅ 캘린더 일정 생성 성공: {evt_summary} (user: {pid})")
+                                # logger.info(f"✅ 캘린더 일정 생성 성공: {evt_summary} (user: {pid})")
                                 
                         except Exception as e:
                             logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
                     
-                    logger.info(f"✅ 백그라운드 캘린더 동기화 완료 (session_id: {session_id})")
+                    # logger.info(f"✅ 백그라운드 캘린더 동기화 완료 (session_id: {session_id})")
+                    
+                    # [NEW] 겹치는 진행 중 세션에 자동 알림 추가
+                    try:
+                        # 1단계: 모든 참여자의 충돌 세션을 먼저 수집 (중복 제거)
+                        all_conflict_sessions = {}  # {conflict_sid: conflict_data}
+                        
+                        for pid in active_participants:
+                            conflicting = await A2AService.get_conflicting_sessions(
+                                user_id=pid,
+                                target_date=confirmed_details.get("proposedDate", ""),
+                                target_time=confirmed_details.get("proposedTime", ""),
+                                exclude_session_id=session_id
+                            )
+                            for conflict in conflicting:
+                                conflict_sid = conflict.get("id")
+                                if conflict_sid and conflict_sid not in all_conflict_sessions:
+                                    all_conflict_sessions[conflict_sid] = conflict
+                        
+                        # 2단계: 수집된 고유 충돌 세션에 대해 순차적으로 알림 전송
+                        for conflict_sid, conflict in all_conflict_sessions.items():
+                            # DB 중복 체크 (이전에 이미 알림이 간 경우 스킵)
+                            try:
+                                dup_check = supabase.table('a2a_message').select('id').eq(
+                                    'session_id', conflict_sid
+                                ).eq('type', 'conflict_warning').contains(
+                                    'message', {'confirmed_session_id': session_id}
+                                ).execute()
+                                
+                                if dup_check.data and len(dup_check.data) > 0:
+                                    continue  # 이미 알림 존재
+                            except Exception as dup_err:
+                                logger.warning(f"중복 체크 중 오류 (진행함): {dup_err}")
+                            
+                            # [DISABLED] 충돌 세션에 경고 메시지 추가 - 협상 로그에 표시하지 않음
+                            # warning_message = {
+                            #     "type": "conflict_warning",
+                            #     "title": "⚠️ 시간 충돌 알림",
+                            #     "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')})",
+                            #     "confirmed_session_id": session_id,
+                            #     "confirmed_time": f"{confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')}"
+                            # }
+                            # await A2ARepository.add_message(
+                            #     session_id=conflict_sid,
+                            #     sender_user_id=session.get("initiator_user_id"),
+                            #     receiver_user_id=session.get("initiator_user_id"),
+                            #     message_type="conflict_warning",
+                            #     message=warning_message
+                            # )
+                            
+                            # [NEW] 충돌 세션 상태를 needs_reschedule로 변경하고 충돌 정보 업데이트
+                            try:
+                                import json
+                                # 기존 place_pref 조회하여 충돌 목록 보존 및 추가
+                                existing_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", conflict_sid).execute()
+                                conflict_pref = {}
+                                if existing_session_resp.data:
+                                    conflict_pref = existing_session_resp.data[0].get("place_pref", {})
+                                    if isinstance(conflict_pref, str):
+                                        try:
+                                            conflict_pref = json.loads(conflict_pref)
+                                        except:
+                                            conflict_pref = {}
+                                    if not isinstance(conflict_pref, dict):
+                                        conflict_pref = {}
+                                
+                                # has_conflict 플래그 명시적 설정
+                                conflict_pref["has_conflict"] = True
+                                conflict_pref["conflict_reason"] = f"다른 일정이 {confirmed_details.get('proposedDate', '')} {confirmed_details.get('proposedTime', '')}에 확정됨"
+                                
+                                # 확정된 세션을 충돌 목록에 추가
+                                existing_conflicts = conflict_pref.get("conflicting_sessions", [])
+                                if not isinstance(existing_conflicts, list):
+                                    existing_conflicts = []
+                                
+                                # 이미 목록에 있는지 확인
+                                if not any(c.get("session_id") == session_id for c in existing_conflicts):
+                                    existing_conflicts.append({
+                                        "session_id": session_id,
+                                        "title": activity,  # [FIX] 실제 일정 제목 사용
+                                        "date": confirmed_details.get("proposedDate"),
+                                        "time": confirmed_details.get("proposedTime"),
+                                        "participant_names": [initiator_name, target_name]  # [NEW] 참여자 이름 추가
+                                    })
+                                
+                                update_details = {
+                                    "has_conflict": True,
+                                    "conflict_reason": conflict_pref["conflict_reason"],
+                                    "conflicting_sessions": existing_conflicts
+                                }
+
+                                await A2ARepository.update_session_status(
+                                    conflict_sid, 
+                                    "needs_reschedule",
+                                    update_details
+                                )
+                            except Exception as update_err:
+                                logger.error(f"충돌 세션 업데이트 중 오류: {update_err}")
+                    except Exception as ce:
+                        logger.error(f"충돌 알림 전송 실패: {ce}")
                     
                 except Exception as e:
                     logger.error(f"❌ 백그라운드 캘린더 동기화 실패: {e}")
@@ -588,7 +854,7 @@ class A2AService:
             # 백그라운드 태스크 시작
             import asyncio
             asyncio.create_task(sync_calendars_background())
-            logger.info(f"🚀 캘린더 동기화 백그라운드 태스크 시작 (session_id: {session_id})")
+            # logger.info(f"🚀 캘린더 동기화 백그라운드 태스크 시작 (session_id: {session_id})")
             
             # 즉시 응답 반환
             return {
@@ -666,6 +932,7 @@ class A2AService:
             
             # place_pref에 재조율 정보 추가 (시간 범위 포함)
             # [FIX] 재조율 시 기존 승인 목록 및 나간 참여자 초기화
+            # [NEW] 재조율 시 충돌 플래그도 초기화 (새 시간으로 재협상하므로 충돌 상태 리셋)
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
@@ -676,6 +943,9 @@ class A2AService:
                 "proposedEndTime": formatted_end_time,
                 "approved_by_list": [user_id],  # 재조율 요청자만 승인 상태로 초기화
                 "left_participants": [],  # [NEW] 나간 참여자 목록도 초기화 (다시 협상 시작)
+                "has_conflict": False,  # [NEW] 충돌 플래그 초기화
+                "conflicting_sessions": [],  # [NEW] 충돌 세션 목록 초기화
+                "conflict_reason": None,  # [NEW] 충돌 사유 초기화
             }
             print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants: []")
             
@@ -901,7 +1171,7 @@ class A2AService:
             from zoneinfo import ZoneInfo
             KST = ZoneInfo("Asia/Seoul")
             
-            logger.info(f"True A2A 협상 시작: participants={len(participant_user_ids)}명, date={target_date}, time={target_time}")
+            # logger.info(f"True A2A 협상 시작: participants={len(participant_user_ids)}명, date={target_date}, time={target_time}")
             
             # NegotiationEngine 초기화
             engine = NegotiationEngine(
@@ -1573,17 +1843,20 @@ class A2AService:
         summary: str,
         date: Optional[str] = None,
         time: Optional[str] = None,
+        end_time: Optional[str] = None,  # [✅ NEW] 끝나는 시간 월들어오기 추가
         location: Optional[str] = None,
         activity: Optional[str] = None,
         duration_minutes: int = 60,
         force_new: bool = False,
         use_true_a2a: bool = True,
-        origin_chat_session_id: Optional[str] = None  # 원본 채팅 세션 ID 추가
+        origin_chat_session_id: Optional[str] = None,  # 원본 채팅 세션 ID 추가
+        duration_nights: int = 0  # ✅ 박 수 (0이면 당일, n박이면 n+1일 연속 확인)
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 세션 시작
         - force_new: True이면 기존 세션을 재사용하지 않고 무조건 새로 생성
         - use_true_a2a: True이면 NegotiationEngine 사용, False이면 기존 시뮬레이션
+        - duration_nights: 박 수 (0이면 당일, 1이상이면 n박 n+1일 연속 가용성 확인)
         여러 참여자와 동시에 일정을 조율합니다.
         기존 세션이 있으면 재사용합니다.
         """
@@ -1601,7 +1874,7 @@ class A2AService:
                 if existing_session:
                     # [✅ 수정] 완료된 세션은 재사용하지 않고 새로운 세션 생성
                     if existing_session.get("status") == "completed":
-                        logger.info(f"완료된 세션 발견 (ID: {existing_session['id']}) - 재사용하지 않음")
+                        # logger.info(f"완료된 세션 발견 (ID: {existing_session['id']}) - 재사용하지 않음")
                         continue
                         
                     existing_session_map[target_id] = existing_session
@@ -1631,7 +1904,7 @@ class A2AService:
                     )
                     thread_id = thread["id"]
                 
-                logger.info(f"기존 세션 재사용: thread_id={thread_id}, 기존 세션 수={len(existing_session_map)}")
+                # logger.info(f"기존 세션 재사용: thread_id={thread_id}, 기존 세션 수={len(existing_session_map)}")
                 
                 # 기존 세션의 참여자 정보 가져오기
                 sessions = []
@@ -1690,7 +1963,11 @@ class A2AService:
                             "requestedTime": formatted_requested_time,
                             "purpose": activity,
                             # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
-                            "origin_chat_session_id": origin_chat_session_id
+                            "origin_chat_session_id": origin_chat_session_id,
+                            # [✅ NEW] 일정 기간 저장
+                            "duration_minutes": duration_minutes,
+                            # ✅ 박 수 저장 (0이면 당일, n이면 n박 n+1일)
+                            "duration_nights": duration_nights
                         }
                         session = await A2ARepository.create_session(
                             initiator_user_id=initiator_user_id,
@@ -1747,9 +2024,16 @@ class A2AService:
                         # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                         "requestedDate": formatted_requested_date,
                         "requestedTime": formatted_requested_time,
+                        # [✅ NEW] 끝나는 시간 저장
+                        "proposedEndTime": end_time,
+                        "requestedEndTime": end_time,
                         "purpose": activity,  # [FIX] purpose 추가
                         # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
-                        "origin_chat_session_id": origin_chat_session_id
+                        "origin_chat_session_id": origin_chat_session_id,
+                        # [✅ NEW] 일정 기간 저장
+                        "duration_minutes": duration_minutes,
+                        # ✅ 박 수 저장 (0이면 당일, n이면 n박 n+1일)
+                        "duration_nights": duration_nights
                     }
                     
                     session = await A2ARepository.create_session(
@@ -1808,14 +2092,125 @@ class A2AService:
                     location=final_location,
                     activity=activity,
                     duration_minutes=duration_minutes,
-                    reuse_existing=reuse_existing
+                    reuse_existing=reuse_existing,
+                    duration_nights=duration_nights  # ✅ 박 수 전달
                 )
             
-            # 4) 모든 세션 완료 처리 (기존 세션 재사용 시에도 상태 업데이트)
-            for session_info in sessions:
-                # completed 상태로 변경하지 않고, in_progress 유지 (대화가 계속될 수 있음)
-                # 필요시에만 completed로 변경
-                pass
+            # 4) [✅ NEW] 양방향 충돌 알림 - 새 세션 생성 시 기존 세션에도 알림 추가
+            try:
+                for session_info in sessions:
+                    new_session_id = session_info["session_id"]
+                    
+                    # 참여자들의 기존 진행 중인 세션 중 충돌하는 것들 찾기
+                    all_participants = [initiator_user_id] + target_user_ids
+                    
+                    for pid in all_participants:
+                        conflicting = await A2AService.get_conflicting_sessions(
+                            user_id=pid,
+                            target_date=date or "",
+                            target_time=time or "",
+                            exclude_session_id=new_session_id
+                        )
+                        
+                        for conflict in conflicting:
+                            conflict_sid = conflict.get("id")
+                            if conflict_sid:
+                                # [DISABLED] 기존 세션에 충돌 알림 추가 - 협상 로그에 표시하지 않음
+                                # warning_message = {
+                                #     "type": "conflict_warning",
+                                #     "title": "⚠️ 시간 충돌 알림",
+                                #     "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({date} {time})",
+                                #     "conflicting_session_id": new_session_id,
+                                #     "conflicting_time": f"{date} {time}"
+                                # }
+                                # await A2ARepository.add_message(
+                                #     session_id=conflict_sid,
+                                #     sender_user_id=pid,
+                                #     receiver_user_id=pid,
+                                #     message_type="conflict_warning",
+                                #     message=warning_message
+                                # )
+                                
+                                # [FIX] 기존 세션의 place_pref를 DB에서 직접 조회하여 올바르게 병합
+                                try:
+                                    import json
+                                    existing_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", conflict_sid).execute()
+                                    if existing_session_resp.data:
+                                        existing_pref = existing_session_resp.data[0].get("place_pref", {})
+                                        # JSON 문자열인 경우 파싱
+                                        if isinstance(existing_pref, str):
+                                            try:
+                                                existing_pref = json.loads(existing_pref)
+                                            except:
+                                                existing_pref = {}
+                                        if not isinstance(existing_pref, dict):
+                                            existing_pref = {}
+                                        
+                                        # 기존 데이터를 보존하면서 충돌 정보만 추가
+                                        existing_pref["has_conflict"] = True
+                                        existing_conflicts = existing_pref.get("conflicting_sessions", [])
+                                        if not isinstance(existing_conflicts, list):
+                                            existing_conflicts = []
+                                        existing_conflicts.append({
+                                            "session_id": new_session_id,
+                                            "title": summary or activity or "새 일정",  # [FIX] 일정 제목 추가
+                                            "time": f"{date} {time}",
+                                            "participant_names": [initiator_name]  # [NEW] 참여자 이름 추가
+                                        })
+                                        existing_pref["conflicting_sessions"] = existing_conflicts
+                                        
+                                        # place_pref 업데이트 (기존 데이터 보존)
+                                        supabase.table("a2a_session").update({
+                                            "place_pref": existing_pref
+                                        }).eq("id", conflict_sid).execute()
+                                        
+                                        # logger.info(f"⚠️ [양방향 충돌] 기존 세션 {conflict_sid[:8]}에 알림 추가 (새 세션: {new_session_id[:8]})")
+                                except Exception as pref_error:
+                                    logger.error(f"place_pref 업데이트 실패: {pref_error}")
+                                
+                        if conflicting:
+                            # 새 세션에도 has_conflict 플래그 추가
+                            try:
+                                import json
+                                new_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", new_session_id).execute()
+                                if new_session_resp.data:
+                                    new_pref = new_session_resp.data[0].get("place_pref", {})
+                                    if isinstance(new_pref, str):
+                                        try:
+                                            new_pref = json.loads(new_pref)
+                                        except:
+                                            new_pref = {}
+                                    if not isinstance(new_pref, dict):
+                                        new_pref = {}
+                                    
+                                    new_pref["has_conflict"] = True
+                                    new_pref["conflicting_sessions"] = [
+                                        {"session_id": c["id"], "time": f"{c.get('place_pref', {}).get('proposedDate', '')} {c.get('place_pref', {}).get('proposedTime', '')}"}
+                                        for c in conflicting
+                                    ]
+                                    supabase.table("a2a_session").update({
+                                        "place_pref": new_pref
+                                    }).eq("id", new_session_id).execute()
+                            except Exception as new_pref_error:
+                                logger.error(f"새 세션 place_pref 업데이트 실패: {new_pref_error}")
+                                    
+            except Exception as ce:
+                logger.error(f"양방향 충돌 알림 처리 실패: {ce}")
+            
+            # WebSocket으로 모든 대상자에게 실시간 알림 전송
+            try:
+                for target_id in target_user_ids:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_request",
+                        "thread_id": thread_id,
+                        "from_user": initiator_name,
+                        "summary": summary or "일정 조율 요청",
+                        "proposal": result.get("proposal"),
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, target_id)
+                logger.info(f"[WS] 다중 A2A 알림 전송: {target_user_ids}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] 다중 A2A 알림 전송 실패: {ws_err}")
             
             return {
                 "status": 200,
@@ -1845,11 +2240,13 @@ class A2AService:
         location: Optional[str],
         activity: Optional[str],
         duration_minutes: int,
-        reuse_existing: bool = False
+        reuse_existing: bool = False,
+        duration_nights: int = 0  # ✅ 박 수 (0이면 당일, n이면 n박 n+1일)
     ) -> Dict[str, Any]:
         """
         다중 사용자 일정 조율 시뮬레이션 실행
         각 참여자의 Agent가 캘린더를 확인하고 일정을 조율합니다.
+        duration_nights가 1 이상이면 연속된 날짜들에 대해 모두 가용성을 확인합니다.
         """
         messages = []
         openai_service = OpenAIService()
@@ -1923,21 +2320,69 @@ class A2AService:
                 "text": text_init_check
             })
             
-            # 요청자 캘린더 확인
-            initiator_availability = await A2AService._check_user_availability(
-                user_id=initiator_user_id,
-                date=date,
-                time=time,
-                duration_minutes=duration_minutes
-            )
+            # ✅ [다박 일정] 연속 일수 체크를 위한 날짜 목록 생성
+            dates_to_check = [date]
+            if duration_nights > 0 and date:
+                try:
+                    from datetime import datetime as dt_cls
+                    from zoneinfo import ZoneInfo
+                    KST = ZoneInfo("Asia/Seoul")
+                    
+                    # 시작 날짜 파싱
+                    base_date = None
+                    date_str = date.strip()
+                    today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+                    # YYYY-MM-DD 형식 파싱
+                    date_match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+                    if date_match:
+                        year = int(date_match.group(1))
+                        month = int(date_match.group(2))
+                        day = int(date_match.group(3))
+                        base_date = datetime(year, month, day, tzinfo=KST)
+                    else:
+                        # MM월 DD일 형식 파싱
+                        date_match = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
+                        if date_match:
+                            month = int(date_match.group(1))
+                            day = int(date_match.group(2))
+                            year = today.year
+                            base_date = datetime(year, month, day, tzinfo=KST)
+                    
+                    if base_date:
+                        # duration_nights + 1 일 동안의 날짜 목록 생성
+                        dates_to_check = []
+                        for i in range(duration_nights + 1):
+                            check_date = base_date + timedelta(days=i)
+                            dates_to_check.append(check_date.strftime("%Y년 %m월 %d일"))
+                        
+                        logger.info(f"🗓️ [다박 일정] {duration_nights}박 {duration_nights + 1}일 - 체크할 날짜: {dates_to_check}")
+                except Exception as e:
+                    logger.warning(f"다박 일정 날짜 파싱 실패: {e}")
+                    dates_to_check = [date]
+            
+            # 요청자 캘린더 확인 (다박일 경우 모든 날짜 확인)
+            initiator_all_available = True
+            initiator_conflict_events = []
+            
+            for check_date in dates_to_check:
+                day_availability = await A2AService._check_user_availability(
+                    user_id=initiator_user_id,
+                    date=check_date,
+                    time=time,
+                    duration_minutes=duration_minutes
+                )
+                if not day_availability.get("available", True):
+                    initiator_all_available = False
+                    initiator_conflict_events.extend(day_availability.get("conflict_events", []))
             
             availability_results.append({
                 "user_id": initiator_user_id,
                 "user_name": initiator_name,
                 "session_id": sessions[0]["session_id"] if sessions else None,
-                "available": initiator_availability["available"],
-                "conflict_events": initiator_availability.get("conflict_events", []),
-                "available_slots": initiator_availability.get("available_slots", [])
+                "available": initiator_all_available,  # ✅ 다박 일정 체크 결과
+                "conflict_events": initiator_conflict_events,  # ✅ 다박 일정 충돌 이벤트
+                "available_slots": []
             })
             
             # 각 참여자의 Agent가 자신의 캘린더 확인
@@ -1966,21 +2411,28 @@ class A2AService:
                     "text": text_target_check
                 })
                 
-                # 캘린더 확인
-                availability = await A2AService._check_user_availability(
-                    user_id=target_id,
-                    date=date,
-                    time=time,
-                    duration_minutes=duration_minutes
-                )
+                # ✅ [다박 일정] 각 참여자도 모든 날짜에 대해 가용성 확인
+                target_all_available = True
+                target_conflict_events = []
+                
+                for check_date in dates_to_check:
+                    day_availability = await A2AService._check_user_availability(
+                        user_id=target_id,
+                        date=check_date,
+                        time=time,
+                        duration_minutes=duration_minutes
+                    )
+                    if not day_availability.get("available", True):
+                        target_all_available = False
+                        target_conflict_events.extend(day_availability.get("conflict_events", []))
                 
                 availability_results.append({
                     "user_id": target_id,
                     "user_name": target_name,
                     "session_id": session_info["session_id"],
-                    "available": availability["available"],
-                    "conflict_events": availability.get("conflict_events", []),
-                    "available_slots": availability.get("available_slots", [])
+                    "available": target_all_available,  # ✅ 다박 일정 체크 결과
+                    "conflict_events": target_conflict_events,  # ✅ 다박 일정 충돌 이벤트
+                    "available_slots": []
                 })
             
             # 3) 시간이 지정된 경우: 모든 참여자(요청자 포함) 가능 여부 확인
@@ -2060,7 +2512,7 @@ class A2AService:
                                     if days_ahead <= 0:  # 오늘이거나 이미 지난 요일이면 다음 주
                                         days_ahead += 7
                                     parsed_date = today + timedelta(days=days_ahead)
-                                    logger.info(f"📅 요일 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}")
+                                    # logger.info(f"📅 요일 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}")
                                     break
                         
                         if not parsed_date:
@@ -2110,7 +2562,7 @@ class A2AService:
                         proposal_data["proposedTime"] = f"{am_pm} {display_hour}시"
                         proposal_data["date"] = start_time.strftime("%Y년 %-m월 %-d일")
                         
-                        logger.info(f"📅 Proposal 날짜 파싱: '{date}' '{time}' -> {proposal_data['proposedDate']} {proposal_data['proposedTime']}")
+                        # logger.info(f"📅 Proposal 날짜 파싱: '{date}' '{time}' -> {proposal_data['proposedDate']} {proposal_data['proposedTime']}")
                     except Exception as e:
                         logger.warning(f"시간 파싱 실패: {str(e)}")
                     
@@ -2256,7 +2708,7 @@ class A2AService:
                             session_id=session_info["session_id"],
                             status="needs_recoordination"
                         )
-                    logger.info(f"🔄 일정 충돌 감지 - 세션 상태를 needs_recoordination으로 변경")
+                    # logger.info(f"🔄 일정 충돌 감지 - 세션 상태를 needs_recoordination으로 변경")
 
                     return {
                         "status": 200, # 이게 있어야 chat_service가 정상 종료로 인식함
@@ -2478,7 +2930,7 @@ class A2AService:
                             if days_ahead < 0:
                                 days_ahead += 7
                         parsed_date = today + timedelta(days=days_ahead)
-                        logger.info(f"📅 날짜 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}, days_ahead: {days_ahead}")
+                        # logger.info(f"📅 날짜 파싱: '{date_str}' -> {parsed_date.strftime('%Y-%m-%d')}, 오늘 요일: {today.weekday()}, 목표 요일: {day_num}, days_ahead: {days_ahead}")
                         break
                 if not parsed_date:
                     parsed_date = today + timedelta(days=7)
@@ -2582,7 +3034,7 @@ class A2AService:
                             # 겹치는 조건: (parsed_time < event_end_dt) and (end_time > event_start_dt)
                             logger.debug(f"🔍 충돌 확인: 요청={parsed_time.isoformat()} ~ {end_time.isoformat()}, 이벤트({event.summary})={event_start_dt.isoformat()} ~ {event_end_dt.isoformat()}")
                             if parsed_time < event_end_dt and end_time > event_start_dt:
-                                logger.info(f"❌ 충돌 발견: {event.summary} ({event_start_dt.isoformat()} ~ {event_end_dt.isoformat()})")
+                                # logger.info(f"❌ 충돌 발견: {event.summary} ({event_start_dt.isoformat()} ~ {event_end_dt.isoformat()})")
                                 conflict_events.append({
                                     "summary": event.summary,
                                     "start": event_start_dt.isoformat(),
@@ -2593,14 +3045,14 @@ class A2AService:
                             continue
                 
                 if conflict_events:
-                    logger.info(f"사용자 {user_id}의 {parsed_time} 시간에 {len(conflict_events)}개의 충돌 일정 발견")
+                    # logger.info(f"사용자 {user_id}의 {parsed_time} 시간에 {len(conflict_events)}개의 충돌 일정 발견")
                     return {
                         "available": False,
                         "conflict_events": conflict_events,
                         "requested_time": parsed_time.isoformat()
                     }
                 else:
-                    logger.info(f"사용자 {user_id}의 {parsed_time} 시간에 일정 없음 - 가능")
+                    # logger.info(f"사용자 {user_id}의 {parsed_time} 시간에 일정 없음 - 가능")
                     return {
                         "available": True,
                         "conflict_events": []
@@ -2667,8 +3119,8 @@ class A2AService:
                 
                 # participant_user_ids 우선 사용 (다중 참여자 지원)
                 participant_ids = session.get("participant_user_ids") or []
-                logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - participant_user_ids: {participant_ids}")
-                logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - initiator: {session.get('initiator_user_id')}, target: {session.get('target_user_id')}")
+                # logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - participant_user_ids: {participant_ids}")
+                # logger.info(f"📌 [DEBUG] 세션 {session.get('id')} - initiator: {session.get('initiator_user_id')}, target: {session.get('target_user_id')}")
                 
                 if participant_ids:
                     for pid in participant_ids:
@@ -2683,9 +3135,9 @@ class A2AService:
             
             # 나간 참여자 제외
             active_participants = all_participants - left_participants_set
-            logger.info(f"📌 전체 참여자({len(all_participants)}): {all_participants}")
-            logger.info(f"📌 나간 참여자({len(left_participants_set)}): {left_participants_set}")
-            logger.info(f"📌 활성 참여자({len(active_participants)}): {active_participants}")
+            # logger.info(f"📌 전체 참여자({len(all_participants)}): {all_participants}")
+            # logger.info(f"📌 나간 참여자({len(left_participants_set)}): {left_participants_set}")
+            # logger.info(f"📌 활성 참여자({len(active_participants)}): {active_participants}")
             
             user = await AuthRepository.find_user_by_id(user_id)
             user_name = user.get("name", "사용자") if user else "사용자"
@@ -2719,13 +3171,13 @@ class A2AService:
                     if req_by:
                         req_by_str = str(req_by)
                         real_approved_users.add(req_by_str)
-                        logger.info(f"📌 재조율 요청자 자동 승인: {req_by_str}")
+                        # logger.info(f"📌 재조율 요청자 자동 승인: {req_by_str}")
                     else:
                         # 재조율이 아니면 원래 initiator가 요청자 (자동 승인)
                         initiator_id = session.get("initiator_user_id")
                         if initiator_id:
                             real_approved_users.add(str(initiator_id))
-                            logger.info(f"📌 원래 요청자(initiator) 자동 승인: {initiator_id}")
+                            # logger.info(f"📌 원래 요청자(initiator) 자동 승인: {initiator_id}")
             
                 # 다른 활성 참여자들의 승인 상태 확인 (나간 사람 제외)
                 for pid in active_participants:
@@ -2748,7 +3200,7 @@ class A2AService:
                 all_approved = len(real_approved_users) >= len(active_participants)
                 approved_list = list(real_approved_users)
 
-                logger.info(f"승인 현황: {len(real_approved_users)}/{len(active_participants)} - {real_approved_users}")
+                # logger.info(f"승인 현황: {len(real_approved_users)}/{len(active_participants)} - {real_approved_users}")
 
                 # 3. 메타데이터 동기화 (활성 참여자만)
                 for participant_id in active_participants:
@@ -2946,7 +3398,7 @@ class A2AService:
                     # 세션 상태를 completed로 업데이트
                     for session in sessions:
                         await A2ARepository.update_session_status(session["id"], "completed")
-                    logger.info(f"✅ 세션 상태 completed로 업데이트 완료")
+                    # logger.info(f"✅ 세션 상태 completed로 업데이트 완료")
 
                     return {
                         "status": 200,
@@ -2968,7 +3420,7 @@ class A2AService:
                 # [New] 재조율 요청인 경우 (reason 또는 preferred_time이 존재함)
                 if proposal.get("reason") or proposal.get("preferred_time"):
                     print(f"📌 [handle_schedule_approval] Reschedule condition MET - reason={proposal.get('reason')}")
-                    logger.info(f"재조율 요청 감지 - user_id: {user_id}")
+                    # logger.info(f"재조율 요청 감지 - user_id: {user_id}")
                     
                     # 기존 세션을 '완료됨' 처리하지 않고 업데이트 (User Request)
                     # "재협상 요청을 하면 새로운 세션이 시작되는게 아니라, 기존 약속이 변경되는걸 원해"
@@ -3057,7 +3509,7 @@ class A2AService:
                 if session_thread_id:
                     # thread_id로 모든 세션 조회
                     all_thread_sessions = await A2ARepository.get_thread_sessions(session_thread_id)
-                    logger.info(f"🔴 [거절] thread_id={session_thread_id}, 모든 세션 수: {len(all_thread_sessions)}")
+                    # logger.info(f"🔴 [거절] thread_id={session_thread_id}, 모든 세션 수: {len(all_thread_sessions)}")
                 
                 # 1. 모든 세션에서 left_participants 수집 후 현재 사용자 추가
                 global_left_participants = set()
@@ -3072,7 +3524,7 @@ class A2AService:
                 # 현재 거절자 추가
                 global_left_participants.add(str(user_id))
                 global_left_list = list(global_left_participants)
-                logger.info(f"🔴 [거절] 전체 나간 참여자: {global_left_list}")
+                # logger.info(f"🔴 [거절] 전체 나간 참여자: {global_left_list}")
                 
                 # 2. 모든 세션에 동기화하여 left_participants 업데이트
                 for session in all_thread_sessions:
@@ -3092,7 +3544,7 @@ class A2AService:
                         place_pref["participants"] = participants
                         place_pref["left_participants"] = global_left_list
                         
-                        logger.info(f"🔴 [거절] 세션 {sid} - left_participants 동기화: {global_left_list}")
+                        # logger.info(f"🔴 [거절] 세션 {sid} - left_participants 동기화: {global_left_list}")
                         
                         # DB 업데이트 (아직 status는 변경 안 함)
                         supabase.table('a2a_session').update({
@@ -3121,15 +3573,30 @@ class A2AService:
                 non_requester_participants = [p for p in participant_user_ids if str(p) != actual_requester]
                 all_others_left = all(str(p) in global_left_participants for p in non_requester_participants)
                 
-                logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
+                # logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
                 
-                if all_others_left and len(non_requester_participants) > 0:
-                    logger.info(f"🔴 [거절] 모든 참여자가 나감 - 전체 {len(all_thread_sessions)}개 세션을 'rejected'로 변경")
-                    for session in all_thread_sessions:
-                        supabase.table('a2a_session').update({
-                            "status": "rejected",
-                            "updated_at": dt_datetime.now().isoformat()
-                        }).eq('id', session['id']).execute()
+                # [수정] 한 명이라도 거절하면 즉시 status를 rejected로 변경
+                logger.info(f"🔴 [거절] 세션을 즉시 'rejected'로 변경")
+                for session in all_thread_sessions:
+                    supabase.table('a2a_session').update({
+                        "status": "rejected",
+                        "updated_at": dt_datetime.now().isoformat()
+                    }).eq('id', session['id']).execute()
+                
+                # [추가] WebSocket으로 상대방에게 거절 알림 전송
+                for pid in all_participants:
+                    if str(pid) != str(user_id):  # 거절한 본인 제외
+                        try:
+                            await ws_manager.send_personal_message({
+                                "type": "a2a_rejected",
+                                "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
+                                "thread_id": thread_id,
+                                "rejected_by": user_id,
+                                "rejected_by_name": user_name
+                            }, str(pid))
+                            logger.info(f"[WS] 거절 알림 전송: {pid}")
+                        except Exception as ws_err:
+                            logger.warning(f"[WS] 거절 알림 전송 실패 ({pid}): {ws_err}")
 
                 # 2. 시스템 메시지: 남은 참여자들에게 거절 알림 (Loop 밖에서 한 번만 전송)
                 # thread_id로 묶여있으므로 하나의 세션에만 추가하면 됨
@@ -3169,17 +3636,18 @@ class A2AService:
                             }
                             supabase.table('chat_log').update({'metadata': new_meta}).eq('id', target_log['id']).execute()
                 
-                # 4. 알림 메시지 전송
-                for pid in all_participants:
-                    if pid == user_id:
-                        # 거절한 본인에게는 확인 메시지만 (재조율 유도 X)
-                        await ChatRepository.create_chat_log(
-                            user_id=pid,
-                            request_text=None,
-                            response_text=f"해당 약속에서 나갔습니다.",
-                            message_type="system"
-                        )
-                        continue
+                # 4. 알림 메시지 전송 (채팅 화면에는 표시 안 함 - A2A 화면에서만 확인)
+                # [DISABLED] 채팅 화면에 '약속에서 나갔습니다' 메시지 표시 안 함
+                # for pid in all_participants:
+                #     if pid == user_id:
+                #         # 거절한 본인에게는 확인 메시지만 (재조율 유도 X)
+                #         await ChatRepository.create_chat_log(
+                #             user_id=pid,
+                #             request_text=None,
+                #             response_text=f"해당 약속에서 나갔습니다.",
+                #             message_type="system"
+                #         )
+                #         continue
 
 
                     # 원본 채팅 세션 ID 추출 (place_pref 또는 metadata에 저장됨)
@@ -3203,7 +3671,7 @@ class A2AService:
                             ).eq("title", "기본 채팅").single().execute()
                             if default_session.data:
                                 curr_origin_session_id = default_session.data.get("id")
-                                logger.info(f"Initiator({pid})의 기본 채팅 세션 사용: {curr_origin_session_id}")
+                                # logger.info(f"Initiator({pid})의 기본 채팅 세션 사용: {curr_origin_session_id}")
                         except Exception as e:
                             logger.warning(f"기본 채팅 세션 조회 실패: {e}")
                     
@@ -3212,25 +3680,26 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
-                    # 상대방에게 알림 전송 (재조율 자동 트리거 X)
-                    await ChatRepository.create_chat_log(
-                        user_id=pid,
-                        request_text=None,
-                        response_text=f"{user_name}님이 약속에서 나갔습니다.",
-                        friend_id=target_friend_id,
-                        session_id=target_session_id,
-                        message_type="schedule_rejection",
-                        metadata={
-                            "left_user_id": user_id,
-                            "left_user_name": user_name,
-                            "thread_id": thread_id,
-                            "session_ids": session_ids,
-                            "schedule_date": proposal.get("date"),
-                            "schedule_time": proposal.get("time"),
-                            "schedule_activity": proposal.get("activity"),
-                            "schedule_location": proposal.get("location"),
-                        }
-                    )
+                    # [DISABLED] 상대방에게 알림 전송 안 함 (A2A 화면에서만 확인)
+                    # await ChatRepository.create_chat_log(
+                    #     user_id=pid,
+                    #     request_text=None,
+                    #     response_text=f"{user_name}님이 약속에서 나갔습니다.",
+                    #     friend_id=target_friend_id,
+                    #     session_id=target_session_id,
+                    #     message_type="schedule_rejection",
+                    #     metadata={
+                    #         "left_user_id": user_id,
+                    #         "left_user_name": user_name,
+                    #         "thread_id": thread_id,
+                    #         "session_ids": session_ids,
+                    #         "schedule_date": proposal.get("date"),
+                    #         "schedule_time": proposal.get("time"),
+                    #         "schedule_activity": proposal.get("activity"),
+                    #         "schedule_location": proposal.get("location"),
+                    #     }
+                    # )
+                    pass  # 채팅 알림 비활성화됨
                     
                 return {"status": 200, "message": "약속에서 나갔습니다."}
 

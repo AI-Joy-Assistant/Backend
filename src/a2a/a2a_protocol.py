@@ -16,6 +16,38 @@ class MessageType(str, Enum):
     QUERY = "QUERY"               # 가용시간 질의
     NEED_HUMAN = "NEED_HUMAN"     # 사용자 개입 필요
     INFO = "INFO"                 # 정보 전달 (진행 상황 등)
+    # 새로운 메시지 타입
+    CONFLICT_CHOICE = "CONFLICT_CHOICE"       # 충돌 시 선택 요청 (참석불가/일정조정)
+    AWAITING_CHOICE = "AWAITING_CHOICE"       # 사용자 선택 대기 중
+    MAJORITY_RECOMMEND = "MAJORITY_RECOMMEND" # 과반수 추천
+
+
+class ConflictInfo(BaseModel):
+    """충돌 일정 정보"""
+    event_name: str                   # Google Calendar 일정명 (예: "치과 예약")
+    event_start: Optional[datetime] = None
+    event_end: Optional[datetime] = None
+    event_time_display: Optional[str] = None  # "오후 6시~7시" 형식
+
+
+class ParticipantAvailability(BaseModel):
+    """참여자별 가용성 정보"""
+    user_id: str
+    user_name: str
+    is_available: bool
+    conflict_info: Optional[ConflictInfo] = None  # 불가능 시 충돌 정보
+    choice: Optional[str] = None  # "skip" | "adjust" | None (미선택)
+
+
+class MajorityRecommendation(BaseModel):
+    """과반수 추천 정보"""
+    date: str                          # "12월 17일"
+    time_condition: str                # "오후 6시 이후"
+    available_count: int               # 3
+    total_count: int                   # 4
+    available_names: List[str]         # ["규민", "민서", "수연"]
+    unavailable_names: List[str]       # ["호이"]
+    is_majority: bool                  # 과반수 여부
 
 
 class TimeSlot(BaseModel):
@@ -58,6 +90,8 @@ class AgentDecision(BaseModel):
     reason: Optional[str] = None
     message: str                  # GPT가 생성한 자연어 메시지
     available_slots: Optional[List[TimeSlot]] = None
+    # 새로운 필드
+    conflict_info: Optional[ConflictInfo] = None  # 충돌 정보
 
 
 class A2AMessage(BaseModel):
@@ -72,6 +106,10 @@ class A2AMessage(BaseModel):
     message: str                  # 자연어 메시지
     available_slots: Optional[List[Dict]] = None
     timestamp: datetime
+    # 새로운 필드
+    conflict_info: Optional[Dict] = None           # 충돌 정보 (직렬화용)
+    majority_recommendation: Optional[Dict] = None # 과반수 추천 정보
+    participant_availabilities: Optional[List[Dict]] = None  # 참여자별 가용성
     
     def to_sse_data(self) -> Dict[str, Any]:
         """SSE 스트리밍용 데이터 변환"""
@@ -82,7 +120,10 @@ class A2AMessage(BaseModel):
             "round": self.round_number,
             "proposal": self.proposal.to_dict() if self.proposal else None,
             "message": self.message,
-            "timestamp": self.timestamp.isoformat()
+            "timestamp": self.timestamp.isoformat(),
+            "conflict_info": self.conflict_info,
+            "majority_recommendation": self.majority_recommendation,
+            "participant_availabilities": self.participant_availabilities
         }
 
 
@@ -92,6 +133,8 @@ class NegotiationStatus(str, Enum):
     AGREED = "agreed"
     FAILED = "failed"
     NEED_HUMAN = "need_human"
+    # 새로운 상태
+    AWAITING_USER_CHOICE = "awaiting_user_choice"  # 사용자 선택 대기
 
 
 class HumanInterventionReason(str, Enum):
@@ -100,6 +143,8 @@ class HumanInterventionReason(str, Enum):
     DEADLOCK = "deadlock"                            # 교착 상태
     NO_COMMON_TIME = "no_common_time"                # 공통 시간 없음
     URGENT_SCHEDULE = "urgent_schedule"              # 긴급 일정 (24시간 이내)
+    # 새로운 사유
+    CONFLICT_CHOICE_NEEDED = "conflict_choice_needed"  # 충돌 선택 필요
 
 
 class NegotiationResult(BaseModel):
@@ -110,3 +155,6 @@ class NegotiationResult(BaseModel):
     intervention_reason: Optional[HumanInterventionReason] = None
     total_rounds: int = 0
     messages: List[A2AMessage] = []
+    # 새로운 필드
+    awaiting_choice_from: Optional[List[str]] = None  # 선택 대기 중인 user_id 목록
+    majority_recommendations: Optional[List[Dict]] = None  # 과반수 추천 목록

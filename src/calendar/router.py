@@ -217,7 +217,7 @@ async def google_calendar_webhook(request: Request):
         resource_state = headers.get("X-Goog-Resource-State")
         channel_id     = headers.get("X-Goog-Channel-Id")
         resource_id    = headers.get("X-Goog-Resource-Id")
-        logger.info(f"[WEBHOOK] state={resource_state}, channel={channel_id}, resource={resource_id}")
+        # logger.info(f"[WEBHOOK] state={resource_state}, channel={channel_id}, resource={resource_id}")
         return {"status": "received"}
     except Exception as e:
         logger.error(f"[WEBHOOK] 웹훅 처리 오류: {str(e)}")
@@ -243,7 +243,7 @@ async def subscribe_to_calendar_webhook(
             response = await client.post(url, json=subscription_data, headers=headers)
             response.raise_for_status()
         result = response.json()
-        logger.info(f"[WEBHOOK] 구독 성공: {result.get('id')}")
+        # logger.info(f"[WEBHOOK] 구독 성공: {result.get('id')}")
         return { "status": "success", "subscription_id": result.get("id"), "expiration": result.get("expiration") }
     except Exception as e:
         logger.error(f"[WEBHOOK] 구독 실패: {str(e)}")
@@ -274,7 +274,7 @@ async def renew_calendar_webhook(
             response = await client.post(url, json=subscription_data, headers=headers)
             response.raise_for_status()
         result = response.json()
-        logger.info(f"[WEBHOOK] 구독 갱신 성공: {result.get('id')}")
+        # logger.info(f"[WEBHOOK] 구독 갱신 성공: {result.get('id')}")
         return {
             "status": "success",
             "subscription_id": result.get("id"),

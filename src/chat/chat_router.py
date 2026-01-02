@@ -116,10 +116,21 @@ async def chat_with_gpt(
     message = request.get("message", "")
     selected_friends = request.get("selected_friends")
     session_id = request.get("session_id")
+    title = request.get("title")  # 제목 필드 추가
+    location = request.get("location")  # 장소 필드 추가
+    duration_nights = request.get("duration_nights", 0)  # 박 수 (0이면 당일)
     if not message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
-    result = await ChatService.start_ai_conversation(current_user_id, message, selected_friend_ids=selected_friends,session_id=session_id)
+    result = await ChatService.start_ai_conversation(
+        current_user_id, 
+        message, 
+        selected_friend_ids=selected_friends,
+        session_id=session_id,
+        explicit_title=title,  # 제목 전달
+        explicit_location=location,  # 장소 전달
+        duration_nights=duration_nights  # 박 수 전달
+    )
     
     if result["status"] == 200:
         return result["data"]
@@ -536,10 +547,10 @@ async def get_notifications(
         
         for log in (rejection_logs.data or []):
             metadata = log.get("metadata", {})
-            rejected_by = metadata.get("rejected_by")
+            rejected_by = metadata.get("rejected_by") or metadata.get("left_user_id")
             
             # 거절한 사람 이름 조회 (메타데이터에 있으면 사용, 없으면 DB 조회)
-            rejected_by_name = metadata.get("rejected_by_name", "상대방")
+            rejected_by_name = metadata.get("rejected_by_name") or metadata.get("left_user_name") or "상대방"
             if rejected_by_name == "상대방" and rejected_by:
                 try:
                     user_res = supabase.table("user").select("name").eq("id", rejected_by).execute()

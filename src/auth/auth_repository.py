@@ -7,13 +7,13 @@ class AuthRepository:
     async def find_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         """이메일로 사용자 찾기"""
         try:
-            print(f"🔍 이메일로 사용자 조회: {email}")
+            # print(f"🔍 이메일로 사용자 조회: {email}")
             response = supabase.table('user').select('*').eq('email', email).maybe_single().execute()
             if response is None:
                 print(f"❌ 이메일로 사용자를 찾을 수 없음: {email}")
                 return None
-            print(f"✅ 이메일로 사용자 조회 성공: {response.data.get('email')}")
-            print(f"📸 프로필 이미지: {response.data.get('profile_image')}")
+            # print(f"✅ 이메일로 사용자 조회 성공: {response.data.get('email')}")
+            # print(f"📸 프로필 이미지: {response.data.get('profile_image')}")
             return response.data
         except Exception as e:
             print(f"❌ 이메일로 사용자 조회 오류: {str(e)}")
@@ -23,12 +23,12 @@ class AuthRepository:
     async def find_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
         """ID로 사용자 찾기"""
         try:
-            print(f"🔍 ID로 사용자 조회: {user_id}")
+            # print(f"🔍 ID로 사용자 조회: {user_id}")
             response = supabase.table('user').select('*').eq('id', user_id).execute()
             if response is None or not response.data:
                 print(f"❌ ID로 사용자를 찾을 수 없음: {user_id}")
                 return None
-            print(f"✅ ID로 사용자 조회 성공: {response.data[0].get('email')}")
+            # print(f"✅ ID로 사용자 조회 성공: {response.data[0].get('email')}")
             return response.data[0]
         except Exception as e:
             print(f"❌ ID로 사용자 조회 오류: {str(e)}")
@@ -141,33 +141,33 @@ class AuthRepository:
     ) -> None:
         """Google 사용자 정보 업데이트"""
         try:
-            print(f"🔄 Google 사용자 정보 업데이트: {email}")
+            # print(f"🔄 Google 사용자 정보 업데이트: {email}")
             
             update_data = {'updated_at': 'NOW()'}
             if access_token is not None:
                 update_data['access_token'] = access_token
-                print(f"✅ access_token 추가됨: {len(access_token)}자")
+                # print(f"✅ access_token 추가됨: {len(access_token)}자")
             if refresh_token is not None:
                 update_data['refresh_token'] = refresh_token
-                print(f"✅ refresh_token 추가됨: {len(refresh_token)}자")
+                # print(f"✅ refresh_token 추가됨: {len(refresh_token)}자")
 
             if profile_image is not None:
                 update_data['profile_image'] = profile_image
-                print(f"✅ profile_image 추가됨: {profile_image[:50]}...")
+                # print(f"✅ profile_image 추가됨: {profile_image[:50]}...")
             if name is not None:
                 update_data['name'] = name
                 print(f"✅ name 추가됨: {name}")
             if handle is not None:
                 update_data['handle'] = handle
-                print(f"✅ handle 추가됨: {handle}")
+                # print(f"✅ handle 추가됨: {handle}")
             if token_expiry is not None:
                 update_data['token_expiry'] = token_expiry
-                print(f"✅ token_expiry 업데이트: {token_expiry}")
+                # print(f"✅ token_expiry 업데이트: {token_expiry}")
 
-            print(f"📝 업데이트할 데이터: {update_data}")
+            # print(f"📝 업데이트할 데이터: {update_data}")
 
             response = supabase.table('user').update(update_data).eq('email', email).execute()
-            print(f"✅ Google 사용자 정보 업데이트 성공")
+            # print(f"✅ Google 사용자 정보 업데이트 성공")
             
         except Exception as e:
             print(f"❌ Google 사용자 정보 업데이트 오류: {str(e)}")
@@ -185,7 +185,7 @@ class AuthRepository:
             if response is None or not response.data:
                 raise Exception("사용자 정보 수정 실패: response is None or empty")
             
-            print(f"✅ 사용자 정보 수정 성공: {user_id}")
+            # print(f"✅ 사용자 정보 수정 성공: {user_id}")
             return response.data[0]
         except Exception as e:
             print(f"❌ 사용자 정보 수정 오류: {str(e)}")
@@ -195,7 +195,7 @@ class AuthRepository:
     async def delete_user(user_id: str) -> None:
         """사용자 계정 삭제"""
         try:
-            print(f"🗑️ 사용자 계정 삭제 시작: {user_id}")
+            # print(f"🗑️ 사용자 계정 삭제 시작: {user_id}")
             
             response = supabase.table('user').delete().eq('id', user_id).execute()
             
