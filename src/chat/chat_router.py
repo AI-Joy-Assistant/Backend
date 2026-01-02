@@ -116,10 +116,21 @@ async def chat_with_gpt(
     message = request.get("message", "")
     selected_friends = request.get("selected_friends")
     session_id = request.get("session_id")
+    title = request.get("title")  # 제목 필드 추가
+    location = request.get("location")  # 장소 필드 추가
+    duration_nights = request.get("duration_nights", 0)  # 박 수 (0이면 당일)
     if not message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
-    result = await ChatService.start_ai_conversation(current_user_id, message, selected_friend_ids=selected_friends,session_id=session_id)
+    result = await ChatService.start_ai_conversation(
+        current_user_id, 
+        message, 
+        selected_friend_ids=selected_friends,
+        session_id=session_id,
+        explicit_title=title,  # 제목 전달
+        explicit_location=location,  # 장소 전달
+        duration_nights=duration_nights  # 박 수 전달
+    )
     
     if result["status"] == 200:
         return result["data"]

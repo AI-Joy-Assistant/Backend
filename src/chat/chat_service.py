@@ -175,6 +175,9 @@ class ChatService:
         message: str,
         selected_friend_ids: Optional[List[str]] = None,
         session_id: Optional[str] = None,   # ✅ 프론트에서 넘어오는 session_id
+        explicit_title: Optional[str] = None,  # ✅ 프론트에서 넘어오는 제목
+        explicit_location: Optional[str] = None,  # ✅ 프론트에서 넘어오는 장소
+        duration_nights: int = 0,  # ✅ 박 수 (0이면 당일)
     ) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
         try:
@@ -1012,7 +1015,7 @@ class ChatService:
                     # 시간이 "명시적으로" 언급되었는지 확인 (LLM이 기본값이나 잘못된 값을 넣을 수 있음)
                     time_text = schedule_info.get("time") or ""
                     # 실제 시간 표현인지 검증 (시간 키워드가 있어야 함)
-                    time_keywords = ["시", "분", "오전", "오후", "아침", "점심", "저녁", "밤", "새벽"]
+                    time_keywords = ["시", "분", "오전", "오후", "아침", "점심", "저녁", "밤", "새벽", ":"]
                     is_real_time = any(kw in time_text for kw in time_keywords) if time_text else False
                     # [✅ FIX] time 필드도 확인 (start_time이 없어도 time이 있으면 명시적 시간으로 판단)
                     has_explicit_time = (bool(schedule_info.get("start_time")) or is_real_time)
@@ -1023,7 +1026,9 @@ class ChatService:
                     # logger.info(f"[DEBUG] time_text='{time_text}', start_time='{schedule_info.get('start_time')}', is_real_time={is_real_time}, is_date_range={is_date_range}")
                     
                     # 날짜+시간 둘 다 명확하고, 범위가 아닌 특정 날짜면 바로 협상
-                    should_skip_recommendation = has_explicit_date and has_explicit_time and not is_date_range
+                    # ✅ [여행 모드] duration_nights > 0이면 날짜 범위가 있어도 바로 A2A 시작
+                    is_travel_mode = duration_nights > 0
+                    should_skip_recommendation = (has_explicit_date and has_explicit_time and not is_date_range) or (is_travel_mode and has_explicit_date)
                     should_use_recommendation = len(friend_ids) >= 1 and not recoordination_needed and not should_skip_recommendation
                     
                     # [✅ NEW] 날짜는 있지만 시간이 없으면 → 시간 물어보기
@@ -1078,11 +1083,11 @@ class ChatService:
                         from src.a2a.a2a_service import A2AService
                         
                         selected_date = schedule_info.get("start_date")
-                        selected_time = schedule_info.get("start_time")
+                        selected_time = schedule_info.get("start_time") or "09:00"  # ✅ 기본 시간
                         activity = schedule_info.get("activity")
-                        location = schedule_info.get("location")
+                        location = schedule_info.get("location") or explicit_location
                         
-                        # [✅ NEW] 끝 시간이 명시되지 않았으면 물어보기
+                        # [✅ NEW] 끝 시간이 명시되지 않았으면 물어보기 (여행 모드는 제외)
                         end_time_from_info = schedule_info.get("end_time")
                         end_time_keywords = ["까지", "끝", "종료", "~", "부터", "시간 동안", "동안"]
                         user_mentioned_end_time = any(kw in message for kw in end_time_keywords)
@@ -1092,9 +1097,10 @@ class ChatService:
                             logger.warning(f"[A2A 환각 방지] LLM이 end_time='{end_time_from_info}'을 반환했지만, 사용자 메시지에 끝 시간 키워드 없음 → 무시")
                             end_time_from_info = None
                         
-                        if not end_time_from_info:
+                        # ✅ [여행 모드] 여행일 경우 끝 시간 물어보기 스킵
+                        if not end_time_from_info and not is_travel_mode:
                             # 끝 시간 물어보기
-                            end_time_question = f"⏰ {selected_date} {selected_time}에 시작하는 약속이군요!\n끝나는 시간은 언제인가요? (예: 5시, 오후 7시)\n모르시면 '몰라'라고 해주세요!"
+                            end_time_question = f"⏰ {selected_date} {selected_time}에 시작하는 약속이군요!\n끝나는 시간은 언제인가요? (예: 5시, 오후 7시)\n모르시면 '몫라'라고 해주세요!"
                             
                             await ChatRepository.create_chat_log(
                                 user_id=user_id,
@@ -1126,17 +1132,27 @@ class ChatService:
                                 }
                             }
                         
-                        # 끝 시간이 있으면 바로 A2A 시작
+                        # 끝 시간이 있거나 여행 모드면 바로 A2A 시작
                         # duration_minutes 계산
-                        start_hour = int(selected_time.split(":")[0]) if selected_time and ":" in selected_time else 14
-                        end_hour = int(end_time_from_info.split(":")[0]) if end_time_from_info and ":" in end_time_from_info else (start_hour + 1)
-                        if end_hour == 24:
-                            end_hour = 0
-                        duration_minutes = (end_hour - start_hour) * 60 if end_hour > start_hour else ((24 - start_hour) + end_hour) * 60
-                        if duration_minutes <= 0:
+                        if end_time_from_info:
+                            start_hour = int(selected_time.split(":")[0]) if selected_time and ":" in selected_time else 14
+                            end_hour = int(end_time_from_info.split(":")[0]) if end_time_from_info and ":" in end_time_from_info else (start_hour + 1)
+                            if end_hour == 24:
+                                end_hour = 0
+                            duration_minutes = (end_hour - start_hour) * 60 if end_hour > start_hour else ((24 - start_hour) + end_hour) * 60
+                            if duration_minutes <= 0:
+                                duration_minutes = 60
+                        else:
                             duration_minutes = 60
                         
-                        confirm_msg = f"✅ {selected_date} {selected_time}~{end_time_from_info}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        # ✅ [여행 모드] 확인 메시지 변경
+                        if is_travel_mode:
+                            end_date = schedule_info.get("end_date") or selected_date
+                            confirm_msg = f"✅ {selected_date}부터 {duration_nights}박 {duration_nights + 1}일 여행 일정을 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        elif end_time_from_info:
+                            confirm_msg = f"✅ {selected_date} {selected_time}~{end_time_from_info}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        else:
+                            confirm_msg = f"✅ {selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
                         await ChatRepository.create_chat_log(
                             user_id=user_id,
                             request_text=None,
@@ -1147,18 +1163,22 @@ class ChatService:
                         )
                         
                         # A2A 협상 시작
+                        # [✅ 수정] explicit_title이 있으면 그것을 summary로 사용
+                        final_summary = explicit_title or activity or "약속"
+                        
                         a2a_result = await A2AService.start_multi_user_session(
                             initiator_user_id=user_id,
                             target_user_ids=friend_ids,
-                            summary=activity or "약속",
+                            summary=final_summary,
                             date=selected_date,
                             time=selected_time,
                             end_time=end_time_from_info,  # [✅ NEW] 끝나는 시간 전달
                             location=location,
-                            activity=activity,
+                            activity=final_summary,  # [✅ 수정] 캘린더 제목 동기화를 위해 activity에도 final_summary 전달
                             duration_minutes=duration_minutes,
                             force_new=True,
-                            origin_chat_session_id=session_id
+                            origin_chat_session_id=session_id,
+                            duration_nights=duration_nights  # ✅ 박 수 전달
                         )
                         
                         return {
@@ -1283,8 +1303,10 @@ class ChatService:
                                 }
                             }
 
-                    # 요약 메시지 (기존 로직)
-                    if schedule_info.get("activity"):
+                    # 요약 메시지 (기존 로직) - explicit_title 우선 사용
+                    if explicit_title:
+                        summary = explicit_title
+                    elif schedule_info.get("activity"):
                          summary = schedule_info.get("activity")
                     else:
                         summary_parts = []
@@ -1329,6 +1351,10 @@ class ChatService:
                         session_ids = session_ids_for_recoordination
                     else:
                         # [신규 세션 로직]
+                        # explicit_title이 있으면 우선 사용
+                        final_activity = explicit_title or schedule_info.get("activity")
+                        final_location = explicit_location or schedule_info.get("location")
+                        
                         a2a_result = await A2AService.start_multi_user_session(
                             initiator_user_id=user_id,
                             target_user_ids=friend_ids,
@@ -1336,11 +1362,12 @@ class ChatService:
                             date=schedule_info.get("date"),
                             time=schedule_info.get("time"),
                             end_time=schedule_info.get("end_time"),  # [✅ NEW] 끝나는 시간 전달
-                            location=schedule_info.get("location"),
-                            activity=schedule_info.get("activity"),
+                            location=final_location,
+                            activity=final_activity,
                             duration_minutes=60,
                             force_new=True,  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
-                            origin_chat_session_id=session_id  # [✅ 추가] 원본 채팅 세션 ID 전달
+                            origin_chat_session_id=session_id,  # [✅ 추가] 원본 채팅 세션 ID 전달
+                            duration_nights=duration_nights  # ✅ 박 수 전달
                         )
                         thread_id = a2a_result.get("thread_id")
                         session_ids = a2a_result.get("session_ids", [])

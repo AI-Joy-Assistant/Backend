@@ -738,7 +738,7 @@ async def get_user_sessions(
                 try:
                     target_date_str = None
                     
-                    # 1. 날짜 파싱 (커스텀 로직: 무조건 현재 연도 기준)
+                    # 1. 날짜 파싱
                     # "12월 13일" 같은 한글 형식 처리
                     korean_date_match = re.match(r'(\d+)월\s*(\d+)일', p_date)
                     if korean_date_match:
@@ -746,12 +746,14 @@ async def get_user_sessions(
                         day = int(korean_date_match.group(2))
                         year = now.year
                         
-                        # 연도 보정: 현재 월보다 3개월 이상 큰 월은 이전 해로 간주
-                        # 예: 1월에 "12월 30일" → 작년 12월 30일
+                        # 연도 보정 로직:
+                        # 1. 과거 날짜 처리: 현재 월보다 이전이거나 같은 달의 지난 날 → 내년
+                        # 2. 너무 먼 미래 처리: 현재 월보다 3개월 이상 큰 월 → 작년
                         current_month = now.month
-                        if month > current_month + 3:
+                        if month < current_month or (month == current_month and day < now.day):
+                            year = now.year + 1
+                        elif month > current_month + 3:
                             year = now.year - 1
-                        
                         target_date_str = f"{year}-{month:02d}-{day:02d}"
                     elif re.match(r'^\d{4}-\d{2}-\d{2}$', p_date):
                         target_date_str = p_date
