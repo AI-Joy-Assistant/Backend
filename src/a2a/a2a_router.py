@@ -624,46 +624,76 @@ async def get_user_sessions(
             db_conflicts = place_pref.get("conflicting_sessions", [])
             if not isinstance(db_conflicts, list): db_conflicts = []
             
-            # [NEW] DB에 저장된 충돌 세션의 제목을 동적으로 보완
-            # 기존 데이터에 "일정" 또는 "확정된 일정"만 있는 경우 실제 제목으로 대체
-            enriched_conflicts = []
-            for conflict in db_conflicts:
-                conflict_id = conflict.get("id") or conflict.get("session_id")
-                conflict_title = conflict.get("title", "")
-                
-                # 제목이 없거나 기본값인 경우 grouped_sessions에서 찾아서 보완
-                if not conflict_title or conflict_title in ["일정", "확정된 일정", "새 일정"]:
-                    # grouped_sessions에서 해당 세션 찾기
-                    for gs in grouped_sessions:
-                        if gs.get("id") == conflict_id:
-                            gs_pref = gs.get("place_pref", {})
-                            if isinstance(gs_pref, str):
-                                try: gs_pref = json.loads(gs_pref)
-                                except: gs_pref = {}
-                            
-                            # 제목 결정 (purpose > summary > 참여자 이름)
-                            new_title = gs_pref.get("purpose") or gs_pref.get("summary") or gs_pref.get("activity")
-                            if not new_title:
-                                p_names = gs.get("participant_names", [])
-                                if p_names:
-                                    new_title = f"{', '.join(p_names)}와 약속"
-                            
-                            if new_title:
-                                conflict_title = new_title
-                            
-                            # 참여자 이름도 보완
-                            if not conflict.get("participant_names"):
-                                conflict["participant_names"] = gs.get("participant_names", [])
-                            break
-                
-                conflict["title"] = conflict_title or "일정"
-                enriched_conflicts.append(conflict)
-            
-            has_conflict = db_has_conflict
-            conflicting_sessions = enriched_conflicts
-
             session_status = session.get("status", "").lower()
             session_id = session.get("id")
+            
+            # [FIX] 현재 세션이 rejected 또는 completed 상태이면 충돌 체크 안 함
+            # 거절된 세션은 더 이상 활성 상태가 아니므로 충돌로 표시하면 안 됨
+            if session_status in ["rejected", "completed"]:
+                has_conflict = False
+                conflicting_sessions = []
+            else:
+                # [FIX] 현재 세션의 thread_id (같은 thread = 같은 일정 요청)
+                my_thread_id = place_pref.get("thread_id") or session_id
+                
+                # [NEW] DB에 저장된 충돌 세션의 제목을 동적으로 보완
+                # 기존 데이터에 "일정" 또는 "확정된 일정"만 있는 경우 실제 제목으로 대체
+                # [FIX] rejected 상태인 세션 및 같은 thread_id인 세션은 충돌 목록에서 제외
+                enriched_conflicts = []
+                for conflict in db_conflicts:
+                    conflict_id = conflict.get("id") or conflict.get("session_id")
+                    conflict_title = conflict.get("title", "")
+                    
+                    # grouped_sessions에서 해당 세션을 찾아서 상태 확인 및 제목 보완
+                    conflict_session = None
+                    for gs in grouped_sessions:
+                        if gs.get("id") == conflict_id:
+                            conflict_session = gs
+                            break
+                    
+                    # [FIX] 충돌 세션의 상태가 rejected면 충돌 목록에서 제외
+                    if conflict_session:
+                        conflict_status = conflict_session.get("status", "").lower()
+                        if conflict_status == "rejected":
+                            continue  # rejected 상태인 세션은 충돌로 간주하지 않음
+                        
+                        # [FIX] 같은 thread_id인 세션은 같은 일정 요청의 일부이므로 충돌 아님
+                        conflict_pref = conflict_session.get("place_pref", {})
+                        if isinstance(conflict_pref, str):
+                            try: conflict_pref = json.loads(conflict_pref)
+                            except: conflict_pref = {}
+                        conflict_thread_id = conflict_pref.get("thread_id") or conflict_id
+                        if my_thread_id == conflict_thread_id:
+                            continue  # 같은 일정 그룹은 충돌로 보지 않음
+                    
+                    # 제목 보완 (제목이 없거나 기본값인 경우)
+                    if conflict_session and (not conflict_title or conflict_title in ["일정", "확정된 일정", "새 일정"]):
+                        gs_pref = conflict_session.get("place_pref", {})
+                        if isinstance(gs_pref, str):
+                            try: gs_pref = json.loads(gs_pref)
+                            except: gs_pref = {}
+                        
+                        # 제목 결정 (purpose > summary > 참여자 이름)
+                        new_title = gs_pref.get("purpose") or gs_pref.get("summary") or gs_pref.get("activity")
+                        if not new_title:
+                            p_names = conflict_session.get("participant_names", [])
+                            if p_names:
+                                new_title = f"{', '.join(p_names)}와 약속"
+                        
+                        if new_title:
+                            conflict_title = new_title
+                        
+                        # 참여자 이름도 보완
+                        if not conflict.get("participant_names"):
+                            conflict["participant_names"] = conflict_session.get("participant_names", [])
+                    
+                    conflict["title"] = conflict_title or "일정"
+                    enriched_conflicts.append(conflict)
+                
+                # [FIX] 필터링된 충돌 목록 기반으로 has_conflict 재계산
+                # DB에 저장된 충돌 정보 중 rejected 상태가 된 세션은 제외되었으므로 길이 기반으로 판단
+                has_conflict = len(enriched_conflicts) > 0
+                conflicting_sessions = enriched_conflicts
             
             if proposed_date and session_status in ["pending", "in_progress", "pending_approval", "needs_reschedule"]:
                 import re
@@ -703,17 +733,26 @@ async def get_user_sessions(
                     same_time_sessions = [s for s in grouped_sessions if s.get("id") != session_id]
                     # print(f"🔍 [충돌비교] session={session_id[:8]}, 날짜={my_date}, 시간={my_hour}, 비교대상={len(same_time_sessions)}개")
                     
+                    # [FIX] 현재 세션의 thread_id 가져오기 (같은 thread = 같은 일정 요청)
+                    my_thread_id = place_pref.get("thread_id") or session_id
+                    
                     for other in grouped_sessions:
                         if other.get("id") == session_id:
                             continue
-                        other_status = other.get("status", "").lower()
-                        if other_status not in ["pending", "in_progress", "pending_approval", "needs_reschedule", "completed"]:
-                            continue
                         
+                        # [FIX] 같은 thread_id인 세션은 같은 일정 요청의 일부이므로 충돌 아님
                         other_pref = other.get("place_pref", {})
                         if isinstance(other_pref, str):
                             try: other_pref = json.loads(other_pref)
                             except: continue
+                        
+                        other_thread_id = other_pref.get("thread_id") or other.get("id")
+                        if my_thread_id == other_thread_id:
+                            continue  # 같은 일정 그룹은 충돌로 보지 않음
+                        
+                        other_status = other.get("status", "").lower()
+                        if other_status not in ["pending", "in_progress", "pending_approval", "needs_reschedule", "completed"]:
+                            continue
                         
                         other_date = other_pref.get("proposedDate") or other_pref.get("date") or ""
                         other_time = other_pref.get("proposedTime") or other_pref.get("time") or ""
