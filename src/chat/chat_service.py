@@ -194,6 +194,8 @@ class ChatService:
         explicit_title: Optional[str] = None,  # ✅ 프론트에서 넘어오는 제목
         explicit_location: Optional[str] = None,  # ✅ 프론트에서 넘어오는 장소
         duration_nights: int = 0,  # ✅ 박 수 (0이면 당일)
+        explicit_start_time: Optional[str] = None,  # ✅ 프론트에서 넘어오는 시작 시간 (HH:MM)
+        explicit_end_time: Optional[str] = None,  # ✅ 프론트에서 넘어오는 종료 시간 (HH:MM)
     ) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
         try:
@@ -1367,20 +1369,34 @@ class ChatService:
                         session_ids = session_ids_for_recoordination
                     else:
                         # [신규 세션 로직]
-                        # explicit_title이 있으면 우선 사용
+                        # explicit 값이 있으면 우선 사용
                         final_activity = explicit_title or schedule_info.get("activity")
                         final_location = explicit_location or schedule_info.get("location")
+                        final_start_time = explicit_start_time or schedule_info.get("time")
+                        final_end_time = explicit_end_time or schedule_info.get("end_time")
+                        
+                        # duration_minutes 계산 (explicit 시간이 있는 경우)
+                        calculated_duration = 60  # 기본값
+                        if final_start_time and final_end_time and ":" in final_start_time and ":" in final_end_time:
+                            try:
+                                start_h, start_m = map(int, final_start_time.split(":"))
+                                end_h, end_m = map(int, final_end_time.split(":"))
+                                calculated_duration = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+                                if calculated_duration <= 0:
+                                    calculated_duration = 60  # 음수인 경우 기본값
+                            except:
+                                pass
                         
                         a2a_result = await A2AService.start_multi_user_session(
                             initiator_user_id=user_id,
                             target_user_ids=friend_ids,
                             summary=summary,
                             date=schedule_info.get("date"),
-                            time=schedule_info.get("time"),
-                            end_time=schedule_info.get("end_time"),  # [✅ NEW] 끝나는 시간 전달
+                            time=final_start_time,
+                            end_time=final_end_time,  # [✅ NEW] 끝나는 시간 전달
                             location=final_location,
                             activity=final_activity,
-                            duration_minutes=60,
+                            duration_minutes=calculated_duration,
                             force_new=True,  # [✅ 수정] 채팅에서 새로운 요청 시 무조건 새 세션 생성
                             origin_chat_session_id=session_id,  # [✅ 추가] 원본 채팅 세션 ID 전달
                             duration_nights=duration_nights  # ✅ 박 수 전달

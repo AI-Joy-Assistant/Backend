@@ -563,7 +563,8 @@ class A2AService:
             activity = (place_pref.get("purpose") or details.get("purpose") or 
                        place_pref.get("summary") or place_pref.get("activity") or "약속")
             
-            # logger.info(f"추출된 정보 - date: {date_str}, time: {time_str}, location: {location}, activity: {activity}")
+            # [DEBUG] activity 추출 확인
+            logger.info(f"📅 [Calendar Event] activity 결정: purpose={place_pref.get('purpose')}, summary={place_pref.get('summary')}, activity_key={place_pref.get('activity')} -> final={activity}")
             
             # 메시지에서 날짜/시간 정보 찾기 (details와 time_window가 비어있을 경우)
             if not date_str or not time_str:
@@ -591,6 +592,16 @@ class A2AService:
             start_time = None
             end_time = None
             
+            # [DEBUG] 데이터 흐름 확인
+            logger.info(f"📅 [Calendar Parse] date_str={date_str}, time_str={time_str}")
+            logger.info(f"📅 [Calendar Parse] place_pref keys: {list(place_pref.keys()) if place_pref else 'None'}")
+            
+            # proposedEndTime 추출 (종료 시간)
+            end_time_str = (place_pref.get("proposedEndTime") or 
+                           details.get("proposedEndTime") or details.get("end_time") or 
+                           place_pref.get("end_time") or "")
+            logger.info(f"📅 [Calendar Parse] end_time_str={end_time_str}")
+            
             if details.get("start_time"):
                 start_time = datetime.fromisoformat(details["start_time"].replace("Z", "+00:00")).astimezone(KST)
                 end_time = datetime.fromisoformat(details["end_time"].replace("Z", "+00:00")).astimezone(KST)
@@ -603,10 +614,18 @@ class A2AService:
                         if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
                             combined_iso = f"{date_str}T{time_str}:00"
                             start_time = datetime.fromisoformat(combined_iso).replace(tzinfo=KST)
-                            # [✅ FIX] place_pref에서 duration_minutes 가져와서 end_time 계산
-                            saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
-                            end_time = start_time + timedelta(minutes=saved_duration)
-                            # logger.info(f"표준 형식 파싱 성공: {start_time}, duration={saved_duration}min")
+                            logger.info(f"📅 [Calendar Parse] ISO 파싱 성공: start_time={start_time}")
+                            
+                            # [FIX] proposedEndTime이 있으면 그것으로 end_time 계산
+                            if end_time_str and re.match(r'^\d{1,2}:\d{2}$', end_time_str):
+                                end_combined_iso = f"{date_str}T{end_time_str}:00"
+                                end_time = datetime.fromisoformat(end_combined_iso).replace(tzinfo=KST)
+                                logger.info(f"📅 [Calendar Parse] end_time ISO 파싱: {end_time}")
+                            else:
+                                # fallback: duration_minutes 사용
+                                saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                                end_time = start_time + timedelta(minutes=saved_duration)
+                                logger.info(f"📅 [Calendar Parse] duration fallback: {saved_duration}min")
                 except Exception as e:
                     logger.warning(f"표준 형식 파싱 실패: {e}")
                 
@@ -614,10 +633,12 @@ class A2AService:
                 if not start_time:
                     from src.chat.chat_service import ChatService
                     combined = f"{date_str} {time_str}".strip()
+                    logger.warning(f"📅 [Calendar Parse] ISO 파싱 실패, ChatService 사용: combined={combined}")
                     parsed = await ChatService.parse_time_string(time_str, combined)
                     if parsed:
                         start_time = parsed['start_time']
                         end_time = parsed['end_time']
+                        logger.info(f"📅 [Calendar Parse] ChatService 결과: start={start_time}, end={end_time}")
             
             # 시간 정보가 없으면 기본값 (내일 오후 2시)
             if not start_time:
@@ -702,6 +723,8 @@ class A2AService:
                             
                             # 다른 참여자들 이름 (본인 제외)
                             other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
+                            # 전체 참여자 이름 (본인 포함)
+                            all_participant_names = list(participant_names.values())
                             
                             # [수정] 사용자가 입력한 제목(activity)을 우선 사용
                             # activity가 있으면 그대로 사용, 없으면 기존 형식 유지
@@ -719,12 +742,21 @@ class A2AService:
                             if location and location not in evt_summary:
                                 evt_summary += f" ({location})"
                             
+                            # [NEW] description에 참여자 정보 포함 (프론트엔드에서 파싱 가능)
+                            import json
+                            description_json = {
+                                "source": "A2A Agent",
+                                "session_id": session_id,
+                                "participants": all_participant_names
+                            }
+                            evt_description = f"A2A Agent에 의해 자동 생성된 일정입니다.\n\n[A2A_DATA]{json.dumps(description_json, ensure_ascii=False)}[/A2A_DATA]"
+                            
                             event_req = CreateEventRequest(
                                 summary=evt_summary,
                                 start_time=start_time.isoformat(),
                                 end_time=end_time.isoformat(),
                                 location=location,
-                                description="A2A Agent에 의해 자동 생성된 일정입니다.",
+                                description=evt_description,
                                 attendees=[]
                             )
                             
@@ -931,8 +963,10 @@ class A2AService:
             formatted_end_time = end_time or (formatted_time if formatted_time else "")  # 종료 시간
             
             # place_pref에 재조율 정보 추가 (시간 범위 포함)
-            # [FIX] 재조율 시 기존 승인 목록 및 나간 참여자 초기화
+            # [FIX] 재조율 시 기존 승인 목록 초기화하되, left_participants는 유지!
             # [NEW] 재조율 시 충돌 플래그도 초기화 (새 시간으로 재협상하므로 충돌 상태 리셋)
+            # [IMPORTANT] left_participants는 초기화하지 않음 - 거절하고 나간 사람에게 재조율 요청 안 보내기 위해
+            existing_left_participants = place_pref.get("left_participants", [])
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
@@ -942,12 +976,13 @@ class A2AService:
                 "proposedEndDate": formatted_end_date,
                 "proposedEndTime": formatted_end_time,
                 "approved_by_list": [user_id],  # 재조율 요청자만 승인 상태로 초기화
-                "left_participants": [],  # [NEW] 나간 참여자 목록도 초기화 (다시 협상 시작)
+                # [FIX] left_participants 유지: 거절한 사람은 재조율 대상에서 제외
+                "left_participants": existing_left_participants,
                 "has_conflict": False,  # [NEW] 충돌 플래그 초기화
                 "conflicting_sessions": [],  # [NEW] 충돌 세션 목록 초기화
                 "conflict_reason": None,  # [NEW] 충돌 사유 초기화
             }
-            print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants: []")
+            print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants 유지: {existing_left_participants}")
             
             # 모든 관련 세션에 재조율 정보 업데이트
             for sid in all_session_ids:
@@ -992,15 +1027,20 @@ class A2AService:
             # initiator 제외
             participant_user_ids = [uid for uid in participant_user_ids if uid != initiator_user_id]
             
+            # [FIX] left_participants에 포함된 사용자도 제외 (거절하고 나간 사람)
+            left_participants_set = set(str(lp) for lp in existing_left_participants)
+            participant_user_ids = [uid for uid in participant_user_ids if str(uid) not in left_participants_set]
+            
             print(f"🔄 [Reschedule] 협상 재실행 준비:")
             print(f"   - session_id: {session_id}")
             print(f"   - initiator: {initiator_user_id}")
-            print(f"   - participants: {participant_user_ids}")
+            print(f"   - participants (나간 사람 제외): {participant_user_ids}")
+            print(f"   - left_participants: {existing_left_participants}")
             print(f"   - target_date: {formatted_date}")
             print(f"   - target_time: {formatted_time}")
             
             if not participant_user_ids:
-                print(f"⚠️ [Reschedule] 참여자가 없습니다! target_user_id: {target_user_id}")
+                print(f"⚠️ [Reschedule] 참여자가 없습니다! (모든 참여자가 나갔거나 target_user_id 없음)")
             
             # 5. 협상 재실행 (백그라운드 태스크로 실행 - 즉시 응답)
             async def run_negotiation_background():
@@ -3573,15 +3613,21 @@ class A2AService:
                 non_requester_participants = [p for p in participant_user_ids if str(p) != actual_requester]
                 all_others_left = all(str(p) in global_left_participants for p in non_requester_participants)
                 
-                # logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
+                logger.info(f"🔴 [거절] 요청자: {actual_requester}, 비요청자: {non_requester_participants}, 전원나감: {all_others_left}")
                 
-                # [수정] 한 명이라도 거절하면 즉시 status를 rejected로 변경
-                logger.info(f"🔴 [거절] 세션을 즉시 'rejected'로 변경")
-                for session in all_thread_sessions:
-                    supabase.table('a2a_session').update({
-                        "status": "rejected",
-                        "updated_at": dt_datetime.now().isoformat()
-                    }).eq('id', session['id']).execute()
+                # [FIX] 모든 상대방이 나갔을 때만 rejected로 변경
+                # 1명만 거절한 경우, 나머지 참여자들의 세션은 활성 상태 유지
+                if all_others_left:
+                    # 모든 상대방이 거절함 → 전체 세션을 rejected로 변경
+                    logger.info(f"🔴 [거절] 모든 상대방이 나감 - 세션을 'rejected'로 변경")
+                    for session in all_thread_sessions:
+                        supabase.table('a2a_session').update({
+                            "status": "rejected",
+                            "updated_at": dt_datetime.now().isoformat()
+                        }).eq('id', session['id']).execute()
+                else:
+                    # 일부만 거절함 → left_participants만 업데이트하고 세션은 활성 상태 유지
+                    logger.info(f"🔴 [거절] 일부만 나감 - left_participants 업데이트만 수행, 세션 상태 유지")
                 
                 # [추가] WebSocket으로 상대방에게 거절 알림 전송
                 for pid in all_participants:
@@ -3592,7 +3638,8 @@ class A2AService:
                                 "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
                                 "thread_id": thread_id,
                                 "rejected_by": user_id,
-                                "rejected_by_name": user_name
+                                "rejected_by_name": user_name,
+                                "all_rejected": all_others_left  # 전원 거절 여부 전달
                             }, str(pid))
                             logger.info(f"[WS] 거절 알림 전송: {pid}")
                         except Exception as ws_err:
