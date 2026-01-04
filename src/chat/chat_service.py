@@ -194,8 +194,11 @@ class ChatService:
         explicit_title: Optional[str] = None,  # ✅ 프론트에서 넘어오는 제목
         explicit_location: Optional[str] = None,  # ✅ 프론트에서 넘어오는 장소
         duration_nights: int = 0,  # ✅ 박 수 (0이면 당일)
-        explicit_start_time: Optional[str] = None,  # ✅ 프론트에서 넘어오는 시작 시간 (HH:MM)
-        explicit_end_time: Optional[str] = None,  # ✅ 프론트에서 넘어오는 종료 시간 (HH:MM)
+        start_date: Optional[str] = None,  # ✅ 시작 날짜 (YYYY-MM-DD)
+        end_date: Optional[str] = None,  # ✅ 종료 날짜 (YYYY-MM-DD)
+        start_time: Optional[str] = None,  # ✅ 시작 시간 (HH:MM)
+        end_time: Optional[str] = None,  # ✅ 종료 시간 (HH:MM)
+        duration_minutes: int = 60,  # ✅ 소요 시간 (분)
     ) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
         try:
@@ -1100,23 +1103,26 @@ class ChatService:
                         # 바로 A2A 협상 시작
                         from src.a2a.a2a_service import A2AService
                         
-                        selected_date = schedule_info.get("start_date")
-                        selected_time = schedule_info.get("start_time") or "09:00"  # ✅ 기본 시간
+                        # [✅ FIX] 명시적으로 전달된 시간 정보 우선 사용, 없으면 schedule_info에서 fallback
+                        selected_date = start_date or schedule_info.get("start_date")
+                        selected_time = start_time or schedule_info.get("start_time") or "09:00"  # ✅ 기본 시간
+                        end_time_from_param = end_time or schedule_info.get("end_time")
                         activity = schedule_info.get("activity")
                         location = schedule_info.get("location") or explicit_location
                         
-                        # [✅ NEW] 끝 시간이 명시되지 않았으면 물어보기 (여행 모드는 제외)
-                        end_time_from_info = schedule_info.get("end_time")
+                        # 명시적 duration_minutes 사용
+                        final_duration_minutes = duration_minutes if duration_minutes else 60
                         end_time_keywords = ["까지", "끝", "종료", "~", "부터", "시간 동안", "동안"]
                         user_mentioned_end_time = any(kw in message for kw in end_time_keywords)
                         
                         # 사용자가 끝 시간을 언급하지 않았으면 LLM의 end_time 무시
-                        if end_time_from_info and not user_mentioned_end_time:
-                            logger.warning(f"[A2A 환각 방지] LLM이 end_time='{end_time_from_info}'을 반환했지만, 사용자 메시지에 끝 시간 키워드 없음 → 무시")
-                            end_time_from_info = None
+                        # [FIX] 명시적 파라미터(end_time_from_param)가 있으면 환각 체크 스킵
+                        if end_time_from_param and not end_time and not user_mentioned_end_time:
+                            logger.warning(f"[A2A 환각 방지] LLM이 end_time='{end_time_from_param}'을 반환했지만, 사용자 메시지에 끝 시간 키워드 없음 → 무시")
+                            end_time_from_param = None
                         
                         # ✅ [여행 모드] 여행일 경우 끝 시간 물어보기 스킵
-                        if not end_time_from_info and not is_travel_mode:
+                        if not end_time_from_param and not is_travel_mode:
                             # 끝 시간 물어보기
                             end_time_question = f"⏰ {selected_date} {selected_time}에 시작하는 약속이군요!\n끝나는 시간은 언제인가요? (예: 5시, 오후 7시)\n모르시면 '몫라'라고 해주세요!"
                             
@@ -1152,23 +1158,27 @@ class ChatService:
                         
                         # 끝 시간이 있거나 여행 모드면 바로 A2A 시작
                         # duration_minutes 계산
-                        if end_time_from_info:
+                        # [FIX] 명시적 duration_minutes가 있으면 사용, 없으면 계산
+                        if final_duration_minutes and final_duration_minutes > 0:
+                            # 명시적 duration_minutes 사용
+                            pass
+                        elif end_time_from_param:
                             start_hour = int(selected_time.split(":")[0]) if selected_time and ":" in selected_time else 14
-                            end_hour = int(end_time_from_info.split(":")[0]) if end_time_from_info and ":" in end_time_from_info else (start_hour + 1)
+                            end_hour = int(end_time_from_param.split(":")[0]) if end_time_from_param and ":" in end_time_from_param else (start_hour + 1)
                             if end_hour == 24:
                                 end_hour = 0
-                            duration_minutes = (end_hour - start_hour) * 60 if end_hour > start_hour else ((24 - start_hour) + end_hour) * 60
-                            if duration_minutes <= 0:
-                                duration_minutes = 60
+                            final_duration_minutes = (end_hour - start_hour) * 60 if end_hour > start_hour else ((24 - start_hour) + end_hour) * 60
+                            if final_duration_minutes <= 0:
+                                final_duration_minutes = 60
                         else:
-                            duration_minutes = 60
+                            final_duration_minutes = 60
                         
                         # ✅ [여행 모드] 확인 메시지 변경
                         if is_travel_mode:
                             end_date = schedule_info.get("end_date") or selected_date
                             confirm_msg = f"✅ {selected_date}부터 {duration_nights}박 {duration_nights + 1}일 여행 일정을 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
-                        elif end_time_from_info:
-                            confirm_msg = f"✅ {selected_date} {selected_time}~{end_time_from_info}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        elif end_time_from_param:
+                            confirm_msg = f"✅ {selected_date} {selected_time}~{end_time_from_param}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
                         else:
                             confirm_msg = f"✅ {selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
                         await ChatRepository.create_chat_log(
@@ -1190,10 +1200,10 @@ class ChatService:
                             summary=final_summary,
                             date=selected_date,
                             time=selected_time,
-                            end_time=end_time_from_info,  # [✅ NEW] 끝나는 시간 전달
+                            end_time=end_time_from_param,  # [✅ FIX] 명시적 끝나는 시간 전달
                             location=location,
-                            activity=final_summary,  # [✅ 수정] 캘린더 제목 동기화를 위해 activity에도 final_summary 전달
-                            duration_minutes=duration_minutes,
+                            activity=final_summary,
+                            duration_minutes=final_duration_minutes,  # [✅ FIX] 명시적 duration 사용
                             force_new=True,
                             origin_chat_session_id=session_id,
                             duration_nights=duration_nights  # ✅ 박 수 전달

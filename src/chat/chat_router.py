@@ -119,6 +119,13 @@ async def chat_with_gpt(
     title = request.get("title")  # 제목 필드 추가
     location = request.get("location")  # 장소 필드 추가
     duration_nights = request.get("duration_nights", 0)  # 박 수 (0이면 당일)
+    # 명시적 시간 정보
+    start_date = request.get("start_date")
+    end_date = request.get("end_date")
+    start_time = request.get("start_time")
+    end_time = request.get("end_time")
+    duration_minutes = request.get("duration_minutes", 60)
+    
     if not message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
@@ -129,7 +136,12 @@ async def chat_with_gpt(
         session_id=session_id,
         explicit_title=title,  # 제목 전달
         explicit_location=location,  # 장소 전달
-        duration_nights=duration_nights  # 박 수 전달
+        duration_nights=duration_nights,  # 박 수 전달
+        start_date=start_date,
+        end_date=end_date,
+        start_time=start_time,
+        end_time=end_time,
+        duration_minutes=duration_minutes
     )
     
     if result["status"] == 200:
