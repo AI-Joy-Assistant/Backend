@@ -232,7 +232,9 @@ async def get_a2a_session(
             "rescheduleRequestedAt": place_pref.get("rescheduleRequestedAt"),  # [NEW] 재조율 요청 시간
             "rescheduleReason": place_pref.get("rescheduleReason"),
             # 나간 참여자 정보 (거절한 사람들)
-            "left_participants": place_pref.get("left_participants", [])
+            "left_participants": place_pref.get("left_participants", []),
+            # [NEW] 다박 일정 정보 - 1박 이상이면 시간 대신 날짜 범위 표시
+            "duration_nights": place_pref.get("duration_nights", 0)
         }
         
         # [PERFORMANCE] 캘린더 충돌 확인 비활성화 - Google Calendar API 호출이 ~1초 소요됨
@@ -766,7 +768,9 @@ async def get_user_sessions(
                 "process": process,
                 "has_conflict": has_conflict,
                 "conflicting_sessions": conflicting_sessions,
-                "left_participants": left_participants  # 프론트엔드 필터링용
+                "left_participants": left_participants,  # 프론트엔드 필터링용
+                # [NEW] 다박 일정 정보 - 1박 이상이면 시간 대신 날짜 범위 표시
+                "duration_nights": place_pref.get("duration_nights", 0)
             }
 
             session["title"] = title
