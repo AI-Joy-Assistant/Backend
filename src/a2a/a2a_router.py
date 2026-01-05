@@ -526,6 +526,10 @@ async def get_user_sessions(
             
             # Details 구성
             # Initiator 이름 및 아바타 찾기
+            initiator_id = session.get("initiator_user_id")
+            initiator_name = "알 수 없음"
+            initiator_avatar = "https://picsum.photos/150"
+            
             if initiator_id == current_user_id:
                 initiator_name = "나"
                 if initiator_id in user_details_map:    
