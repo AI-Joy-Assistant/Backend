@@ -33,7 +33,7 @@ def _get_weekday_korean(date_str: str) -> str:
     return ""
 
 def _format_date_with_weekday(date_str: str, time_str: str = None) -> str:
-    """날짜를 요일 포함 형식으로 변환 (예: 12월 22일 월요일 오후 1시)"""
+    """날짜를 요일 포함 형식으로 변환 (예: 12월 22일 월요일 오후 1시 30분)"""
     try:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
             dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -41,14 +41,26 @@ def _format_date_with_weekday(date_str: str, time_str: str = None) -> str:
             date_formatted = f"{dt.month}월 {dt.day}일 {weekday}"
             
             if time_str:
-                # 시간 변환 (HH:MM -> 오전/오후 X시)
+                # 시간 변환 (HH:MM -> 오전/오후 X시 Y분)
                 if re.match(r'^\d{1,2}:\d{2}$', time_str):
                     parts = time_str.split(':')
                     hour = int(parts[0])
+                    minute = int(parts[1])
+                    
+                    # AM/PM 및 12시간 형식 변환
                     if hour < 12:
-                        time_formatted = f"오전 {hour}시" if hour > 0 else "오전 12시"
+                        display_hour = hour if hour > 0 else 12
+                        am_pm = "오전"
                     else:
-                        time_formatted = f"오후 {hour - 12}시" if hour > 12 else "오후 12시"
+                        display_hour = hour - 12 if hour > 12 else 12
+                        am_pm = "오후"
+                    
+                    # 분이 있으면 "오후 6시 36분", 없으면 "오후 6시"
+                    if minute > 0:
+                        time_formatted = f"{am_pm} {display_hour}시 {minute}분"
+                    else:
+                        time_formatted = f"{am_pm} {display_hour}시"
+                    
                     return f"{date_formatted} {time_formatted}"
             return date_formatted
     except Exception:

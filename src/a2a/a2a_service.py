@@ -2518,9 +2518,27 @@ class A2AService:
                         if not parsed_date:
                             parsed_date = today + timedelta(days=1)  # 기본값: 내일
                         
-                        # 시간 파싱
+                        # 시간 파싱 (분 단위 지원)
                         time_str = time.strip() if time else ""
                         hour = 14  # 기본값: 오후 2시
+                        minute = 0  # 기본값: 0분
+                        
+                        # 분 단위 파싱 함수
+                        def parse_minute(ts: str) -> int:
+                            # "N시 M분" 형식
+                            m = re.search(r"시\s*(\d{1,2})\s*분", ts)
+                            if m:
+                                return int(m.group(1))
+                            # "N:MM" 형식
+                            m = re.search(r":(\d{2})", ts)
+                            if m:
+                                return int(m.group(1))
+                            # "N시반" 형식
+                            if re.search(r"시\s*반", ts):
+                                return 30
+                            return 0
+                        
+                        minute = parse_minute(time_str)
                         
                         if "점심" in time_str:
                             hour = 12
@@ -2546,20 +2564,29 @@ class A2AService:
                             hour_match = re.search(r"(\d{1,2})\s*시", time_str)
                             if hour_match:
                                 hour = int(hour_match.group(1))
+                            # "HH:MM" 형식 처리
+                            hm_match = re.search(r"(\d{1,2}):(\d{2})", time_str)
+                            if hm_match:
+                                hour = int(hm_match.group(1))
+                                minute = int(hm_match.group(2))
                         
-                        # 최종 datetime 생성
-                        start_time = parsed_date.replace(hour=hour, minute=0)
+                        # 최종 datetime 생성 (분 포함)
+                        start_time = parsed_date.replace(hour=hour, minute=minute)
                         end_time = start_time + timedelta(hours=1)  # 기본 1시간
                         
                         proposal_data["start_time"] = start_time.isoformat()
                         proposal_data["end_time"] = end_time.isoformat()
-                        # 파싱된 정확한 날짜/시간으로 업데이트
+                        # 파싱된 정확한 날짜/시간으로 업데이트 (분 포함)
                         proposal_data["proposedDate"] = start_time.strftime("%-m월 %-d일")
                         am_pm = "오전" if start_time.hour < 12 else "오후"
                         display_hour = start_time.hour if start_time.hour <= 12 else start_time.hour - 12
                         if display_hour == 0:
                             display_hour = 12
-                        proposal_data["proposedTime"] = f"{am_pm} {display_hour}시"
+                        # 분이 있으면 "오후 3시 17분" 형식, 없으면 "오후 3시" 형식
+                        if start_time.minute > 0:
+                            proposal_data["proposedTime"] = f"{am_pm} {display_hour}시 {start_time.minute}분"
+                        else:
+                            proposal_data["proposedTime"] = f"{am_pm} {display_hour}시"
                         proposal_data["date"] = start_time.strftime("%Y년 %-m월 %-d일")
                         
                         # logger.info(f"📅 Proposal 날짜 파싱: '{date}' '{time}' -> {proposal_data['proposedDate']} {proposal_data['proposedTime']}")

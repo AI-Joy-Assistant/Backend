@@ -538,68 +538,9 @@ async def get_user_sessions(
                 initiator_name = user_info.get("name", "알 수 없음")
                 initiator_avatar = user_info.get("profile_image") or initiator_avatar
             
-            # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
-            # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
-            # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 실제 메시지 조회
-            
-            # 메시지 조회하여 process 채우기
-            messages = await A2ARepository.get_session_messages(session.get("id"))
-            process = []
-            for msg in messages:
-                msg_content = msg.get('message', {})
-                sender_id = msg.get('sender_user_id')
-                
-                # 발신자 이름 찾기
-                sender_name = "System"
-                if sender_id and sender_id in user_details_map:
-                    sender_name = user_details_map[sender_id].get("name", "Unknown")
-                
-                # 메시지 텍스트 추출 (중첩된 구조 처리)
-                description = ""
-                if isinstance(msg_content, dict):
-                    # text 필드 추출
-                    text_value = msg_content.get('text', '') or msg_content.get('message', '')
-                    # text가 다시 dict인 경우 재귀적으로 text 추출
-                    if isinstance(text_value, dict):
-                        text_value = text_value.get('text', '') or text_value.get('message', '') or str(text_value)
-                    # 여전히 dict 문자열처럼 보이면 str()로 변환되었을 수 있음
-                    if text_value and not str(text_value).startswith('{'):
-                        description = str(text_value)
-                    elif text_value:
-                        # JSON 문자열인 경우 파싱 시도
-                        import json
-                        try:
-                            parsed = json.loads(str(text_value)) if isinstance(text_value, str) else text_value
-                            if isinstance(parsed, dict):
-                                description = parsed.get('text', '') or parsed.get('message', '') or str(parsed)
-                            else:
-                                description = str(parsed)
-                        except:
-                            description = str(text_value)
-                    else:
-                        description = "메시지 없음"
-                else:
-                    description = str(msg_content) if msg_content else "메시지 없음"
-                
-                # 단계 이름 설정
-                step_name = f"[{sender_name}의 AI]"
-                msg_type = msg.get('type')
-                
-                if msg_type == 'proposal':
-                    round_num = msg_content.get('round', '?') if isinstance(msg_content, dict) else '?'
-                    step_name = f"[{sender_name}의 AI] Round {round_num}"
-                elif msg_type == 'accept':
-                    step_name = f"[{sender_name}의 AI] 수락"
-                elif msg_type == 'reject' or msg_type == 'schedule_rejection':
-                    step_name = f"[{sender_name}의 AI] 거절"
-                elif msg_type == 'info':
-                    step_name = "[알림]"
-                
-                process.append({
-                    "step": step_name,
-                    "description": description,
-                    "created_at": msg.get('created_at')
-                })
+            # [OPTIMIZED] 목록 조회 시에는 메시지(process)를 가져오지 않음 (성능 최적화)
+            # 상세 조회(handleLogClick) 시에만 메시지를 가져옴
+            process = []  # 빈 배열 반환
             
             # left_participants 정보 추출
             left_participants = place_pref.get("left_participants", [])
@@ -662,99 +603,9 @@ async def get_user_sessions(
             has_conflict = db_has_conflict
             conflicting_sessions = enriched_conflicts
 
-            session_status = session.get("status", "").lower()
-            session_id = session.get("id")
-            
-            if proposed_date and session_status in ["pending", "in_progress", "pending_approval", "needs_reschedule"]:
-                import re
-                from datetime import datetime as dt
-                
-                # 날짜/시간 정규화 함수 (인라인)
-                def norm_date(d):
-                    if not d: return ""
-                    m = re.search(r'(\d{1,2})월\s*(\d{1,2})일', d)
-                    if m: return f"{int(m.group(1)):02d}-{int(m.group(2)):02d}"
-                    m = re.search(r'\d{4}-(\d{2})-(\d{2})', d)
-                    if m: return f"{m.group(1)}-{m.group(2)}"
-                    return d
-                
-                def norm_time(t):
-                    if not t: return -1
-                    t = t.replace(" ", "")
-                    m = re.search(r'(\d{1,2}):\d{2}', t)
-                    if m: return int(m.group(1))
-                    is_pm = "오후" in t
-                    m = re.search(r'(\d{1,2})시', t)
-                    if m:
-                        h = int(m.group(1))
-                        if is_pm and h != 12: h += 12
-                        elif not is_pm and h == 12: h = 0
-                        return h
-                    return -1
-                
-                my_date = norm_date(proposed_date)
-                my_hour = norm_time(proposed_time)
-                
-                # print(f"🔍 [충돌체크] session={session_id[:8]}, proposed_date={proposed_date}, proposed_time={proposed_time}, my_date={my_date}, my_hour={my_hour}")
-                
-                # 시간이 유효하면 충돌 비교 실행 (과거 날짜 스킵 제거 - 연도 경계 문제 방지)
-                if my_hour >= 0:
-                    # 동일 날짜+시간 세션 찾기 (디버그)
-                    same_time_sessions = [s for s in grouped_sessions if s.get("id") != session_id]
-                    # print(f"🔍 [충돌비교] session={session_id[:8]}, 날짜={my_date}, 시간={my_hour}, 비교대상={len(same_time_sessions)}개")
-                    
-                    for other in grouped_sessions:
-                        if other.get("id") == session_id:
-                            continue
-                        other_status = other.get("status", "").lower()
-                        if other_status not in ["pending", "in_progress", "pending_approval", "needs_reschedule", "completed"]:
-                            continue
-                        
-                        other_pref = other.get("place_pref", {})
-                        if isinstance(other_pref, str):
-                            try: other_pref = json.loads(other_pref)
-                            except: continue
-                        
-                        other_date = other_pref.get("proposedDate") or other_pref.get("date") or ""
-                        other_time = other_pref.get("proposedTime") or other_pref.get("time") or ""
-                        other_date_norm = norm_date(other_date)
-                        other_hour = norm_time(other_time)
-                        
-                        if other_date_norm == my_date and other_hour >= 0 and other_hour == my_hour:
-                            # print(f"✅ [충돌발견] {session_id[:8]} <-> {other.get('id')[:8]}, 날짜={my_date}, 시간={my_hour}")
-                            # [FIX] 중복 추가 방지
-                            # stored items might use 'session_id', dynamic uses 'id'
-                            is_dup = False
-                            other_id = other.get("id")
-                            for c in conflicting_sessions:
-                                if c.get("id") == other_id or c.get("session_id") == other_id:
-                                    is_dup = True
-                                    break
-                            
-                            if not is_dup:
-                                # 충돌 세션의 제목 결정 (purpose > summary > 참여자 이름 기반)
-                                conflict_title = (
-                                    other_pref.get("purpose") or 
-                                    other_pref.get("summary") or 
-                                    other_pref.get("activity")
-                                )
-                                # 제목이 없으면 참여자 이름으로 생성
-                                if not conflict_title:
-                                    participant_names = other.get("participant_names", [])
-                                    if participant_names:
-                                        conflict_title = f"{', '.join(participant_names)}와 약속"
-                                    else:
-                                        conflict_title = "일정"
-                                
-                                conflicting_sessions.append({
-                                    "id": other_id,
-                                    "title": conflict_title,
-                                    "date": other_date,
-                                    "time": other_time,
-                                    "participant_names": other.get("participant_names", [])
-                                })
-                    
-                    has_conflict = len(conflicting_sessions) > 0
+            # [OPTIMIZED] 목록 조회 시에는 실시간 충돌 감지를 수행하지 않음 (성능 최적화)
+            # DB에 저장된 has_conflict, conflicting_sessions만 사용
+            # 실시간 충돌 감지는 일정 승인/생성 시에만 수행됨
             
             details = {
                 "proposer": initiator_name,
