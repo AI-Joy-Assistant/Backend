@@ -5,7 +5,7 @@ import jwt
 import logging
 from config.settings import settings
 from .chat_service import ChatService
-from .chat_models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse
+from .chat_models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse, AIChatRequest
 from .chat_repository import ChatRepository
 from config.database import supabase
 
@@ -109,39 +109,33 @@ async def start_ai_conversation(
 
 @router.post("/chat", summary="ChatGPT와 대화")
 async def chat_with_gpt(
-    request: dict,
+    request: AIChatRequest,
     current_user_id: str = Depends(get_current_user_id)
 ):
     """ChatGPT와 자유로운 대화를 합니다."""
-    message = request.get("message", "")
-    selected_friends = request.get("selected_friends")
-    session_id = request.get("session_id")
-    title = request.get("title")  # 제목 필드 추가
-    location = request.get("location")  # 장소 필드 추가
-    duration_nights = request.get("duration_nights", 0)  # 박 수 (0이면 당일)
-    # 명시적 시간 정보
-    start_date = request.get("start_date")
-    end_date = request.get("end_date")
-    start_time = request.get("start_time")
-    end_time = request.get("end_time")
-    duration_minutes = request.get("duration_minutes", 60)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"DEBUG: /chat Request - title: '{request.title}', location: '{request.location}'")
     
-    if not message:
+    # AIChatRequest 모델 사용
+    
+    if not request.message:
         raise HTTPException(status_code=400, detail="메시지가 필요합니다.")
     
     result = await ChatService.start_ai_conversation(
         current_user_id, 
-        message, 
-        selected_friend_ids=selected_friends,
-        session_id=session_id,
-        explicit_title=title,  # 제목 전달
-        explicit_location=location,  # 장소 전달
-        duration_nights=duration_nights,  # 박 수 전달
-        start_date=start_date,
-        end_date=end_date,
-        start_time=start_time,
-        end_time=end_time,
-        duration_minutes=duration_minutes
+        request.message, 
+        selected_friend_ids=request.selected_friends,
+        session_id=request.session_id,
+        explicit_title=request.title,  # 제목 전달
+        explicit_location=request.location,  # 장소 전달
+        duration_nights=request.duration_nights,  # 박 수 전달
+        start_date=request.start_date,
+        end_date=request.end_date,
+        start_time=request.start_time,
+        end_time=request.end_time,
+        duration_minutes=request.duration_minutes,
+        is_all_day=request.is_all_day  # ✅ 종일 여부 전달
     )
     
     if result["status"] == 200:

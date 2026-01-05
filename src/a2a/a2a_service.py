@@ -1322,7 +1322,8 @@ class A2AService:
         target_date: Optional[str] = None,
         target_time: Optional[str] = None,
         location: Optional[str] = None,
-        all_session_ids: Optional[List[str]] = None  # 모든 세션에 메시지 저장용
+        all_session_ids: Optional[List[str]] = None,  # 모든 세션에 메시지 저장용
+        duration_nights: int = 0  # ✅ 박 수 추가
     ) -> Dict[str, Any]:
         """
         True A2A: NegotiationEngine을 사용한 실제 에이전트 간 협상
@@ -1346,7 +1347,8 @@ class A2AService:
                 activity=summary,
                 location=location,
                 target_date=target_date,
-                target_time=target_time
+                target_time=target_time,
+                duration_nights=duration_nights  # ✅ 박 수 전달
             )
             
             # 추가 세션 ID 저장 (메시지 동기화용)
@@ -1509,7 +1511,7 @@ class A2AService:
             service = GoogleCalendarService()
             now_kst = datetime.now(timezone(timedelta(hours=9)))
             default_min = (now_kst.replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()
-            default_max = (now_kst + timedelta(days=14)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            default_max = (now_kst + timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
             
             me_events = await service.get_calendar_events(
                 access_token=me_access,
@@ -2241,8 +2243,10 @@ class A2AService:
                         target_date=date,
                         target_time=time,
                         location=final_location,
-                        all_session_ids=all_session_ids  # 모든 세션에 메시지 저장
+                        all_session_ids=all_session_ids,  # 모든 세션에 메시지 저장
+                        duration_nights=duration_nights  # ✅ 박 수 전달
                     )
+                    print(f"DEBUG: _execute_true_a2a_negotiation result: {result}")
                 else:
                     result = {"status": "failed", "messages": [], "needs_approval": False}
             else:

@@ -118,16 +118,31 @@ class PersonalAgent:
                 time_max=date_range_end.isoformat()
             )
             
-            # 바쁜 시간 추출
+            # 바쁜 시간 추출 (종일 이벤트 포함)
             busy_intervals = []
             for e in events:
                 try:
                     start_str = e.start.get("dateTime")
                     end_str = e.end.get("dateTime")
+                    
                     if start_str and end_str:
+                        # 일반 이벤트 (dateTime 형식)
                         start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                         end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                         busy_intervals.append((start, end))
+                    else:
+                        # 종일 이벤트 (date 형식) - 해당 날짜 전체를 busy로 처리
+                        date_start_str = e.start.get("date")
+                        date_end_str = e.end.get("date")
+                        if date_start_str:
+                            # 종일 이벤트는 00:00 ~ 다음날 00:00로 처리
+                            start_date = datetime.strptime(date_start_str, "%Y-%m-%d").replace(tzinfo=KST)
+                            if date_end_str:
+                                end_date = datetime.strptime(date_end_str, "%Y-%m-%d").replace(tzinfo=KST)
+                            else:
+                                end_date = start_date + timedelta(days=1)
+                            busy_intervals.append((start_date, end_date))
+                            logger.info(f"[{self.user_name}] 종일 이벤트 감지: {e.summary if hasattr(e, 'summary') else e.get('summary', '일정')} ({date_start_str} ~ {date_end_str})")
                 except Exception:
                     continue
             
@@ -200,14 +215,12 @@ class PersonalAgent:
     
     def find_conflicting_event(self, target_dt: datetime) -> Optional[ConflictInfo]:
         """
-        지정된 시간에 충돌하는 캐린더 이벤트 찾기
+        지정된 시간에 충돌하는 캘린더 이벤트 찾기
         Returns: ConflictInfo 또는 None (충돌 없음)
         """
         if not self._cached_events:
             logger.warning(f"[{self.user_name}] 캐시된 이벤트 없음")
             return None
-        
-        # logger.info(f"[{self.user_name}] 충돌 이벤트 검색 - target: {target_dt}, 이벤트 수: {len(self._cached_events)}")
         
         for event in self._cached_events:
             try:
@@ -215,23 +228,40 @@ class PersonalAgent:
                 start_info = event.start if hasattr(event, 'start') else event.get('start', {})
                 end_info = event.end if hasattr(event, 'end') else event.get('end', {})
                 
-                # dateTime 필드 추출
+                # dateTime 필드 추출 (일반 이벤트)
                 if isinstance(start_info, dict):
                     start_str = start_info.get("dateTime")
                     end_str = end_info.get("dateTime") if isinstance(end_info, dict) else None
+                    date_start_str = start_info.get("date")
+                    date_end_str = end_info.get("date") if isinstance(end_info, dict) else None
                 else:
                     start_str = getattr(start_info, 'dateTime', None) or start_info.get("dateTime") if hasattr(start_info, 'get') else None
                     end_str = getattr(end_info, 'dateTime', None) or end_info.get("dateTime") if hasattr(end_info, 'get') else None
+                    date_start_str = None
+                    date_end_str = None
                 
-                if not start_str or not end_str:
+                event_start = None
+                event_end = None
+                is_all_day = False
+                
+                if start_str and end_str:
+                    # 일반 이벤트 (dateTime 형식)
+                    event_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    event_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                elif date_start_str:
+                    # 종일 이벤트 (date 형식)
+                    is_all_day = True
+                    event_start = datetime.strptime(date_start_str, "%Y-%m-%d").replace(tzinfo=KST)
+                    if date_end_str:
+                        event_end = datetime.strptime(date_end_str, "%Y-%m-%d").replace(tzinfo=KST)
+                    else:
+                        event_end = event_start + timedelta(days=1)
+                else:
                     continue
-                
-                event_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                event_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                 
                 # target_dt이 이벤트 시간 범위 내에 있는지 확인
                 if event_start <= target_dt < event_end:
-                    # summary 필드 추출 (다양한 형식 지원)
+                    # summary 필드 추출
                     if hasattr(event, 'summary'):
                         event_name = event.summary or "일정"
                     elif hasattr(event, 'get'):
@@ -239,21 +269,23 @@ class PersonalAgent:
                     else:
                         event_name = "일정"
                     
-                    logger.info(f"[{self.user_name}] 충돌 이벤트 발견: {event_name} ({event_start} ~ {event_end})")
+                    logger.info(f"[{self.user_name}] 충돌 이벤트 발견: {event_name} ({event_start} ~ {event_end}, 종일={is_all_day})")
                     
                     # 시간 표시 형식 생성
-                    start_hour = event_start.astimezone(KST).hour
-                    end_hour = event_end.astimezone(KST).hour
-                    if start_hour < 12:
-                        start_display = f"오전 {start_hour}시"
+                    if is_all_day:
+                        time_display = "종일"
                     else:
-                        start_display = f"오후 {start_hour - 12 if start_hour > 12 else 12}시"
-                    if end_hour < 12:
-                        end_display = f"오전 {end_hour}시"
-                    else:
-                        end_display = f"오후 {end_hour - 12 if end_hour > 12 else 12}시"
-                    
-                    time_display = f"{start_display}~{end_display}"
+                        start_hour = event_start.astimezone(KST).hour
+                        end_hour = event_end.astimezone(KST).hour
+                        if start_hour < 12:
+                            start_display = f"오전 {start_hour}시"
+                        else:
+                            start_display = f"오후 {start_hour - 12 if start_hour > 12 else 12}시"
+                        if end_hour < 12:
+                            end_display = f"오전 {end_hour}시"
+                        else:
+                            end_display = f"오후 {end_hour - 12 if end_hour > 12 else 12}시"
+                        time_display = f"{start_display}~{end_display}"
                     
                     return ConflictInfo(
                         event_name=event_name,
@@ -268,6 +300,28 @@ class PersonalAgent:
         logger.info(f"[{self.user_name}] 충돌 이벤트 없음")
         return None
     
+    def _format_proposal_string(self, proposal: Proposal) -> str:
+        """제안을 문자열로 변환 (다박 일정 처리 포함)"""
+        try:
+            duration_nights = getattr(proposal, 'duration_nights', 0)
+            
+            if duration_nights > 0:
+                # 시작일
+                start_weekday = _get_weekday_korean(proposal.date)
+                start_dt = datetime.strptime(proposal.date, "%Y-%m-%d")
+                
+                # 종료일 계산
+                end_dt = start_dt + timedelta(days=duration_nights)
+                end_date_str = end_dt.strftime("%Y-%m-%d")
+                end_weekday = _get_weekday_korean(end_date_str)
+                
+                return f"{start_dt.month}월 {start_dt.day}일 {start_weekday} ~ {end_dt.month}월 {end_dt.day}일 {end_weekday} ({duration_nights}박 {duration_nights+1}일)"
+            else:
+                return _format_date_with_weekday(proposal.date, proposal.time)
+        except Exception as e:
+            logger.warning(f"Formatting error: {e}")
+            return f"{proposal.date} {proposal.time}"
+
     async def evaluate_proposal(
         self,
         proposal: Proposal,
@@ -281,7 +335,7 @@ class PersonalAgent:
             # 내 가용 시간 확인
             now = datetime.now(KST)
             availability = self._cached_availability or await self.get_availability(
-                now, now + timedelta(days=14)
+                now, now + timedelta(days=365)
             )
             
             print(f"🔍 [DEBUG] [{self.user_name}] 가용 슬롯 수: {len(availability)}개")
@@ -315,7 +369,8 @@ class PersonalAgent:
                         time=best_slot.start.strftime("%H:%M"),
                         location=proposal.location,
                         activity=proposal.activity,
-                        duration_minutes=proposal.duration_minutes
+                        duration_minutes=proposal.duration_minutes,
+                        duration_nights=proposal.duration_nights
                     )
                     
                     # 충돌 일정명 표시
@@ -323,15 +378,15 @@ class PersonalAgent:
                     logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! [{conflict_event_name}] - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
                     
                     # 정확한 요일 포함 날짜 형식
-                    original_formatted = _format_date_with_weekday(proposal.date, proposal.time)
-                    counter_formatted = _format_date_with_weekday(counter_proposal.date, counter_proposal.time)
+                    original_formatted = self._format_proposal_string(proposal)
+                    counter_formatted = self._format_proposal_string(counter_proposal)
                     
                     # 메시지만 LLM으로 생성 (팩트 주입 - 충돌 일정명 포함)
                     try:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"그 시간에 [{conflict_event_name}] 일정이 있어서 '{counter_formatted}'을 대안으로 정중하게 제안하는 메시지를 작성하세요.",
+                            context=f"그 시간에 [{conflict_event_name}] 일정이 있어서 '{counter_formatted}'을 대안으로 정중하게 제안하는 메시지를 작성하세요. (기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)",
                             tone="friendly_counter"
                         )
                     except Exception as e:
@@ -351,7 +406,7 @@ class PersonalAgent:
                 logger.warning(f"[{self.user_name}] 2주 내 가용 시간 없음")
                 return AgentDecision(
                     action=MessageType.NEED_HUMAN,
-                    message="앗, 2주 내에 가능한 시간이 없어요 😥 직접 확인해주세요!",
+                    message="가능한 시간을 찾지 못했어요. 직접 확인해주세요",
                     reason="no_availability"
                 )
             
@@ -365,14 +420,15 @@ class PersonalAgent:
                 logger.info(f"[{self.user_name}] ✅ 캘린더 가용! 강제 ACCEPT - {proposal.date} {proposal.time}")
                 
                 # 정확한 요일 포함 날짜 형식
-                formatted_datetime = _format_date_with_weekday(proposal.date, proposal.time)
+                formatted_datetime = self._format_proposal_string(proposal)
                 
                 # 메시지만 LLM으로 생성 (팩트 주입 - 정확한 요일 포함)
                 try:
                     accept_message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"상대방이 '{formatted_datetime}'에 만나자고 제안했고 캘린더가 비어있어서 수락합니다. '좋아요, {formatted_datetime}에 뵙겠습니다!' 처럼 흔쾌히 동의하는 메시지를 작성하세요.",
+                        context=f"상대방이 '{formatted_datetime}'에 만나자고 제안했고 캘린더가 비어있어서 수락합니다. '좋아요, {formatted_datetime}에 뵙겠습니다!' 처럼 흔쾌히 동의하는 메시지를 작성하세요. " + 
+                                ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if getattr(proposal, 'duration_nights', 0) > 0 else ""),
                         tone="friendly_accept"
                     )
                 except Exception as e:
@@ -402,7 +458,8 @@ class PersonalAgent:
                         time=best_slot.start.strftime("%H:%M"),
                         location=proposal.location,
                         activity=proposal.activity,
-                        duration_minutes=proposal.duration_minutes
+                        duration_minutes=proposal.duration_minutes,
+                        duration_nights=proposal.duration_nights
                     )
                     
                     # 메시지만 LLM으로 생성 (팩트 주입)
@@ -410,7 +467,8 @@ class PersonalAgent:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"일정 충돌로 대안 시간을 제안합니다. '{counter_proposal.date} {counter_proposal.time}'을 정중하게 제안하는 메시지를 작성하세요.",
+                            context=f"일정 충돌로 대안 시간을 제안합니다. '{self._format_proposal_string(counter_proposal)}'을 정중하게 제안하는 메시지를 작성하세요. " + 
+                                    ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if getattr(counter_proposal, 'duration_nights', 0) > 0 else ""),
                             tone="friendly_counter"
                         )
                     except Exception as e:
@@ -446,7 +504,9 @@ class PersonalAgent:
         target_time: Optional[str],
         activity: Optional[str],
         location: Optional[str],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        duration_nights: int = 0,  # [✅ NEW] 박 수 추가
+        end_date: Optional[str] = None  # [✅ NEW] 종료 날짜 추가
     ) -> AgentDecision:
         """
         초기 제안 생성
@@ -455,7 +515,7 @@ class PersonalAgent:
         try:
             now = datetime.now(KST)
             availability = await self.get_availability(
-                now, now + timedelta(days=14)
+                now, now + timedelta(days=365)
             )
             
             print(f"🔍 [DEBUG] [{self.user_name}] make_initial_proposal - 가용 슬롯 수: {len(availability)}개")
@@ -463,7 +523,7 @@ class PersonalAgent:
             if not availability:
                 return AgentDecision(
                     action=MessageType.NEED_HUMAN,
-                    message="앗, 2주 내 가용 시간이 없어요",
+                    message="가능한 시간을 찾지 못했어요",
                     reason="no_availability"
                 )
             
@@ -500,18 +560,24 @@ class PersonalAgent:
                         location=location
                     )
                 else:
-                    # 지정 시간이 충돌! → 가장 가까운 가용 슬롯 찾기
-                    print(f"🚫 [DEBUG] [{self.user_name}] 지정 시간 {actual_date} {actual_time}이 캘린더 충돌! 대안 찾는 중...")
-                    best_slot = self._find_best_alternative_slot(target_dt, availability)
-                    if best_slot:
-                        time_was_changed = True  # 시간이 변경됨
-                        proposal = Proposal(
-                            date=best_slot.start.strftime("%Y-%m-%d"),
-                            time=best_slot.start.strftime("%H:%M"),
-                            activity=activity,
-                            location=location
-                        )
-                        print(f"✅ [DEBUG] [{self.user_name}] 대안 시간 제안: {proposal.date} {proposal.time}")
+                    # 지정 시간이 충돌하더라도 Initiator는 자신이 선택한 시간이므로 그대로 제안!
+                    # (충돌 감지는 evaluate_proposal 단계에서 상대방이 하거나, A2A 로그에서 경고 표시)
+                    print(f"🚫 [DEBUG] [{self.user_name}] 지정 시간 {actual_date} {actual_time}이 캘린더 충돌하지만, Initiator 요청이므로 그대로 제안")
+                    
+                    # 그대로 제안 사용
+                    proposal = Proposal(
+                        date=actual_date,
+                        time=actual_time,
+                        activity=activity,
+                        location=location
+                    )
+                    
+                    time_was_changed = False  # 시간 변경 안 함 (사용자 의도 존중)
+                    
+                    # [Optional] 충돌 이벤트 정보 로그
+                    conflict_info = self.find_conflicting_event(target_dt)
+                    if conflict_info:
+                        logger.warning(f"[{self.user_name}] Initiator 본인의 일정 충돌 무시하고 제안: {conflict_info.event_name}")
             
             # 사용자 지정 시간이 없거나 proposal이 아직 없으면 시간 선호도에 맞는 슬롯 찾기
             if not proposal:
@@ -540,11 +606,12 @@ class PersonalAgent:
                     date=best_slot.start.strftime("%Y-%m-%d"),
                     time=best_slot.start.strftime("%H:%M"),
                     activity=activity,
-                    location=location
+                    location=location,
+                    duration_nights=duration_nights
                 )
             
             # 메시지 생성 - LLM에 팩트 주입 (정확한 요일 포함)
-            proposal_formatted = _format_date_with_weekday(proposal.date, proposal.time)
+            proposal_formatted = self._format_proposal_string(proposal)
             
             try:
                 if time_was_changed:
@@ -552,15 +619,17 @@ class PersonalAgent:
                     message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"캘린더 충돌로 대체 시간을 제안합니다. '{proposal_formatted}'을 정중하게 제안하는 메시지를 작성하세요.",
+                        context=f"캘린더 충돌로 대체 시간을 제안합니다. '{proposal_formatted}'을 정중하게 제안하는 메시지를 작성하세요. " + 
+                                ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if duration_nights > 0 else ""),
                         tone="friendly_alternative"
                     )
                 else:
                     # 시간 변경 없음 - 흔쾌히 초대
-                    message = await self.openai.generate_a2a_message(
+                        message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
-                        context=f"'{proposal_formatted}'에 {activity or '약속'}을 제안합니다. '어떠세요?' 형식으로 자연스럽게 제안하는 메시지를 작성하세요.",
+                        context=f"'{proposal_formatted}'에 {activity or '여행/일정'}을 제안합니다. '어떠세요?' 형식으로 자연스럽게 제안하는 메시지를 작성하세요. " +
+                                ("(기간이 있는 일정이므로 날짜 범위만 명확히 하고, 구체적인 시간은 언급하지 마세요)" if duration_nights > 0 else "(기간이 있는 일정이므로 날짜 범위를 명확히 언급하세요)"),
                         tone="friendly_propose"
                     )
             except Exception as e:

@@ -365,8 +365,24 @@ async def get_common_free_slots(
                 try:
                     s = e.start.get("dateTime")
                     e_ = e.end.get("dateTime")
+                    
+                    # [✅ FIX] 종일 일정(date) 처리
                     if not s or not e_:
-                        continue
+                        date_start = e.start.get("date")
+                        date_end = e.end.get("date")
+                        if date_start:
+                            # 종일 일정 처리
+                            # date_start 값 형식이 'YYYY-MM-DD'라고 가정
+                            start_dt = dt.datetime.strptime(date_start, "%Y-%m-%d").replace(tzinfo=dt.timezone(dt.timedelta(hours=9)))
+                            if date_end:
+                                end_dt = dt.datetime.strptime(date_end, "%Y-%m-%d").replace(tzinfo=dt.timezone(dt.timedelta(hours=9)))
+                            else:
+                                end_dt = start_dt + dt.timedelta(days=1)
+                            intervals.append((start_dt, end_dt))
+                            continue
+                        else:
+                            continue
+
                     start = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
                     end = dt.datetime.fromisoformat(e_.replace("Z", "+00:00"))
                     intervals.append((start, end))
@@ -485,8 +501,26 @@ async def get_multi_user_free_slots(
                 try:
                     s = e.start.get("dateTime")
                     e_ = e.end.get("dateTime")
+                    
+                    # [✅ FIX] 종일 일정(date) 처리
                     if not s or not e_:
-                        continue
+                        date_start = e.start.get("date")
+                        date_end = e.end.get("date")
+                        if date_start:
+                            # 종일 일정은 해당 날짜의 00:00 ~ 23:59:59 (또는 다음날 00:00)
+                            # 구글 캘린더의 date_end는 다음날임 (exclusive)
+                            start = dt.datetime.strptime(date_start, "%Y-%m-%d").replace(tzinfo=kst)
+                            if date_end:
+                                end = dt.datetime.strptime(date_end, "%Y-%m-%d").replace(tzinfo=kst)
+                                # 종료 시간이 00:00이면 하루 전 23:59:59로 처리하면 좋지만,
+                                # 여기서는 interval 비교를 위해 그대로 사용 (start < day_end and end > day_start 비교 시 안전)
+                            else:
+                                end = start + dt.timedelta(days=1)
+                            intervals.append((start, end))
+                            continue
+                        else:
+                            continue
+                            
                     start = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
                     end = dt.datetime.fromisoformat(e_.replace("Z", "+00:00"))
                     intervals.append((start, end))
@@ -640,6 +674,11 @@ async def get_multi_user_free_slots(
                 # 슬롯 단위로 확인
                 slot_start = day_start
                 while slot_start + delta <= day_end:
+                    # [Fix] 현재 시간보다 이전 슬롯 제거
+                    if slot_start < now_kst:
+                        slot_start += dt.timedelta(minutes=30)
+                        continue
+
                     slot_end = slot_start + delta
                     
                     # 각 사용자가 이 슬롯에 가능한지 확인

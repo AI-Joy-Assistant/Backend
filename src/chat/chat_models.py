@@ -58,3 +58,18 @@ class SendMessageRequest(BaseModel):
     receive_id: uuid.UUID
     message: str
     message_type: str = "text" 
+
+# AI Chat 요청 모델
+class AIChatRequest(BaseModel):
+    message: str
+    selected_friends: Optional[List[str]] = None
+    session_id: Optional[str] = None
+    title: Optional[str] = None
+    location: Optional[str] = None
+    duration_nights: int = 0
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    duration_minutes: int = 60
+    is_all_day: bool = False

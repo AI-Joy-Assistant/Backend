@@ -112,7 +112,8 @@ class NegotiationEngine:
         activity: Optional[str] = None,
         location: Optional[str] = None,
         target_date: Optional[str] = None,
-        target_time: Optional[str] = None
+        target_time: Optional[str] = None,
+        duration_nights: int = 0  # [✅ NEW] 박 수 추가
     ):
         self.session_id = session_id
         self.initiator_user_id = initiator_user_id
@@ -121,6 +122,7 @@ class NegotiationEngine:
         self.location = location
         self.target_date = target_date
         self.target_time = target_time
+        self.duration_nights = duration_nights
         
         self.agents: Dict[str, PersonalAgent] = {}
         self.current_round = 0
@@ -184,7 +186,7 @@ class NegotiationEngine:
             
             # 가용성 확인
             availability = agent._cached_availability or await agent.get_availability(
-                datetime.now(KST), datetime.now(KST) + timedelta(days=14)
+                datetime.now(KST), datetime.now(KST) + timedelta(days=365)
             )
             
             is_available = False
@@ -292,6 +294,14 @@ class NegotiationEngine:
                         user_hours.add(hour)
                 common_hours = common_hours.intersection(user_hours)
             
+            # [Fix] 현재 시간보다 이전 시간대 제거 (오늘 날짜인 경우)
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            if date_str == today_str:
+                current_hour = datetime.now(KST).hour
+                # 현재 시간 + 1시간 여유? 아니면 현재 시간 이후 바로?
+                # 보통 "지금" 예약은 바로 다음 시간부터 보여주는 것이 좋음
+                common_hours = {h for h in common_hours if h > current_hour}
+            
             # 시간 조건 결정
             time_condition = None
             start_hour = None
@@ -388,7 +398,18 @@ class NegotiationEngine:
             context={
                 "other_names": other_names,
                 "participant_count": len(self.participant_user_ids) + 1
-            }
+            },
+            duration_nights=self.duration_nights,
+            # [✅ NEW] 종료 날짜 계산하여 전달
+            end_date=(
+                (datetime.strptime(self.target_date, "%Y-%m-%d") + timedelta(days=self.duration_nights)).strftime("%Y-%m-%d")
+                if self.target_date and self.duration_nights > 0 
+                # target_date가 relative date(e.g "내일")가 아니고 YYYY-MM-DD 형식일 때만 계산 가능
+                # relative date인 경우 PersonalAgent 내부에서 변환 후 end_date 계산 필요하지만
+                # 여기서는 일단 YYYY-MM-DD라고 가정 (A2AService에서 변환된 값을 넘겨주므로)
+                and len(self.target_date) == 10
+                else None
+            )
         )
         
         # 에이전트 가용시간 없음 → 사용자 개입

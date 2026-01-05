@@ -72,6 +72,7 @@ class Proposal(BaseModel):
     location: Optional[str] = None
     activity: Optional[str] = None
     duration_minutes: int = 60
+    duration_nights: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -79,7 +80,8 @@ class Proposal(BaseModel):
             "time": self.time,
             "location": self.location,
             "activity": self.activity,
-            "duration_minutes": self.duration_minutes
+            "duration_minutes": self.duration_minutes,
+            "duration_nights": self.duration_nights
         }
 
 
