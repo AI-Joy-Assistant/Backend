@@ -308,13 +308,21 @@ class A2AService:
             }
     
     @staticmethod
-    async def get_conflicting_sessions(user_id: str, target_date: str, target_time: str, exclude_session_id: str = None) -> List[Dict[str, Any]]:
+    async def get_conflicting_sessions(
+        user_id: str, 
+        target_date: str, 
+        target_time: str, 
+        target_end_time: str = None,  # [NEW] 종료 시간 파라미터 추가
+        exclude_session_id: str = None
+    ) -> List[Dict[str, Any]]:
         """
         특정 사용자의 진행 중인 세션 중 시간이 겹치는 세션 목록 반환
+        [수정됨] 시간 범위 겹침을 정확하게 확인
         Args:
             user_id: 사용자 ID
             target_date: 확인할 날짜 (예: "12월 29일", "2025-01-05")
-            target_time: 확인할 시간 (예: "오후 2시", "14:00")
+            target_time: 시작 시간 (예: "오후 2시", "14:00")
+            target_end_time: 종료 시간 (예: "오후 3시", "15:00") - 없으면 시작+1시간
             exclude_session_id: 제외할 세션 ID (자기 자신)
         Returns:
             겹치는 세션 목록
@@ -342,35 +350,52 @@ class A2AService:
                     return f"{match.group(1)}-{match.group(2)}"
                 return date_str
             
-            def normalize_time(time_str: str) -> int:
+            def parse_time_to_minutes(time_str: str) -> int:
+                """시간 문자열을 하루 시작 기준 분(minutes)으로 변환"""
                 if not time_str:
                     return -1
-                # "오후 2시" -> 14, "14:00" -> 14, "오전 10시" -> 10
                 time_str = time_str.replace(" ", "")
                 
-                # 24시간 형식
-                match = re.search(r'(\d{1,2}):\d{2}', time_str)
-                if match:
-                    return int(match.group(1))
+                hour = -1
+                minute = 0
                 
-                # 한국어 형식
-                is_pm = "오후" in time_str
-                match = re.search(r'(\d{1,2})시', time_str)
+                # HH:MM 형식
+                match = re.search(r'(\d{1,2}):(\d{2})', time_str)
                 if match:
                     hour = int(match.group(1))
-                    if is_pm and hour != 12:
-                        hour += 12
-                    elif not is_pm and hour == 12:
-                        hour = 0
-                    return hour
+                    minute = int(match.group(2))
+                else:
+                    # 한국어 형식 (오후 2시 30분)
+                    is_pm = "오후" in time_str
+                    hour_match = re.search(r'(\d{1,2})시', time_str)
+                    if hour_match:
+                        hour = int(hour_match.group(1))
+                        if is_pm and hour != 12:
+                            hour += 12
+                        elif not is_pm and hour == 12:
+                            hour = 0
+                        
+                        min_match = re.search(r'(\d{1,2})분', time_str)
+                        if min_match:
+                            minute = int(min_match.group(1))
                 
-                return -1
+                if hour < 0:
+                    return -1
+                return hour * 60 + minute
             
             target_date_norm = normalize_date(target_date)
-            target_hour = normalize_time(target_time)
+            target_start_mins = parse_time_to_minutes(target_time)
             
-            if not target_date_norm or target_hour < 0:
+            if not target_date_norm or target_start_mins < 0:
                 return []
+            
+            # 종료 시간 계산 (없으면 시작+60분)
+            if target_end_time:
+                target_end_mins = parse_time_to_minutes(target_end_time)
+                if target_end_mins < 0:
+                    target_end_mins = target_start_mins + 60
+            else:
+                target_end_mins = target_start_mins + 60
             
             conflicting = []
             for session in sessions:
@@ -391,22 +416,40 @@ class A2AService:
                 
                 session_date = place_pref.get("proposedDate") or place_pref.get("date") or ""
                 session_time = place_pref.get("proposedTime") or place_pref.get("time") or ""
+                session_end_time = place_pref.get("proposedEndTime") or place_pref.get("end_time") or ""
                 
                 session_date_norm = normalize_date(session_date)
-                session_hour = normalize_time(session_time)
                 
-                # 같은 날짜, 시간이 겹치면 (±1시간도 경고)
-                if session_date_norm == target_date_norm:
-                    if session_hour >= 0 and session_hour == target_hour:
-                        conflicting.append({
-                            "id": session.get("id"),
-                            "title": place_pref.get("purpose") or place_pref.get("summary") or "일정 조율",
-                            "date": session_date,
-                            "time": session_time,
-                            "status": status
-                        })
+                # 날짜가 다르면 스킵
+                if session_date_norm != target_date_norm:
+                    continue
+                
+                session_start_mins = parse_time_to_minutes(session_time)
+                if session_start_mins < 0:
+                    continue
+                
+                # 세션 종료 시간 (없으면 시작+60분)
+                if session_end_time:
+                    session_end_mins = parse_time_to_minutes(session_end_time)
+                    if session_end_mins < 0:
+                        session_end_mins = session_start_mins + 60
+                else:
+                    # duration_minutes가 있으면 사용
+                    duration = place_pref.get("duration_minutes", 60)
+                    session_end_mins = session_start_mins + duration
+                
+                # [핵심] 시간 범위 겹침 확인: A.start < B.end AND A.end > B.start
+                if target_start_mins < session_end_mins and target_end_mins > session_start_mins:
+                    conflicting.append({
+                        "id": session.get("id"),
+                        "title": place_pref.get("purpose") or place_pref.get("summary") or "일정 조율",
+                        "date": session_date,
+                        "time": session_time,
+                        "end_time": session_end_time,
+                        "status": status
+                    })
             
-            # logger.info(f"📌 [충돌감지] user={user_id}, 날짜={target_date}, 시간={target_time} -> 충돌 {len(conflicting)}건")
+            logger.info(f"📌 [충돌감지] user={user_id}, 날짜={target_date}, 시간={target_time}~{target_end_time} -> 충돌 {len(conflicting)}건")
             return conflicting
             
         except Exception as e:
@@ -2220,6 +2263,12 @@ class A2AService:
             
             # 4) [✅ NEW] 양방향 충돌 알림 - 새 세션 생성 시 기존 세션에도 알림 추가
             try:
+                # [FIX] 같은 thread_id의 세션들 수집 (충돌 체크에서 제외하기 위해)
+                same_thread_session_ids = set(s["session_id"] for s in sessions)
+                
+                # 새 세션들의 충돌 정보를 한 번만 수집 (중복 방지)
+                new_session_conflicts = {}  # {new_session_id: [conflict_list]}
+                
                 for session_info in sessions:
                     new_session_id = session_info["session_id"]
                     
@@ -2236,48 +2285,47 @@ class A2AService:
                         
                         for conflict in conflicting:
                             conflict_sid = conflict.get("id")
-                            if conflict_sid:
-                                # [DISABLED] 기존 세션에 충돌 알림 추가 - 협상 로그에 표시하지 않음
-                                # warning_message = {
-                                #     "type": "conflict_warning",
-                                #     "title": "⚠️ 시간 충돌 알림",
-                                #     "description": f"같은 시간대에 새로운 일정 요청이 들어왔습니다. ({date} {time})",
-                                #     "conflicting_session_id": new_session_id,
-                                #     "conflicting_time": f"{date} {time}"
-                                # }
-                                # await A2ARepository.add_message(
-                                #     session_id=conflict_sid,
-                                #     sender_user_id=pid,
-                                #     receiver_user_id=pid,
-                                #     message_type="conflict_warning",
-                                #     message=warning_message
-                                # )
-                                
-                                # [FIX] 기존 세션의 place_pref를 DB에서 직접 조회하여 올바르게 병합
-                                try:
-                                    import json
-                                    existing_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", conflict_sid).execute()
-                                    if existing_session_resp.data:
-                                        existing_pref = existing_session_resp.data[0].get("place_pref", {})
-                                        # JSON 문자열인 경우 파싱
-                                        if isinstance(existing_pref, str):
-                                            try:
-                                                existing_pref = json.loads(existing_pref)
-                                            except:
-                                                existing_pref = {}
-                                        if not isinstance(existing_pref, dict):
+                            if not conflict_sid:
+                                continue
+                            
+                            # [FIX] 같은 thread_id의 세션은 충돌로 저장하지 않음
+                            if conflict_sid in same_thread_session_ids:
+                                continue
+                            
+                            # [FIX] 기존 세션의 place_pref를 DB에서 직접 조회하여 올바르게 병합
+                            try:
+                                import json
+                                existing_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", conflict_sid).execute()
+                                if existing_session_resp.data:
+                                    existing_pref = existing_session_resp.data[0].get("place_pref", {})
+                                    # JSON 문자열인 경우 파싱
+                                    if isinstance(existing_pref, str):
+                                        try:
+                                            existing_pref = json.loads(existing_pref)
+                                        except:
                                             existing_pref = {}
-                                        
-                                        # 기존 데이터를 보존하면서 충돌 정보만 추가
-                                        existing_pref["has_conflict"] = True
-                                        existing_conflicts = existing_pref.get("conflicting_sessions", [])
-                                        if not isinstance(existing_conflicts, list):
-                                            existing_conflicts = []
+                                    if not isinstance(existing_pref, dict):
+                                        existing_pref = {}
+                                    
+                                    # [FIX] 같은 thread_id인지 확인
+                                    existing_thread_id = existing_pref.get("thread_id")
+                                    if existing_thread_id == thread_id:
+                                        continue  # 같은 일정 그룹은 충돌로 저장하지 않음
+                                    
+                                    # 기존 데이터를 보존하면서 충돌 정보만 추가
+                                    existing_pref["has_conflict"] = True
+                                    existing_conflicts = existing_pref.get("conflicting_sessions", [])
+                                    if not isinstance(existing_conflicts, list):
+                                        existing_conflicts = []
+                                    
+                                    # [FIX] 중복 체크 - 이미 같은 session_id가 있으면 추가하지 않음
+                                    already_exists = any(c.get("session_id") == new_session_id for c in existing_conflicts)
+                                    if not already_exists:
                                         existing_conflicts.append({
                                             "session_id": new_session_id,
-                                            "title": summary or activity or "새 일정",  # [FIX] 일정 제목 추가
+                                            "title": summary or activity or "새 일정",
                                             "time": f"{date} {time}",
-                                            "participant_names": [initiator_name]  # [NEW] 참여자 이름 추가
+                                            "participant_names": [initiator_name]
                                         })
                                         existing_pref["conflicting_sessions"] = existing_conflicts
                                         
@@ -2285,36 +2333,45 @@ class A2AService:
                                         supabase.table("a2a_session").update({
                                             "place_pref": existing_pref
                                         }).eq("id", conflict_sid).execute()
-                                        
-                                        # logger.info(f"⚠️ [양방향 충돌] 기존 세션 {conflict_sid[:8]}에 알림 추가 (새 세션: {new_session_id[:8]})")
-                                except Exception as pref_error:
-                                    logger.error(f"place_pref 업데이트 실패: {pref_error}")
-                                
-                        if conflicting:
-                            # 새 세션에도 has_conflict 플래그 추가
-                            try:
-                                import json
-                                new_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", new_session_id).execute()
-                                if new_session_resp.data:
-                                    new_pref = new_session_resp.data[0].get("place_pref", {})
-                                    if isinstance(new_pref, str):
-                                        try:
-                                            new_pref = json.loads(new_pref)
-                                        except:
-                                            new_pref = {}
-                                    if not isinstance(new_pref, dict):
-                                        new_pref = {}
                                     
-                                    new_pref["has_conflict"] = True
-                                    new_pref["conflicting_sessions"] = [
-                                        {"session_id": c["id"], "time": f"{c.get('place_pref', {}).get('proposedDate', '')} {c.get('place_pref', {}).get('proposedTime', '')}"}
-                                        for c in conflicting
-                                    ]
-                                    supabase.table("a2a_session").update({
-                                        "place_pref": new_pref
-                                    }).eq("id", new_session_id).execute()
-                            except Exception as new_pref_error:
-                                logger.error(f"새 세션 place_pref 업데이트 실패: {new_pref_error}")
+                                    # [FIX] 새 세션의 충돌 정보도 수집 (나중에 한 번에 저장)
+                                    if new_session_id not in new_session_conflicts:
+                                        new_session_conflicts[new_session_id] = []
+                                    
+                                    # 중복 체크 후 추가
+                                    if not any(c.get("session_id") == conflict_sid for c in new_session_conflicts[new_session_id]):
+                                        new_session_conflicts[new_session_id].append({
+                                            "session_id": conflict_sid,
+                                            "title": conflict.get("title", "일정"),
+                                            "time": f"{conflict.get('date', '')} {conflict.get('time', '')}",
+                                        })
+                                        
+                            except Exception as pref_error:
+                                logger.error(f"place_pref 업데이트 실패: {pref_error}")
+                
+                # [FIX] 새 세션들의 충돌 정보를 한 번에 저장 (중복 방지)
+                for new_session_id, conflict_list in new_session_conflicts.items():
+                    if conflict_list:
+                        try:
+                            import json
+                            new_session_resp = supabase.table("a2a_session").select("place_pref").eq("id", new_session_id).execute()
+                            if new_session_resp.data:
+                                new_pref = new_session_resp.data[0].get("place_pref", {})
+                                if isinstance(new_pref, str):
+                                    try:
+                                        new_pref = json.loads(new_pref)
+                                    except:
+                                        new_pref = {}
+                                if not isinstance(new_pref, dict):
+                                    new_pref = {}
+                                
+                                new_pref["has_conflict"] = True
+                                new_pref["conflicting_sessions"] = conflict_list
+                                supabase.table("a2a_session").update({
+                                    "place_pref": new_pref
+                                }).eq("id", new_session_id).execute()
+                        except Exception as new_pref_error:
+                            logger.error(f"새 세션 place_pref 업데이트 실패: {new_pref_error}")
                                     
             except Exception as ce:
                 logger.error(f"양방향 충돌 알림 처리 실패: {ce}")

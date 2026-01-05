@@ -1413,7 +1413,7 @@ class ChatService:
                             "data": {
                                 "user_message": message,
                                 "ai_response": confirm_msg,
-                                "schedule_info": {"selected_date": selected_date, "selected_time": selected_time, "end_time": end_time_from_info},
+                                "schedule_info": {"selected_date": selected_date, "selected_time": selected_time, "end_time": end_time_from_param},
                                 "calendar_event": None,
                                 "usage": None,
                                 "a2a_started": True
@@ -1702,7 +1702,6 @@ class ChatService:
                         # start_date가 YYYY-MM-DD 형식이면 직접 파싱
                         if raw_date and "-" in raw_date:
                             try:
-                                # from zoneinfo import ZoneInfo
                                 KST = ZoneInfo("Asia/Seoul")
                                 check_date = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=KST)
                             except:
@@ -1715,7 +1714,6 @@ class ChatService:
                         # [FIX] start_time/end_time이 있으면 더 정확한 시간 사용
                         if schedule_info.get("start_time"):
                             try:
-                                # from zoneinfo import ZoneInfo
                                 KST = ZoneInfo("Asia/Seoul")
                                 time_parts = schedule_info["start_time"].split(":")
                                 check_start = check_date.replace(hour=int(time_parts[0]), minute=int(time_parts[1]) if len(time_parts) > 1 else 0, second=0)
@@ -2248,7 +2246,6 @@ class ChatService:
             if explicit_start_time:
                 # HH:MM 형식을 datetime으로 변환
                 try:
-                    # from zoneinfo import ZoneInfo
                     KST = ZoneInfo("Asia/Seoul")
                     time_parts = explicit_start_time.split(":")
                     start_time = start_date.replace(hour=int(time_parts[0]), minute=int(time_parts[1]) if len(time_parts) > 1 else 0, second=0)
@@ -2405,7 +2402,6 @@ class ChatService:
     @staticmethod
     def _parse_date(date_str: str) -> datetime:
         """날짜 문자열을 datetime으로 파싱"""
-        # from zoneinfo import ZoneInfo
         KST = ZoneInfo("Asia/Seoul")
         today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
         s = date_str.strip()
@@ -2567,8 +2563,7 @@ class ChatService:
             # 날짜 추출 (문맥에서 날짜 정보가 있다면 활용)
             start_date = ChatService._parse_date(context_text)
             if not start_date:
-                from datetime import datetime
-                # from zoneinfo import ZoneInfo
+                
                 KST = ZoneInfo("Asia/Seoul")
                 start_date = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
 

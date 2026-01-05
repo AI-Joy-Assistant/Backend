@@ -12,6 +12,8 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: Optional[str] = None
     google_id: Optional[str] = None
+    terms_agreed: Optional[bool] = False  # 약관 동의 여부
+    terms_agreed_at: Optional[datetime] = None  # 약관 동의 시각
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -31,6 +33,8 @@ class User(UserBase):
     refresh_token: Optional[str] = None
     profile_image: Optional[str] = None
     status: Optional[bool] = None
+    terms_agreed: Optional[bool] = False  # 약관 동의 여부
+    terms_agreed_at: Optional[datetime] = None  # 약관 동의 시각
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -73,4 +77,5 @@ class MessageResponse(BaseModel):
 class UserRegisterRequest(BaseModel):
     register_token: str
     name: str
-    handle: str 
+    handle: str
+    terms_agreed: bool = True  # 약관 동의 여부 (필수)

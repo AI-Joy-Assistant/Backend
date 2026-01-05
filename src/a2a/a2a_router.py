@@ -683,6 +683,17 @@ async def get_user_sessions(
                         if other.get("id") == session_id:
                             continue
                         
+                        # [NEW] 현재 로그인 사용자가 다른 세션의 참여자인지 확인
+                        # 본인이 참여한 세션끼리만 충돌로 표시
+                        other_participant_ids = other.get("participant_user_ids") or []
+                        if not other_participant_ids:
+                            other_initiator = other.get("initiator_user_id")
+                            other_target = other.get("target_user_id")
+                            other_participant_ids = [other_initiator, other_target]
+                        
+                        if current_user_id not in other_participant_ids:
+                            continue  # 본인이 참여하지 않은 세션은 충돌 아님
+                        
                         # [FIX] 같은 thread_id인 세션은 같은 일정 요청의 일부이므로 충돌 아님
                         other_pref = other.get("place_pref", {})
                         if isinstance(other_pref, str):
@@ -699,42 +710,68 @@ async def get_user_sessions(
                         
                         other_date = other_pref.get("proposedDate") or other_pref.get("date") or ""
                         other_time = other_pref.get("proposedTime") or other_pref.get("time") or ""
+                        other_end_time = other_pref.get("proposedEndTime") or other_pref.get("end_time") or ""
                         other_date_norm = norm_date(other_date)
                         other_hour = norm_time(other_time)
                         
-                        if other_date_norm == my_date and other_hour >= 0 and other_hour == my_hour:
-                            # print(f"✅ [충돌발견] {session_id[:8]} <-> {other.get('id')[:8]}, 날짜={my_date}, 시간={my_hour}")
-                            # [FIX] 중복 추가 방지
-                            # stored items might use 'session_id', dynamic uses 'id'
-                            is_dup = False
-                            other_id = other.get("id")
-                            for c in conflicting_sessions:
-                                if c.get("id") == other_id or c.get("session_id") == other_id:
-                                    is_dup = True
-                                    break
-                            
-                            if not is_dup:
-                                # 충돌 세션의 제목 결정 (purpose > summary > 참여자 이름 기반)
-                                conflict_title = (
-                                    other_pref.get("purpose") or 
-                                    other_pref.get("summary") or 
-                                    other_pref.get("activity")
-                                )
-                                # 제목이 없으면 참여자 이름으로 생성
-                                if not conflict_title:
-                                    participant_names = other.get("participant_names", [])
-                                    if participant_names:
-                                        conflict_title = f"{', '.join(participant_names)}와 약속"
-                                    else:
-                                        conflict_title = "일정"
+                        # [FIX] 시간 범위 겹침 확인 (hour만 비교 -> 분 단위 범위 비교)
+                        # 간단한 시간 비교를 위해 분 단위로 변환
+                        def time_to_mins(t):
+                            if not t: return -1
+                            t = t.replace(" ", "")
+                            m = re.search(r'(\d{1,2}):(\d{2})', t)
+                            if m: return int(m.group(1)) * 60 + int(m.group(2))
+                            is_pm = "오후" in t
+                            hm = re.search(r'(\d{1,2})시', t)
+                            if hm:
+                                h = int(hm.group(1))
+                                if is_pm and h != 12: h += 12
+                                elif not is_pm and h == 12: h = 0
+                                mm = re.search(r'(\d{1,2})분', t)
+                                return h * 60 + (int(mm.group(1)) if mm else 0)
+                            return -1
+                        
+                        my_start_mins = time_to_mins(proposed_time)
+                        my_end_time = place_pref.get("proposedEndTime") or place_pref.get("end_time") or ""
+                        my_end_mins = time_to_mins(my_end_time) if my_end_time else my_start_mins + 60
+                        
+                        other_start_mins = time_to_mins(other_time)
+                        other_end_mins = time_to_mins(other_end_time) if other_end_time else other_start_mins + 60
+                        
+                        # 시간 범위 겹침: A.start < B.end AND A.end > B.start
+                        if other_date_norm == my_date and my_start_mins >= 0 and other_start_mins >= 0:
+                            if my_start_mins < other_end_mins and my_end_mins > other_start_mins:
+                                # print(f"✅ [충돌발견] {session_id[:8]} <-> {other.get('id')[:8]}, 날짜={my_date}")
+                                # [FIX] 중복 추가 방지
+                                is_dup = False
+                                other_id = other.get("id")
+                                for c in conflicting_sessions:
+                                    if c.get("id") == other_id or c.get("session_id") == other_id:
+                                        is_dup = True
+                                        break
                                 
-                                conflicting_sessions.append({
-                                    "id": other_id,
-                                    "title": conflict_title,
-                                    "date": other_date,
-                                    "time": other_time,
-                                    "participant_names": other.get("participant_names", [])
-                                })
+                                if not is_dup:
+                                    # 충돌 세션의 제목 결정 (purpose > summary > 참여자 이름 기반)
+                                    conflict_title = (
+                                        other_pref.get("purpose") or 
+                                        other_pref.get("summary") or 
+                                        other_pref.get("activity")
+                                    )
+                                    # 제목이 없으면 참여자 이름으로 생성
+                                    if not conflict_title:
+                                        participant_names = other.get("participant_names", [])
+                                        if participant_names:
+                                            conflict_title = f"{', '.join(participant_names)}와 약속"
+                                        else:
+                                            conflict_title = "일정"
+                                    
+                                    conflicting_sessions.append({
+                                        "id": other_id,
+                                        "title": conflict_title,
+                                        "date": other_date,
+                                        "time": other_time,
+                                        "participant_names": other.get("participant_names", [])
+                                    })
                     
                     has_conflict = len(conflicting_sessions) > 0
             

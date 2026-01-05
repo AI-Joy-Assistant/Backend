@@ -31,7 +31,11 @@ async def register_google(data: UserRegisterRequest):
         # 1. register_token 검증
         payload = jwt.decode(data.register_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         
-        # 2. 사용자 생성
+        # 2. 약관 동의 여부 확인
+        if not data.terms_agreed:
+            raise HTTPException(status_code=400, detail="서비스 이용약관 및 개인정보 처리방침에 동의해야 합니다.")
+        
+        # 3. 사용자 생성
         google_user_data = {
             "email": payload["email"],
             "name": data.name,
@@ -41,13 +45,15 @@ async def register_google(data: UserRegisterRequest):
             "refresh_token": payload.get("refresh_token"),
             "status": True,
             "token_expiry": payload.get("token_expiry"),
-            "google_id": payload.get("google_id")
+            "google_id": payload.get("google_id"),
+            "terms_agreed": data.terms_agreed,
+            "terms_agreed_at": dt.datetime.utcnow().isoformat() if data.terms_agreed else None
         }
         
         # create_google_user가 handle을 지원하도록 수정되었으므로 그대로 전달
         user = await AuthRepository.create_google_user(google_user_data)
         
-        # 3. 로그인 처리 (JWT 발급)
+        # 4. 로그인 처리 (JWT 발급)
         # AuthService.login_google_user는 email로 조회하므로 바로 호출 가능
         token = await AuthService.login_google_user({"email": payload["email"]})
         
