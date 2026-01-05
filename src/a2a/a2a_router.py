@@ -926,6 +926,11 @@ async def get_pending_requests(
         # 응답 데이터 구성
         requests = []
         for session in sessions:
+            # [FILTER] 완료되었거나 진행 중(시스템 처리 중)인 세션 숨기기
+            status = session.get("status")
+            if status in ['completed', 'rejected', 'in_progress', 'failed']:
+                continue
+
             # place_pref 파싱
             place_pref = session.get("place_pref", {}) or {}
             if isinstance(place_pref, str):
@@ -935,6 +940,26 @@ async def get_pending_requests(
                 except:
                     place_pref = {}
             
+            # [FILTER] 내 행동이 필요한지 확인 (My Turn)
+            # 내가 이미 승인했거나(보낸 사람), 내가 처리할 차례가 아니면 숨김
+            is_action_required = False
+            approved_list = place_pref.get("approved_by_list", [])
+            # ID 문자열 변환 보장
+            approved_ids = set(str(uid) for uid in approved_list)
+            
+            if status == 'pending':
+                # 단순 요청: 대상자만 볼 수 있음
+                if str(session.get("target_user_id")) == str(current_user_id):
+                    is_action_required = True
+            elif status in ['pending_approval', 'needs_reschedule', 'awaiting_user_choice']:
+                # 승인 대기 / 재조율: 아직 승인하지 않은 참여자만 볼 수 있음
+                # (재조율 신청자는 reschedule_session에서 approved_by_list에 자동 추가됨)
+                if str(current_user_id) not in approved_ids:
+                    is_action_required = True
+            
+            if not is_action_required:
+                continue
+
             thread_id = place_pref.get("thread_id") if isinstance(place_pref, dict) else None
             summary = place_pref.get("summary") if isinstance(place_pref, dict) else None
             
@@ -1451,6 +1476,42 @@ async def submit_conflict_choice(
                     "text": f"{user_name}님이 참석 불가를 선택했습니다. 남은 {remaining_count}명으로 일정을 진행합니다."
                 }
             )
+
+            # [NEW] 일정 거절(스킵) 알림 로그 추가 (주최자에게 알림)
+            try:
+                initiator_id = session.get("initiator_user_id")
+                # 거절한 사람이 주최자가 아닌 경우에만 알림
+                if initiator_id != current_user_id:
+                     # 세션 정보에서 날짜/시간 가져오기
+                    place_pref = session.get("place_pref") or {}
+                    if isinstance(place_pref, str):
+                        try:
+                            import json
+                            place_pref = json.loads(place_pref)
+                        except:
+                            place_pref = {}
+                            
+                    req_date = place_pref.get("date") or place_pref.get("proposedDate")
+                    req_time = place_pref.get("time") or place_pref.get("proposedTime")
+                    activity = place_pref.get("activity")
+
+                    await A2ARepository.create_chat_log(
+                        user_id=initiator_id,  # 알림 받을 사람 (주최자)
+                        friend_id=current_user_id,  # 거절한 사람
+                        message=f"{user_name}님이 일정을 거절했습니다.",
+                        sender="system",
+                        message_type="schedule_rejection",
+                        metadata={
+                            "session_id": session_id,
+                            "rejected_by": current_user_id,
+                            "rejected_by_name": user_name,
+                            "schedule_date": req_date,
+                            "schedule_time": req_time,
+                            "schedule_activity": activity
+                        }
+                    )
+            except Exception as log_err:
+                print(f"거절 알림 로그 생성 실패: {log_err}")
             
             return {
                 "status": 200,

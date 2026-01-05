@@ -351,7 +351,7 @@ class NegotiationEngine:
             available_count = len(rec.available_users)
             
             if rec.is_all_available:
-                display = f"{date_display} ({rec.time_condition or '시간 무관'}) - 전원 가능 ✅"
+                display = f"{date_display} ({rec.time_condition or '시간 무관'}) - 전원 가능"
             else:
                 unavailable_str = ", ".join(rec.unavailable_users)
                 display = f"{date_display} ({rec.time_condition or '시간 무관'}) - {available_count}명 가능 ({unavailable_str}님 제외)"
@@ -546,7 +546,7 @@ class NegotiationEngine:
                     msg_type=MessageType.ACCEPT,
                     sender_id="system",
                     proposal=current_proposal,
-                    message="🎉 전원 동의! 일정이 확정되었습니다!"
+                    message="전원 동의! 일정이 확정되었습니다!"
                 )
                 yield agreed_msg
                 
@@ -603,7 +603,7 @@ class NegotiationEngine:
             msg_type=MessageType.NEED_HUMAN,
             sender_id="system",
             proposal=current_proposal,
-            message="⏰ 5라운드 협상이 끝났어요. 최종 결정을 내려주세요!"
+            message="5라운드 협상이 끝났어요. 최종 결정을 내려주세요!"
         )
         yield timeout_msg
     

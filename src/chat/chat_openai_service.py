@@ -103,7 +103,7 @@ class OpenAIService:
 사용자: "내일 3시에 치과 예약 일정 추가해줘"
 AI: "네, 내일 오후 3시에 '치과 예약' 일정을 등록할게요. 끝나는 시간도 알려주실래요?"
 사용자: "몰라"
-AI: "알겠습니다! 내일 오후 3시 '치과 예약' 일정으로 등록했어요 ✅" """
+AI: "알겠습니다! 내일 오후 3시 '치과 예약' 일정으로 등록했어요" """
 
             messages = [{"role": "system", "content": system_prompt}]
             
@@ -485,11 +485,11 @@ JSON 반환 형식:
                     if "accept" in tone.lower():
                         result = "좋아요! 그 시간에 뵐게요 😊"
                     elif "counter" in tone.lower() or "alternative" in tone.lower():
-                        result = "그 시간은 일정이 있어요 😅 다른 시간은 어때요?"
+                        result = "그 시간은 일정이 있어요 다른 시간은 어때요?"
                     elif "propose" in tone.lower():
                         result = "이 시간은 어떠세요? 😊"
                     else:
-                        result = "일정 확인해볼게요! 📅"
+                        result = "일정 확인해볼게요!"
                 
                 logger.info(f"[Llama API] A2A 메시지 생성 완료: {result[:30]}...")
                 return result

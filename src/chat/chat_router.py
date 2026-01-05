@@ -550,51 +550,83 @@ async def get_notifications(
         except Exception as friend_error:
             logger.warning(f"친구 요청 알림 조회 실패: {friend_error}")
         
-        # 2. 일정 거절 알림 조회 (chat_log 테이블)
-        rejection_logs = supabase.table("chat_log").select("*").eq(
+        # 2. 알림 로그 조회 (일정 거절, 친구 수락/거절, 일정 확정)
+        notification_types = ["schedule_rejection", "friend_accepted", "friend_rejected", "schedule_confirmed"]
+        logs = supabase.table("chat_log").select("*").eq(
             "user_id", current_user_id
-        ).eq("message_type", "schedule_rejection").order(
+        ).in_("message_type", notification_types).order(
             "created_at", desc=True
-        ).limit(20).execute()
+        ).limit(30).execute()
         
-        for log in (rejection_logs.data or []):
-            metadata = log.get("metadata", {})
-            rejected_by = metadata.get("rejected_by") or metadata.get("left_user_id")
+        for log in (logs.data or []):
+            msg_type = log.get("message_type")
+            metadata = log.get("metadata", {}) or {}
+            friend_id = log.get("friend_id")
             
-            # 거절한 사람 이름 조회 (메타데이터에 있으면 사용, 없으면 DB 조회)
-            rejected_by_name = metadata.get("rejected_by_name") or metadata.get("left_user_name") or "상대방"
-            if rejected_by_name == "상대방" and rejected_by:
+            # 상대방 이름 조회
+            target_user_id = friend_id or metadata.get("rejected_by") or metadata.get("left_user_id")
+            target_user_name = "상대방"
+            
+            if target_user_id:
                 try:
-                    user_res = supabase.table("user").select("name").eq("id", rejected_by).execute()
+                    user_res = supabase.table("user").select("name").eq("id", target_user_id).execute()
                     if user_res.data:
-                        rejected_by_name = user_res.data[0].get("name", "상대방")
+                        target_user_name = user_res.data[0].get("name", "상대방")
                 except:
                     pass
             
-            # 일정 정보 구성
-            schedule_date = metadata.get("schedule_date", "")
-            schedule_time = metadata.get("schedule_time", "")
-            schedule_activity = metadata.get("schedule_activity", "")
+            if msg_type == "schedule_rejection":
+                # 일정 거절 메시지 구성
+                schedule_date = metadata.get("schedule_date", "")
+                schedule_time = metadata.get("schedule_time", "")
+                schedule_activity = metadata.get("schedule_activity", "")
+                
+                schedule_info = ""
+                if schedule_date or schedule_time:
+                    schedule_info = f"{schedule_date} {schedule_time}".strip()
+                if schedule_activity:
+                    schedule_info = f"'{schedule_activity}' ({schedule_info})" if schedule_info else f"'{schedule_activity}'"
+                
+                if schedule_info:
+                    message = f"{target_user_name}님이 {schedule_info} 일정을 거절했습니다."
+                else:
+                    message = f"{target_user_name}님이 일정을 거절했습니다."
+                
+                title = "일정 거절"
+                
+            elif msg_type == "friend_accepted":
+                title = "친구 수락"
+                message = f"{target_user_name}님이 친구 요청을 수락했습니다. 이제 일정을 조율해보세요!"
             
-            # 메시지 구성
-            schedule_info = ""
-            if schedule_date or schedule_time:
-                schedule_info = f"{schedule_date} {schedule_time}".strip()
-            if schedule_activity:
-                schedule_info = f"'{schedule_activity}' ({schedule_info})" if schedule_info else f"'{schedule_activity}'"
-            
-            if schedule_info:
-                message = f"{rejected_by_name}님이 {schedule_info} 일정을 거절했습니다."
+            elif msg_type == "schedule_confirmed":
+                # 일정 확정 메시지 구성
+                confirmed_date = metadata.get("confirmed_date", "")
+                confirmed_time = metadata.get("confirmed_time", "")
+                activity = metadata.get("activity", "일정")
+                others = metadata.get("others", [])
+                
+                title = "일정 확정"
+                
+                time_str = f"{confirmed_date} {confirmed_time}".strip()
+                if others:
+                    others_str = ", ".join(others)
+                    message = f"{others_str}님과의 '{activity}' 일정이 {time_str}에 확정되었습니다."
+                else:
+                    message = f"'{activity}' 일정이 {time_str}에 확정되었습니다."
+                
+            elif msg_type == "friend_rejected":
+                title = "친구 거절"
+                message = f"{target_user_name}님이 친구 요청을 거절했습니다."
             else:
-                message = f"{rejected_by_name}님이 일정을 거절했습니다."
-            
+                continue
+
             notifications.append({
                 "id": log.get("id"),
-                "type": "schedule_rejected",
-                "title": "일정 거절",
+                "type": msg_type,
+                "title": title,
                 "message": message,
                 "created_at": log.get("created_at"),
-                "read": False,  # TODO: 읽음 상태 관리 필요 시 추가
+                "read": False,
                 "metadata": metadata
             })
         

@@ -36,7 +36,8 @@ class IntentService:
             "일정", "약속", "잡아줘", "스케줄", "잡아", "잡기", "잡아줄래", "잡아줘.",
             "만나", "만날", "만나자", "만나요", "만나고", "만나서",
             "약속잡", "약속 잡", "일정잡", "일정 잡",
-            "시간", "시간대", "언제", "몇시"
+            "시간", "시간대", "언제", "몇시",
+            "조율", "조율해", "조율해줘", "팬미팅", "콘서트"
         ]
         has_schedule = any(k in text for k in schedule_keywords) or any(k in lowered for k in ["schedule", "meeting", "appointment"])
 

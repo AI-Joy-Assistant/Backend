@@ -435,3 +435,58 @@ class A2ARepository:
             return False
 
 
+
+    @staticmethod
+    async def create_chat_log(user_id: str, friend_id: str, message: str, sender: str, message_type: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        채팅/알림 로그 생성 및 WebSocket 전송
+        - create_chat_log는 ChatRepository에도 있지만, 순환 참조 방지 및 알림 특화 기능을 위해 
+          A2ARepository에서도 구현합니다.
+        - DB 저장 후 즉시 'notification' 타입으로 WS 메시지를 전송합니다.
+        """
+        try:
+            # 1. DB 저장
+            data = {
+                "user_id": user_id,
+                "friend_id": friend_id,
+                "message": message,
+                "sender": sender,
+                "message_type": message_type,
+                "created_at": datetime.now(KST).isoformat(),
+                "metadata": metadata or {}
+            }
+            
+            res = supabase.table("chat_log").insert(data).execute()
+            if not res.data:
+                return None
+            
+            created_log = res.data[0]
+            
+            # 2. WebSocket 알림 전송 (notification 타입)
+            # 프론트엔드 NotificationPanel이나 HomeScreen에서 이 이벤트를 수신하여 목록을 갱신함
+            try:
+                from src.websocket.websocket_manager import manager as ws_manager
+                
+                # 알림 페이로드 구성
+                notification_payload = {
+                    "type": "notification",
+                    "id": created_log.get("id"),
+                    "notification_type": message_type,  # schedule_confirmed, schedule_rejection 등
+                    "title": "알림", # 프론트에서 타입에 따라 덮어씌움
+                    "message": message,
+                    "created_at": created_log.get("created_at"),
+                    "metadata": metadata
+                }
+                
+                # 받는 사람(user_id)에게 전송
+                await ws_manager.send_personal_message(notification_payload, user_id)
+                # logger.info(f"🔔 알림 WS 전송 성공 (to: {user_id}, type: {message_type})")
+                
+            except Exception as ws_err:
+                logger.error(f"알림 WS 전송 실패: {ws_err}")
+                
+            return created_log
+            
+        except Exception as e:
+            logger.error(f"채팅 로그 생성 실패: {e}")
+            return None

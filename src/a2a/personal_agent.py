@@ -336,7 +336,7 @@ class PersonalAgent:
                         )
                     except Exception as e:
                         logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
-                        counter_message = f"그 시간엔 [{conflict_event_name}]이 있어요 😅 {counter_formatted}은 어떠세요?"
+                        counter_message = f"그 시간엔 [{conflict_event_name}]이 있어요 {counter_formatted}은 어떠세요?"
                     
                     return AgentDecision(
                         action=MessageType.COUNTER,
@@ -415,7 +415,7 @@ class PersonalAgent:
                         )
                     except Exception as e:
                         logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
-                        counter_message = f"그 시간은 일정이 있어요 😅 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
+                        counter_message = f"그 시간은 일정이 있어요 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
                     
                     return AgentDecision(
                         action=MessageType.COUNTER,
@@ -426,7 +426,7 @@ class PersonalAgent:
                 else:
                     return AgentDecision(
                         action=MessageType.NEED_HUMAN,
-                        message="가능한 시간을 찾지 못했어요 😅",
+                        message="가능한 시간을 찾지 못했어요",
                         reason="no_available_slot"
                     )
             
@@ -436,7 +436,7 @@ class PersonalAgent:
             # 오류 발생 시 사람에게 넘김 (자동 ACCEPT 하지 않음!)
             return AgentDecision(
                 action=MessageType.NEED_HUMAN,
-                message="오류가 발생했어요. 직접 확인해주세요. 😅",
+                message="오류가 발생했어요. 직접 확인해주세요.",
                 reason=f"error: {str(e)}"
             )
     
@@ -463,7 +463,7 @@ class PersonalAgent:
             if not availability:
                 return AgentDecision(
                     action=MessageType.NEED_HUMAN,
-                    message="앗, 2주 내 가용 시간이 없어요 😅",
+                    message="앗, 2주 내 가용 시간이 없어요",
                     reason="no_availability"
                 )
             

@@ -889,6 +889,47 @@ class A2AService:
             # logger.info(f"🚀 캘린더 동기화 백그라운드 태스크 시작 (session_id: {session_id})")
             
             # 즉시 응답 반환
+            
+            # [NEW] 일정 확정 알림 로그 추가 (참여자들에게 알림)
+            try:
+                # 확정된 시간 정보 포맷팅
+                confirmed_date = confirmed_details.get("proposedDate")
+                confirmed_time = confirmed_details.get("proposedTime")
+                
+                # 모든 활성 참여자에게 알림 (본인은 리스트에서 어떻게 처리할지 결정 - 여기선 모두에게 남김)
+                # 알림 탭에서 '내가 참여한 일정 확정됨'을 볼 수 있게 함
+                for pid in active_participants:
+                    # 상대방 이름 찾기 (알림 메시지용 - "OOO님과의 일정이 확정됨")
+                    other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
+                    if not other_names:
+                        msg_title = "일정 확정"
+                        msg_text = f"{confirmed_date} {confirmed_time} 일정이 확정되었습니다."
+                    else:
+                        others_str = ", ".join(other_names)
+                        msg_title = "일정 확정"
+                        msg_text = f"{others_str}님과의 일정이 {confirmed_date} {confirmed_time}에 확정되었습니다."
+
+                    # chat_log에 추가 (ChatRepository 사용 - notifications endpoint와 호환)
+                    from src.chat.chat_repository import ChatRepository
+                    await ChatRepository.create_chat_log(
+                        user_id=pid,
+                        request_text=None,
+                        response_text=msg_text,
+                        friend_id=None,  # 시스템 알림 성격
+                        message_type="schedule_confirmed",
+                        session_id=None,
+                        metadata={
+                            "session_id": session_id,
+                            "others": other_names,
+                            "confirmed_date": confirmed_date,
+                            "confirmed_time": confirmed_time,
+                            "activity": activity,
+                            "location": location
+                        }
+                    )
+            except Exception as noti_err:
+                logger.error(f"일정 확정 알림 로그 생성 중 오류: {noti_err}")
+
             return {
                 "status": 200,
                 "message": "일정이 확정되었습니다. 캘린더 동기화 중...",
@@ -1059,6 +1100,47 @@ class A2AService:
                     print(f"✅ [Reschedule Background] 협상 완료: {result.get('status')}")
                 except Exception as bg_error:
                     print(f"❌ [Reschedule Background] 협상 실패: {bg_error}")
+
+                # [FIX] 협상 결과에 따라 세션 상태 업데이트 (모든 관련 세션)
+                # 협상이 성공했든 실패했든 DB 상태를 업데이트해야 알림이 뜸
+                try:
+                    new_status = result.get("status")
+                    proposal = result.get("proposal")
+                    
+                    if new_status == "pending_approval":
+                        update_details = {}
+                        if proposal:
+                            # 제안된 시간 정보 저장
+                            update_details["proposedDate"] = proposal.get("date")
+                            update_details["proposedTime"] = proposal.get("time")
+                            update_details["location"] = proposal.get("location")
+                        
+                        for sid in all_session_ids:
+                            await A2ARepository.update_session_status(sid, "pending_approval", details=update_details)
+                            
+                            # WebSocket 알림 전송 (상대방에게)
+                            s_info = await A2ARepository.get_session(sid)
+                            if s_info:
+                                # 알림 대상: 내가 아닌 참여자
+                                note_target = s_info["target_user_id"] if s_info["initiator_user_id"] == user_id else s_info["initiator_user_id"]
+                                try:
+                                    await ws_manager.send_personal_message({
+                                        "type": "a2a_status_changed",
+                                        "session_id": sid,
+                                        "new_status": "pending_approval",
+                                        "proposal": proposal,
+                                        "timestamp": datetime.now(KST).isoformat()
+                                    }, note_target)
+                                except Exception as ws_err:
+                                    print(f"WS 전송 실패: {ws_err}")
+
+                    elif new_status == "failed" or new_status == "no_slots":
+                        for sid in all_session_ids:
+                             # 실패 시에는 in_progress 유지하거나 failed로 변경
+                             await A2ARepository.update_session_status(sid, "failed")
+                
+                except Exception as update_err:
+                    print(f"❌ [Reschedule Background] 상태 업데이트 실패: {update_err}")
             
             # 백그라운드에서 협상 실행 (await 없이 즉시 반환)
             asyncio.create_task(run_negotiation_background())
@@ -3754,26 +3836,27 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
-                    # [DISABLED] 상대방에게 알림 전송 안 함 (A2A 화면에서만 확인)
-                    # await ChatRepository.create_chat_log(
-                    #     user_id=pid,
-                    #     request_text=None,
-                    #     response_text=f"{user_name}님이 약속에서 나갔습니다.",
-                    #     friend_id=target_friend_id,
-                    #     session_id=target_session_id,
-                    #     message_type="schedule_rejection",
-                    #     metadata={
-                    #         "left_user_id": user_id,
-                    #         "left_user_name": user_name,
-                    #         "thread_id": thread_id,
-                    #         "session_ids": session_ids,
-                    #         "schedule_date": proposal.get("date"),
-                    #         "schedule_time": proposal.get("time"),
-                    #         "schedule_activity": proposal.get("activity"),
-                    #         "schedule_location": proposal.get("location"),
-                    #     }
-                    # )
-                    pass  # 채팅 알림 비활성화됨
+                    # [RE-ENABLED] 상대방에게 알림 전송 (알림 탭에 표시)
+                    # 거절한 본인에게는 알림을 보내지 않음
+                    if str(pid) != str(user_id):
+                        await ChatRepository.create_chat_log(
+                            user_id=pid,
+                            request_text=None,
+                            response_text=f"{user_name}님이 약속에서 나갔습니다.",
+                            friend_id=target_friend_id,
+                            session_id=target_session_id,
+                            message_type="schedule_rejection",
+                            metadata={
+                                "rejected_by": user_id,
+                                "rejected_by_name": user_name,
+                                "thread_id": thread_id,
+                                "session_ids": session_ids,
+                                "schedule_date": proposal.get("date"),
+                                "schedule_time": proposal.get("time"),
+                                "schedule_activity": proposal.get("activity"),
+                                "schedule_location": proposal.get("location"),
+                            }
+                        )
                     
                 return {"status": 200, "message": "약속에서 나갔습니다."}
 

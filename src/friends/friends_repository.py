@@ -123,7 +123,13 @@ class FriendsRepository:
             response = self.supabase.table('friend_follow').update({"follow_status": "reject"}).eq('id', request_id).eq('receiver_id', user_id).execute()
             
             if response.data:
-                return {"success": True, "message": "친구 요청을 거절했습니다."}
+                # 거절된 요청 정보에서 요청자 ID 추출
+                rejected_request = response.data[0]
+                return {
+                    "success": True, 
+                    "message": "친구 요청을 거절했습니다.",
+                    "from_user_id": rejected_request['request_id']
+                }
             else:
                 return {"success": False, "message": "친구 요청을 찾을 수 없습니다."}
         except Exception as e:
