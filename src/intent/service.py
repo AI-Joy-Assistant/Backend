@@ -357,45 +357,64 @@ class IntentService:
             time_text = final_result.get("time", "") or ""
             start_time = final_result.get("start_time", "")
             
-            # 원본 메시지에서 "오후 XX시" 패턴 직접 추출
-            pm_time_match = re.search(r'오후\s*(\d{1,2})\s*시', message)
-            am_time_match = re.search(r'오전\s*(\d{1,2})\s*시', message)
+            # 원본 메시지에서 "오후 XX시 YY분" 패턴 직접 추출 (분 단위 지원)
+            pm_time_match = re.search(r'오후\s*(\d{1,2})\s*시\s*(\d{1,2})?\s*분?', message)
+            am_time_match = re.search(r'오전\s*(\d{1,2})\s*시\s*(\d{1,2})?\s*분?', message)
+            half_match = re.search(r'(\d{1,2})\s*시\s*반', message)
             
             if pm_time_match:
                 pm_hour = int(pm_time_match.group(1))
+                pm_minute = int(pm_time_match.group(2)) if pm_time_match.group(2) else 0
+                
+                # "반" 처리
+                if half_match and "오후" in message:
+                    pm_minute = 30
+                
                 # 오후인데 12를 더하지 않은 경우 보정
                 if pm_hour != 12:  # 오후 12시는 그대로 12:00
                     correct_hour = pm_hour + 12 if pm_hour < 12 else pm_hour
                 else:
                     correct_hour = 12
-                correct_time = f"{correct_hour:02d}:00"
+                correct_time = f"{correct_hour:02d}:{pm_minute:02d}"
                 
                 # LLM이 반환한 시간이 틀렸으면 보정
                 if start_time != correct_time:
-                    logger.info(f"[TIME FIX] 오후 시간 보정: '{start_time}' → '{correct_time}' (원문: 오후 {pm_hour}시)")
+                    logger.info(f"[TIME FIX] 오후 시간 보정: '{start_time}' → '{correct_time}' (원문: 오후 {pm_hour}시 {pm_minute}분)")
                     final_result["start_time"] = correct_time
                     
             elif am_time_match:
                 am_hour = int(am_time_match.group(1))
+                am_minute = int(am_time_match.group(2)) if am_time_match.group(2) else 0
+                
+                # "반" 처리
+                if half_match and "오전" in message:
+                    am_minute = 30
+                
                 # 오전 12시는 00:00
                 correct_hour = 0 if am_hour == 12 else am_hour
-                correct_time = f"{correct_hour:02d}:00"
+                correct_time = f"{correct_hour:02d}:{am_minute:02d}"
                 
                 if start_time != correct_time:
-                    logger.info(f"[TIME FIX] 오전 시간 보정: '{start_time}' → '{correct_time}' (원문: 오전 {am_hour}시)")
+                    logger.info(f"[TIME FIX] 오전 시간 보정: '{start_time}' → '{correct_time}' (원문: 오전 {am_hour}시 {am_minute}분)")
                     final_result["start_time"] = correct_time
         
-        # end_time도 같은 로직으로 보정
+        # end_time도 같은 로직으로 보정 (분 단위 지원)
         if final_result.get("end_time"):
             end_time = final_result.get("end_time", "")
             
-            # 원본 메시지에서 끝 시간 패턴 추출 (예: "~오후 11시", "오후 11시까지")
-            pm_end_match = re.search(r'오후\s*(\d{1,2})\s*시(?:까지)?', message)
-            end_keyword_match = re.search(r'[~\-]\s*오후\s*(\d{1,2})\s*시', message) or re.search(r'(\d{1,2})\s*시까지', message)
+            # 원본 메시지에서 끝 시간 패턴 추출 (예: "~오후 11시 30분", "오후 11시까지")
+            pm_end_match = re.search(r'오후\s*(\d{1,2})\s*시\s*(\d{1,2})?\s*분?(?:까지)?', message)
+            end_keyword_match = re.search(r'[~\-]\s*오후\s*(\d{1,2})\s*시\s*(\d{1,2})?\s*분?', message) or re.search(r'(\d{1,2})\s*시\s*(\d{1,2})?\s*분?까지', message)
+            end_half_match = re.search(r'(\d{1,2})\s*시\s*반까지', message)
             
             if end_keyword_match or pm_end_match:
                 match = end_keyword_match or pm_end_match
                 end_hour = int(match.group(1))
+                end_minute = int(match.group(2)) if match.group(2) else 0
+                
+                # "반" 처리
+                if end_half_match:
+                    end_minute = 30
                 
                 # 끝 시간에 "오후"가 있거나 메시지에 "오후"가 있으면 PM으로 변환
                 if "오후" in message and end_hour < 12:
@@ -405,7 +424,7 @@ class IntentService:
                 else:
                     correct_end_hour = end_hour
                     
-                correct_end_time = f"{correct_end_hour:02d}:00"
+                correct_end_time = f"{correct_end_hour:02d}:{end_minute:02d}"
                 
                 if end_time != correct_end_time and correct_end_hour >= 12:  # 오후 시간일 때만 보정
                     logger.info(f"[TIME FIX] 끝 시간 보정: '{end_time}' → '{correct_end_time}'")

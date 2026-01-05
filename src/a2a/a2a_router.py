@@ -526,10 +526,6 @@ async def get_user_sessions(
             
             # Details 구성
             # Initiator 이름 및 아바타 찾기
-            initiator_id = session.get("initiator_user_id")
-            initiator_name = "알 수 없음"
-            initiator_avatar = "https://picsum.photos/150"
-            
             if initiator_id == current_user_id:
                 initiator_name = "나"
                 if initiator_id in user_details_map:    
@@ -540,68 +536,9 @@ async def get_user_sessions(
                 initiator_name = user_info.get("name", "알 수 없음")
                 initiator_avatar = user_info.get("profile_image") or initiator_avatar
             
-            # Process (간소화: 메시지 수 기반으로 가짜 스텝 생성 혹은 실제 메시지 조회)
-            # 리스트 조회 성능을 위해 여기서는 빈 배열 혹은 간단한 정보만 넣고, 
-            # 상세 조회 시 채우는 것이 좋으나 UI 요구사항에 맞춰 실제 메시지 조회
-            
-            # 메시지 조회하여 process 채우기
-            messages = await A2ARepository.get_session_messages(session.get("id"))
-            process = []
-            for msg in messages:
-                msg_content = msg.get('message', {})
-                sender_id = msg.get('sender_user_id')
-                
-                # 발신자 이름 찾기
-                sender_name = "System"
-                if sender_id and sender_id in user_details_map:
-                    sender_name = user_details_map[sender_id].get("name", "Unknown")
-                
-                # 메시지 텍스트 추출 (중첩된 구조 처리)
-                description = ""
-                if isinstance(msg_content, dict):
-                    # text 필드 추출
-                    text_value = msg_content.get('text', '') or msg_content.get('message', '')
-                    # text가 다시 dict인 경우 재귀적으로 text 추출
-                    if isinstance(text_value, dict):
-                        text_value = text_value.get('text', '') or text_value.get('message', '') or str(text_value)
-                    # 여전히 dict 문자열처럼 보이면 str()로 변환되었을 수 있음
-                    if text_value and not str(text_value).startswith('{'):
-                        description = str(text_value)
-                    elif text_value:
-                        # JSON 문자열인 경우 파싱 시도
-                        import json
-                        try:
-                            parsed = json.loads(str(text_value)) if isinstance(text_value, str) else text_value
-                            if isinstance(parsed, dict):
-                                description = parsed.get('text', '') or parsed.get('message', '') or str(parsed)
-                            else:
-                                description = str(parsed)
-                        except:
-                            description = str(text_value)
-                    else:
-                        description = "메시지 없음"
-                else:
-                    description = str(msg_content) if msg_content else "메시지 없음"
-                
-                # 단계 이름 설정
-                step_name = f"[{sender_name}의 AI]"
-                msg_type = msg.get('type')
-                
-                if msg_type == 'proposal':
-                    round_num = msg_content.get('round', '?') if isinstance(msg_content, dict) else '?'
-                    step_name = f"[{sender_name}의 AI] Round {round_num}"
-                elif msg_type == 'accept':
-                    step_name = f"[{sender_name}의 AI] 수락"
-                elif msg_type == 'reject' or msg_type == 'schedule_rejection':
-                    step_name = f"[{sender_name}의 AI] 거절"
-                elif msg_type == 'info':
-                    step_name = "[알림]"
-                
-                process.append({
-                    "step": step_name,
-                    "description": description,
-                    "created_at": msg.get('created_at')
-                })
+            # [OPTIMIZED] 목록 조회 시에는 메시지(process)를 가져오지 않음 (성능 최적화)
+            # 상세 조회(handleLogClick) 시에만 메시지를 가져옴
+            process = []  # 빈 배열 반환
             
             # left_participants 정보 추출
             left_participants = place_pref.get("left_participants", [])

@@ -237,13 +237,50 @@ class ChatService:
                     logger.error(f"DEBUG: Error updating title: {e}")
 
             # 2. [✅ NEW] 시간 응답 처리 (date_selected_mode)
-            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=3, session_id=session_id)
+            # [✅ UPDATED] 컨텍스트 개수 3 → 10으로 증가
+            recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=10, session_id=session_id)
+            
+            # [✅ NEW] 1시간(3600초) 만료 체크
+            CONTEXT_TIMEOUT_SECONDS = 3600  # 1시간
+            context_expired = False
+            expired_context_type = None
             
             date_selected_context = None
             for log in recent_logs:
                 meta = log.get("metadata") or {}
                 if meta.get("date_selected_mode") and meta.get("selected_date"):
-                    date_selected_context = meta
+                    # 시간 만료 체크
+                    log_created_at = log.get("created_at")
+                    if log_created_at:
+                        from datetime import datetime
+                        from zoneinfo import ZoneInfo
+                        KST = ZoneInfo("Asia/Seoul")
+                        
+                        try:
+                            # ISO 형식 파싱
+                            if isinstance(log_created_at, str):
+                                log_time = datetime.fromisoformat(log_created_at.replace("Z", "+00:00"))
+                            else:
+                                log_time = log_created_at
+                            
+                            now = datetime.now(KST)
+                            if log_time.tzinfo is None:
+                                log_time = log_time.replace(tzinfo=KST)
+                            
+                            time_diff = (now - log_time).total_seconds()
+                            
+                            if time_diff > CONTEXT_TIMEOUT_SECONDS:
+                                # 1시간 초과 → 컨텍스트 만료
+                                context_expired = True
+                                expired_context_type = "date_selected"
+                                logger.info(f"[CONTEXT_EXPIRED] date_selected_mode 컨텍스트 만료: {time_diff:.0f}초 경과")
+                            else:
+                                date_selected_context = meta
+                        except Exception as e:
+                            logger.warning(f"시간 파싱 오류: {e}")
+                            date_selected_context = meta
+                    else:
+                        date_selected_context = meta
                     break
             
             if date_selected_context:
@@ -268,44 +305,90 @@ class ChatService:
                         end_time_msg = f"알겠습니다! 끝나는 시간은 24시(자정)까지로 잡을게요 🌙"
                         # logger.info(f"[End Time] 모르겠다 응답 -> 24:00 기본값 적용")
                     else:
-                        # 끝나는 시간 파싱 시도
-                        time_match = re.search(r'(\d{1,2})\s*[시:]', message)
-                        if time_match:
-                            hour = int(time_match.group(1))
+                        # [✅ NEW] 기간 표현 파싱 ("1시간 걸려", "2시간 동안", "30분 걸려" 등)
+                        duration_match = re.search(r'(\d+)\s*시간(?:\s*(\d+)\s*분)?\s*(?:걸|동안|정도|쯤)?', message)
+                        minute_only_match = re.search(r'(\d+)\s*분\s*(?:걸|동안|정도|쯤)?', message)
+                        
+                        if duration_match:
+                            # 기간으로 끝 시간 계산
+                            duration_hours = int(duration_match.group(1))
+                            duration_mins = int(duration_match.group(2)) if duration_match.group(2) else 0
                             
-                            # 오후/오전 처리
-                            if "오후" in message and hour < 12:
-                                hour += 12
-                            elif "오전" in message and hour == 12:
-                                hour = 0
-                            elif "오전" not in message and "오후" not in message and hour < 7:
-                                hour += 12
+                            start_parts = selected_start_time.split(":") if ":" in selected_start_time else ["14", "00"]
+                            start_hour = int(start_parts[0])
+                            start_minute = int(start_parts[1]) if len(start_parts) > 1 else 0
                             
-                            selected_end_time = f"{hour:02d}:00"
-                            end_time_msg = None
-                            # logger.info(f"[End Time] 시간 파싱: {message} -> {selected_end_time}")
+                            end_minute = start_minute + duration_mins
+                            end_hour = start_hour + duration_hours + (end_minute // 60)
+                            end_minute = end_minute % 60
+                            end_hour = end_hour % 24
+                            
+                            selected_end_time = f"{end_hour:02d}:{end_minute:02d}"
+                            end_time_msg = f"알겠습니다! {duration_hours}시간{' ' + str(duration_mins) + '분' if duration_mins > 0 else ''} 후({selected_end_time})에 끝나는 약속으로 조율할게요 ⏰"
+                            logger.info(f"[A2A End Time] 기간 표현 파싱: {message} -> +{duration_hours}시간 {duration_mins}분 -> {selected_end_time}")
+                            
+                        elif minute_only_match and "시" not in message:
+                            # 분만 있는 기간 표현 (예: "30분 걸려")
+                            duration_mins = int(minute_only_match.group(1))
+                            
+                            start_parts = selected_start_time.split(":") if ":" in selected_start_time else ["14", "00"]
+                            start_hour = int(start_parts[0])
+                            start_minute = int(start_parts[1]) if len(start_parts) > 1 else 0
+                            
+                            end_minute = start_minute + duration_mins
+                            end_hour = start_hour + (end_minute // 60)
+                            end_minute = end_minute % 60
+                            end_hour = end_hour % 24
+                            
+                            selected_end_time = f"{end_hour:02d}:{end_minute:02d}"
+                            end_time_msg = f"알겠습니다! {duration_mins}분 후({selected_end_time})에 끝나는 약속으로 조율할게요 ⏰"
+                            logger.info(f"[A2A End Time] 분 기간 표현 파싱: {message} -> +{duration_mins}분 -> {selected_end_time}")
+                            
                         else:
-                            # 파싱 실패 시 다시 물어보기
-                            retry_msg = "🤔 끝나는 시간을 이해하지 못했어요. 다시 한 번 알려주시겠어요? (예: 8시, 오후 10시) 또는 모르시면 '몰라'라고 해주세요!"
-                            await ChatRepository.create_chat_log(
-                                user_id=user_id,
-                                request_text=None,
-                                response_text=retry_msg,
-                                friend_id=None,
-                                message_type="ai_response",
-                                session_id=session_id,
-                                metadata=date_selected_context  # 컨텍스트 유지
-                            )
-                            return {
-                                "status": 200,
-                                "data": {
-                                    "user_message": message,
-                                    "ai_response": retry_msg,
-                                    "schedule_info": {"waiting_for_end_time": True},
-                                    "calendar_event": None,
-                                    "usage": None
+                            # 끝나는 시간 파싱 시도 (분 단위 지원)
+                            # "3시 17분", "오후 2시 30분", "14:30" 등 파싱
+                            time_match = re.search(r'(\d{1,2})\s*[시:]\s*(\d{1,2})?\s*분?', message)
+                            if time_match:
+                                hour = int(time_match.group(1))
+                                minute = int(time_match.group(2)) if time_match.group(2) else 0
+                                
+                                # "반" 처리 (30분)
+                                if "반" in message:
+                                    minute = 30
+                                
+                                # 오후/오전 처리
+                                if "오후" in message and hour < 12:
+                                    hour += 12
+                                elif "오전" in message and hour == 12:
+                                    hour = 0
+                                elif "오전" not in message and "오후" not in message and hour < 7:
+                                    hour += 12
+                                
+                                selected_end_time = f"{hour:02d}:{minute:02d}"
+                                end_time_msg = None
+                                # logger.info(f"[End Time] 시간 파싱: {message} -> {selected_end_time}")
+                            else:
+                                # 파싱 실패 시 다시 물어보기
+                                retry_msg = "🤔 끝나는 시간을 이해하지 못했어요. 다시 한 번 알려주시겠어요? (예: 8시, 오후 10시) 또는 모르시면 '몰라'라고 해주세요!"
+                                await ChatRepository.create_chat_log(
+                                    user_id=user_id,
+                                    request_text=None,
+                                    response_text=retry_msg,
+                                    friend_id=None,
+                                    message_type="ai_response",
+                                    session_id=session_id,
+                                    metadata=date_selected_context  # 컨텍스트 유지
+                                )
+                                return {
+                                    "status": 200,
+                                    "data": {
+                                        "user_message": message,
+                                        "ai_response": retry_msg,
+                                        "schedule_info": {"waiting_for_end_time": True},
+                                        "calendar_event": None,
+                                        "usage": None
+                                    }
                                 }
-                            }
                     
                     # 끝나는 시간 확보됨 → A2A 시작
                     from src.a2a.a2a_service import A2AService
@@ -371,10 +454,15 @@ class ChatService:
                 selected_time = None
                 time_condition = date_selected_context.get("time_condition")
                 
-                # "6시", "오후 2시", "18:00" 등 파싱
-                time_match = re.search(r'(\d{1,2})\s*[시:]', message)
+                # "6시", "오후 2시", "18:00", "3시 17분" 등 파싱 (분 단위 지원)
+                time_match = re.search(r'(\d{1,2})\s*[시:]\s*(\d{1,2})?\s*분?', message)
                 if time_match:
                     hour = int(time_match.group(1))
+                    minute = int(time_match.group(2)) if time_match.group(2) else 0
+                    
+                    # "반" 처리 (30분)
+                    if "반" in message:
+                        minute = 30
                     
                     # 오후/오전 처리
                     if "오후" in message and hour < 12:
@@ -385,7 +473,7 @@ class ChatService:
                         # 7시 미만이고 오전/오후 명시 없으면 오후로 추정
                         hour += 12
                     
-                    selected_time = f"{hour:02d}:00"
+                    selected_time = f"{hour:02d}:{minute:02d}"
                     # logger.info(f"[Time Selection] 시간 파싱: {message} -> {selected_time}")
                 
                 if selected_time:
@@ -475,8 +563,50 @@ class ChatService:
             for log in recent_logs:
                 meta = log.get("metadata") or {}
                 if meta.get("personal_schedule_mode") and meta.get("waiting_for_end_time"):
-                    personal_schedule_context = meta
+                    # 시간 만료 체크
+                    log_created_at = log.get("created_at")
+                    if log_created_at:
+                        from datetime import datetime
+                        from zoneinfo import ZoneInfo
+                        KST = ZoneInfo("Asia/Seoul")
+                        
+                        try:
+                            if isinstance(log_created_at, str):
+                                log_time = datetime.fromisoformat(log_created_at.replace("Z", "+00:00"))
+                            else:
+                                log_time = log_created_at
+                            
+                            now = datetime.now(KST)
+                            if log_time.tzinfo is None:
+                                log_time = log_time.replace(tzinfo=KST)
+                            
+                            time_diff = (now - log_time).total_seconds()
+                            
+                            if time_diff > CONTEXT_TIMEOUT_SECONDS:
+                                context_expired = True
+                                expired_context_type = "personal_schedule"
+                                logger.info(f"[CONTEXT_EXPIRED] personal_schedule_mode 컨텍스트 만료: {time_diff:.0f}초 경과")
+                            else:
+                                personal_schedule_context = meta
+                        except Exception as e:
+                            logger.warning(f"시간 파싱 오류: {e}")
+                            personal_schedule_context = meta
+                    else:
+                        personal_schedule_context = meta
                     break
+            
+            # [✅ NEW] 컨텍스트 만료 시 알림 메시지 전송
+            if context_expired:
+                expire_msg = "⏰ 시간이 지나서 이전 대화가 초기화되었어요. 새로 일정을 등록하시려면 다시 말씀해 주세요!"
+                await ChatRepository.create_chat_log(
+                    user_id=user_id,
+                    request_text=None,
+                    response_text=expire_msg,
+                    friend_id=None,
+                    message_type="ai_response",
+                    session_id=session_id,
+                )
+                # 만료 후에는 새 요청으로 처리하므로 컨텍스트 무시하고 계속 진행
             
             if personal_schedule_context:
                 saved_schedule_info = personal_schedule_context.get("schedule_info", {})
@@ -488,38 +618,85 @@ class ChatService:
                 is_dont_know = any(p in message for p in dont_know_patterns)
                 
                 if is_dont_know:
-                    # 기본값: 1시간 후
-                    start_hour = int(parsed_start_time.split(":")[0]) if ":" in parsed_start_time else 14
+                    # 기본값: 1시간 후 (시작 시간의 분 보존)
+                    start_parts = parsed_start_time.split(":") if ":" in parsed_start_time else ["14", "00"]
+                    start_hour = int(start_parts[0])
+                    start_minute = int(start_parts[1]) if len(start_parts) > 1 else 0
                     end_hour = (start_hour + 1) % 24
-                    selected_end_time = f"{end_hour:02d}:00"
+                    selected_end_time = f"{end_hour:02d}:{start_minute:02d}"
                     end_time_msg = f"알겠습니다! 끝나는 시간은 1시간 후({selected_end_time})로 설정할게요 ⏰"
                     # logger.info(f"[개인 일정] 모르겠다 응답 -> 1시간 기본값 적용")
                 else:
-                    # 끝나는 시간 파싱 시도
-                    time_match = re.search(r'(\d{1,2})\s*[시:]', message)
-                    if time_match:
-                        hour = int(time_match.group(1))
+                    # [✅ NEW] 기간 표현 파싱 ("1시간 걸려", "2시간 동안", "30분 걸려" 등)
+                    duration_match = re.search(r'(\d+)\s*시간(?:\s*(\d+)\s*분)?\s*(?:걸|동안|정도|쯤)?', message)
+                    minute_only_match = re.search(r'(\d+)\s*분\s*(?:걸|동안|정도|쯤)?', message)
+                    
+                    if duration_match:
+                        # 기간으로 끝 시간 계산
+                        duration_hours = int(duration_match.group(1))
+                        duration_mins = int(duration_match.group(2)) if duration_match.group(2) else 0
                         
-                        # 오후/오전 처리
-                        if "오후" in message and hour < 12:
-                            hour += 12
-                        elif "오전" in message and hour == 12:
-                            hour = 0
-                        elif "오전" not in message and "오후" not in message and hour < 7:
-                            hour += 12
+                        start_parts = parsed_start_time.split(":") if ":" in parsed_start_time else ["14", "00"]
+                        start_hour = int(start_parts[0])
+                        start_minute = int(start_parts[1]) if len(start_parts) > 1 else 0
                         
-                        selected_end_time = f"{hour:02d}:00"
-                        end_time_msg = None
-                        # logger.info(f"[개인 일정] 끝 시간 파싱: {message} -> {selected_end_time}")
+                        end_minute = start_minute + duration_mins
+                        end_hour = start_hour + duration_hours + (end_minute // 60)
+                        end_minute = end_minute % 60
+                        end_hour = end_hour % 24
+                        
+                        selected_end_time = f"{end_hour:02d}:{end_minute:02d}"
+                        end_time_msg = f"알겠습니다! {duration_hours}시간{' ' + str(duration_mins) + '분' if duration_mins > 0 else ''} 후({selected_end_time})에 끝나는 일정으로 설정할게요 ⏰"
+                        logger.info(f"[개인 일정] 기간 표현 파싱: {message} -> +{duration_hours}시간 {duration_mins}분 -> {selected_end_time}")
+                        
+                    elif minute_only_match and "시" not in message:
+                        # 분만 있는 기간 표현 (예: "30분 걸려")
+                        duration_mins = int(minute_only_match.group(1))
+                        
+                        start_parts = parsed_start_time.split(":") if ":" in parsed_start_time else ["14", "00"]
+                        start_hour = int(start_parts[0])
+                        start_minute = int(start_parts[1]) if len(start_parts) > 1 else 0
+                        
+                        end_minute = start_minute + duration_mins
+                        end_hour = start_hour + (end_minute // 60)
+                        end_minute = end_minute % 60
+                        end_hour = end_hour % 24
+                        
+                        selected_end_time = f"{end_hour:02d}:{end_minute:02d}"
+                        end_time_msg = f"알겠습니다! {duration_mins}분 후({selected_end_time})에 끝나는 일정으로 설정할게요 ⏰"
+                        logger.info(f"[개인 일정] 분 기간 표현 파싱: {message} -> +{duration_mins}분 -> {selected_end_time}")
+                        
                     else:
-                        # 파싱 실패 시 다시 물어보기
-                        retry_msg = "🤔 끝나는 시간을 이해하지 못했어요. 다시 한 번 알려주시겠어요? (예: 3시, 오후 5시) 또는 모르시면 '몰라'라고 해주세요!"
-                        await ChatRepository.create_chat_log(
-                            user_id=user_id,
-                            request_text=None,
-                            response_text=retry_msg,
-                            friend_id=None,
-                            message_type="ai_response",
+                        # 끝나는 시간 파싱 시도 (분 단위 지원)
+                        time_match = re.search(r'(\d{1,2})\s*[시:]\s*(\d{1,2})?\s*분?', message)
+                        if time_match:
+                            hour = int(time_match.group(1))
+                            minute = int(time_match.group(2)) if time_match.group(2) else 0
+                            
+                            # "반" 처리 (30분)
+                            if "반" in message:
+                                minute = 30
+                            
+                            # 오후/오전 처리
+                            if "오후" in message and hour < 12:
+                                hour += 12
+                            elif "오전" in message and hour == 12:
+                                hour = 0
+                            elif "오전" not in message and "오후" not in message and hour < 7:
+                                hour += 12
+                            
+                            selected_end_time = f"{hour:02d}:{minute:02d}"
+                            end_time_msg = None
+                            # logger.info(f"[개인 일정] 끝 시간 파싱: {message} -> {selected_end_time}")
+                        else:
+                            # 파싱 실패 시 다시 물어보기
+                            retry_msg = "🤔 끝나는 시간을 이해하지 못했어요. 다시 한 번 알려주시겠어요? (예: 3시, 오후 5시) 또는 모르시면 '몰라'라고 해주세요!"
+                            await ChatRepository.create_chat_log(
+                                user_id=user_id,
+                                request_text=None,
+                                response_text=retry_msg,
+                                friend_id=None,
+                                message_type="ai_response",
                             session_id=session_id,
                             metadata=personal_schedule_context  # 컨텍스트 유지
                         )
@@ -1124,7 +1301,7 @@ class ChatService:
                         # ✅ [여행 모드] 여행일 경우 끝 시간 물어보기 스킵
                         if not end_time_from_param and not is_travel_mode:
                             # 끝 시간 물어보기
-                            end_time_question = f"⏰ {selected_date} {selected_time}에 시작하는 약속이군요!\n끝나는 시간은 언제인가요? (예: 5시, 오후 7시)\n모르시면 '몫라'라고 해주세요!"
+                            end_time_question = f"⏰ {selected_date} {selected_time}에 시작하는 약속이군요!\n끝나는 시간은 언제인가요? (예: 5시, 오후 7시)\n모르시면 '몰라'라고 해주세요!"
                             
                             await ChatRepository.create_chat_log(
                                 user_id=user_id,
@@ -1464,6 +1641,34 @@ class ChatService:
                 early_conflict_warning = None
                 has_date = schedule_info.get("date") or schedule_info.get("start_date")
                 has_time = schedule_info.get("time") or schedule_info.get("start_time")
+                
+                # [✅ FIX] 날짜가 없고 시간만 있으면 이전 대화에서 날짜 복원
+                if not has_date and has_time:
+                    date_keywords = ["내일", "모레", "오늘", "이번주", "다음주"]
+                    for log in conversation_history:
+                        content = log.get("content", "")
+                        for kw in date_keywords:
+                            if kw in content:
+                                schedule_info["date"] = kw
+                                has_date = kw
+                                logger.info(f"[DATE_FALLBACK] 이전 대화에서 날짜 복원: '{kw}'")
+                                break
+                        if has_date:
+                            break
+                    
+                    # 아직 날짜가 없으면 recent_logs도 검색
+                    if not has_date:
+                        for log in recent_logs:
+                            content = log.get("request_text", "") or log.get("response_text", "") or ""
+                            for kw in date_keywords:
+                                if kw in content:
+                                    schedule_info["date"] = kw
+                                    has_date = kw
+                                    logger.info(f"[DATE_FALLBACK] 최근 로그에서 날짜 복원: '{kw}'")
+                                    break
+                            if has_date:
+                                break
+                
                 if has_date and has_time and not friend_ids:
                     try:
                         from src.auth.auth_service import AuthService
@@ -1562,17 +1767,23 @@ class ChatService:
                         end_time_from_info = None
                     
                     if not end_time_from_info:
-                        # 시작 시간 파싱
-                        start_time_match = re.search(r'(\d{1,2})\s*[시:]', time_str)
+                        # 시작 시간 파싱 (분 단위 지원)
+                        start_time_match = re.search(r'(\d{1,2})\s*[시:]\s*(\d{1,2})?\s*분?', time_str)
                         if start_time_match:
                             hour = int(start_time_match.group(1))
+                            minute = int(start_time_match.group(2)) if start_time_match.group(2) else 0
+                            
+                            # "반" 처리 (30분)
+                            if "반" in time_str:
+                                minute = 30
+                            
                             if "오후" in time_str and hour < 12:
                                 hour += 12
                             elif "오전" in time_str and hour == 12:
                                 hour = 0
                             elif "오전" not in time_str and "오후" not in time_str and hour < 7:
                                 hour += 12
-                            parsed_start_time = f"{hour:02d}:00"
+                            parsed_start_time = f"{hour:02d}:{minute:02d}"
                         else:
                             parsed_start_time = time_str
                         
@@ -2295,12 +2506,13 @@ class ChatService:
             start = date.replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=KST)
             return start, start
 
-        # 3) 단일 시간 파싱: N시(분 포함 또는 반)
-        m = re.search(r"(\d{1,2})\s*시(?:\s*반)?(?:\s*(\d{1,2})\s*분)?", t)
+        # 3) 단일 시간 파싱: N시 M분 / N시반 / N시
+        # 개선된 정규식: "3시 17분", "3시반", "오후 2시 30분" 등 처리
+        m = re.search(r"(\d{1,2})\s*시\s*(\d{1,2})?\s*분?", t)
         if m:
             hh = int(m.group(1))
-            # "반" 처리 (30분)
-            if "반" in t:
+            # "반" 처리 (30분) - "시" 다음에 "반"이 오는 경우
+            if re.search(r"시\s*반", t):
                 mm = 30
             elif m.group(2):
                 mm = int(m.group(2))
