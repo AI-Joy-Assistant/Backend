@@ -37,6 +37,10 @@ class OpenAIService:
         url = settings.LLM_API_URL or os.getenv("LLM_API_URL")
         if not url:
             raise ValueError("LLM_API_URL not set")
+            
+        # OpenAI 호환 엔드포인트 자동 추가
+        if not url.endswith("/v1/chat/completions"):
+            url = f"{url.rstrip('/')}/v1/chat/completions"
 
         # 새 API 스펙: messages 배열 그대로 전송
         payload = {
@@ -48,11 +52,24 @@ class OpenAIService:
         # logger.info(f"[Llama API] 요청 전송: {url}")
         logger.debug(f"[Llama API] Payload: {len(messages)}개 메시지")
         
+        # API 키가 설정된 경우 Authorization 헤더 추가
+        headers = {"Content-Type": "application/json"}
+        api_key = settings.LLM_API_KEY or os.getenv("LLM_API_KEY")
+        if api_key:
+            # 따옴표가 포함된 경우 제거
+            api_key = api_key.strip('"').strip("'")
+            headers["Authorization"] = f"Bearer {api_key}"
+            logger.info(f"[Llama API] Authorization 헤더 설정됨 (키 길이: {len(api_key)})")
+        
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            response_text = data.get("response", "")
+            # OpenAI 호환 응답 형식 처리
+            if "choices" in data and len(data["choices"]) > 0:
+                response_text = data["choices"][0].get("message", {}).get("content", "")
+            else:
+                response_text = data.get("response", "")
             # logger.info(f"[Llama API] 응답 수신: {len(response_text)}자")
             return response_text
 

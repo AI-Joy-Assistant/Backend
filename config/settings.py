@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     
     # LLM 설정 (Llama API 우선, OpenAI는 폴백)
     LLM_API_URL: Optional[str] = None  # Llama API URL (설정 시 OpenAI 대신 사용)
+    LLM_API_KEY: Optional[str] = None  # Llama API Key (인증이 필요한 경우)
     OPENAI_API_KEY: str = "PLEASE_SET_OPENAI_API_KEY_IN_ENV_FILE"
     OPENAI_MODEL: str = "gpt-4"  # gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini 중 선택
     
