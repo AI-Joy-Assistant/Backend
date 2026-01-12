@@ -205,4 +205,89 @@ class AuthRepository:
             print(f"✅ 사용자 계정 삭제 성공: {user_id}")
         except Exception as e:
             print(f"❌ 사용자 계정 삭제 오류: {str(e)}")
-            raise Exception(f"사용자 계정 삭제 오류: {str(e)}") 
+            raise Exception(f"사용자 계정 삭제 오류: {str(e)}")
+
+    @staticmethod
+    async def find_user_by_apple_id(apple_id: str) -> Optional[Dict[str, Any]]:
+        """Apple ID로 사용자 찾기"""
+        try:
+            response = supabase.table('user').select('*').eq('apple_id', apple_id).maybe_single().execute()
+            if response is None:
+                return None
+            return response.data
+        except Exception as e:
+            print(f"❌ Apple ID로 사용자 조회 오류: {str(e)}")
+            return None
+
+    @staticmethod
+    async def create_apple_user(user_data: Dict[str, str]) -> Dict[str, Any]:
+        """Apple OAuth 사용자 생성"""
+        try:
+            print(f"🍎 Apple 사용자 생성 시작: {user_data.get('email')}")
+            print(f"📝 저장할 데이터: {user_data}")
+            
+            response = supabase.table('user').insert(user_data).execute()
+            
+            if response is None:
+                raise Exception("Apple 사용자 생성 실패: response is None")
+            if response.data:
+                print(f"✅ Apple 사용자 생성 성공: {response.data[0].get('id')}")
+                return response.data[0]
+            raise Exception("Apple 사용자 생성 실패: response.data is empty")
+        except Exception as e:
+            print(f"❌ Apple 사용자 생성 오류: {str(e)}")
+            raise Exception(f"Apple 사용자 생성 오류: {str(e)}")
+
+    @staticmethod
+    async def update_apple_user_info(
+        apple_id: str,
+        access_token: Optional[str] = None,
+        profile_image: Optional[str] = None,
+        name: Optional[str] = None
+    ) -> None:
+        """Apple 사용자 정보 업데이트"""
+        try:
+            update_data = {'updated_at': 'NOW()'}
+            if access_token is not None:
+                update_data['access_token'] = access_token
+            if profile_image is not None:
+                update_data['profile_image'] = profile_image
+            if name is not None:
+                update_data['name'] = name
+
+            supabase.table('user').update(update_data).eq('apple_id', apple_id).execute()
+        except Exception as e:
+            print(f"❌ Apple 사용자 정보 업데이트 오류: {str(e)}")
+
+    @staticmethod
+    async def link_google_to_user(
+        user_id: str,
+        google_id: str,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+        token_expiry: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """기존 사용자에게 Google 계정 연결"""
+        try:
+            print(f"🔗 Google 계정 연결 시작: user_id={user_id}")
+            
+            update_data = {
+                'google_id': google_id,
+                'access_token': access_token,
+                'updated_at': 'NOW()'
+            }
+            
+            if refresh_token:
+                update_data['refresh_token'] = refresh_token
+            if token_expiry:
+                update_data['token_expiry'] = token_expiry
+            
+            response = supabase.table('user').update(update_data).eq('id', user_id).execute()
+            
+            if response and response.data:
+                print(f"✅ Google 계정 연결 성공: {user_id}")
+                return response.data[0]
+            raise Exception("Google 계정 연결 실패: 업데이트된 데이터가 없습니다")
+        except Exception as e:
+            print(f"❌ Google 계정 연결 오류: {str(e)}")
+            raise Exception(f"Google 계정 연결 오류: {str(e)}") 

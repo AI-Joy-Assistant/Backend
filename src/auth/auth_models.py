@@ -60,6 +60,7 @@ class UserResponse(BaseModel):
     handle: Optional[str] = None  # handle 추가
     profile_image: Optional[str] = None
     created_at: Optional[datetime] = None
+    access_token: Optional[str] = None  # Google 연동 여부 확인용 (값이 있으면 연동됨)
 
 class UserProfileResponse(BaseModel):
     id: uuid.UUID
@@ -79,3 +80,17 @@ class UserRegisterRequest(BaseModel):
     name: str
     handle: str
     terms_agreed: bool = True  # 약관 동의 여부 (필수)
+
+# Apple 로그인 요청 모델
+class AppleAuthRequest(BaseModel):
+    identity_token: str  # Apple이 제공하는 JWT 토큰
+    authorization_code: str
+    user_id: str  # Apple user identifier
+    email: Optional[str] = None  # 첫 로그인 시에만 제공됨
+    full_name: Optional[str] = None  # 첫 로그인 시에만 제공됨
+
+class AppleRegisterRequest(BaseModel):
+    register_token: str
+    name: str
+    handle: str
+    terms_agreed: bool = True

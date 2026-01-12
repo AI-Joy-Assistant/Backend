@@ -268,7 +268,7 @@ class ChatRepository:
             res = query.order("created_at", desc=True).limit(limit).execute()
             
             elapsed = time.time() - start_time
-            logger.info(f"⏱️ get_recent_chat_logs 쿼리 시간: {elapsed:.3f}초 (rows: {len(res.data or [])})")
+            # logger.info(f"⏱️ get_recent_chat_logs 쿼리 시간: {elapsed:.3f}초 (rows: {len(res.data or [])})")
             
             return res.data or []
         except Exception as e:
@@ -349,7 +349,7 @@ class ChatRepository:
             supabase.table("chat_sessions").update({
                 "title": title
             }).eq("id", session_id).execute()
-            logger.info(f"세션 제목 업데이트 성공: {title} (session_id={session_id})")
+            # logger.info(f"세션 제목 업데이트 성공: {title} (session_id={session_id})")
         except Exception as e:
             logger.error(f"세션 제목 업데이트 실패: {str(e)}")
             # 에러 발생해도 로직 중단하지 않음

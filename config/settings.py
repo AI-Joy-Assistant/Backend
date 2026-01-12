@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = "PLEASE_SET_GOOGLE_CLIENT_SECRET_IN_ENV_FILE"
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/google/callback"
     
+    # Apple OAuth 설정
+    APPLE_CLIENT_ID: str = "com.joyner.app"  # Bundle ID
+    APPLE_TEAM_ID: str = "36TRH8W787"
+    APPLE_KEY_ID: str = "N3Q9P2S887"
+    APPLE_PRIVATE_KEY: str = ""  # .p8 파일 내용 (환경변수로 설정)
+    
     # Supabase 설정
     SUPABASE_URL: str = "PLEASE_SET_SUPABASE_URL_IN_ENV_FILE"
     SUPABASE_SERVICE_KEY: str = "PLEASE_SET_SUPABASE_SERVICE_KEY_IN_ENV_FILE"

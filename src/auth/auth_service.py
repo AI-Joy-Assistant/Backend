@@ -480,7 +480,76 @@ class AuthService:
             return user
         except Exception as e:
             print(f"사용자 조회 실패: {str(e)}")
-            return None 
+            return None
+
+    @staticmethod
+    async def verify_apple_identity_token(identity_token: str) -> Dict[str, Any]:
+        """
+        Apple Identity Token (JWT) 검증
+        Apple의 공개키로 서명을 검증하고 payload를 반환
+        """
+        try:
+            import jwt
+            from jwt import PyJWKClient
+            
+            # Apple의 공개키 가져오기
+            jwks_client = PyJWKClient("https://appleid.apple.com/auth/keys")
+            signing_key = jwks_client.get_signing_key_from_jwt(identity_token)
+            
+            # 허용할 audience 목록 (네이티브 빌드 + Expo Go)
+            allowed_audiences = [
+                settings.APPLE_CLIENT_ID,  # com.joyner.app (네이티브 빌드)
+                "host.exp.Exponent",  # Expo Go 개발용
+            ]
+            
+            # JWT 검증
+            payload = jwt.decode(
+                identity_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=allowed_audiences,
+                issuer="https://appleid.apple.com"
+            )
+            
+            print(f"✅ Apple ID Token 검증 성공: {payload.get('sub')}")
+            return payload
+            
+        except jwt.ExpiredSignatureError:
+            print("❌ Apple ID Token 만료됨")
+            raise Exception("Apple ID Token이 만료되었습니다.")
+        except jwt.InvalidTokenError as e:
+            print(f"❌ Apple ID Token 검증 실패: {str(e)}")
+            raise Exception(f"Apple ID Token 검증 실패: {str(e)}")
+        except Exception as e:
+            print(f"❌ Apple 토큰 검증 오류: {str(e)}")
+            raise Exception(f"Apple 토큰 검증 오류: {str(e)}")
+
+    @staticmethod
+    async def login_apple_user(apple_user_id: str) -> TokenResponse:
+        """Apple OAuth 사용자 로그인"""
+        try:
+            print(f"🍎 Apple 로그인 시작: {apple_user_id}")
+            
+            # Apple ID로 사용자 확인
+            user = await AuthRepository.find_user_by_apple_id(apple_user_id)
+            if not user:
+                print(f"❌ Apple ID로 사용자를 찾을 수 없음: {apple_user_id}")
+                raise Exception("Apple 계정으로 가입된 사용자가 아닙니다.")
+            
+            print(f"✅ Apple 사용자 확인 성공: {user['email']}")
+            
+            # JWT 토큰 생성
+            access_token = AuthService.create_jwt_access_token(user)
+            print(f"✅ JWT 토큰 생성 성공")
+            
+            return TokenResponse(
+                access_token=access_token,
+                token_type="bearer",
+                expires_in=3600
+            )
+        except Exception as e:
+            print(f"❌ Apple 로그인 실패: {str(e)}")
+            raise Exception(f"Apple 로그인 실패: {str(e)}") 
     
     @staticmethod
     async def get_valid_access_token_by_user_id(user_id: str) -> Optional[str]:

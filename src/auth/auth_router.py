@@ -67,6 +67,95 @@ async def register_google(data: UserRegisterRequest):
         print(f"❌ Google 회원가입 실패: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
+from .auth_models import AppleAuthRequest, AppleRegisterRequest
+
+@router.post("/apple")
+async def apple_auth(data: AppleAuthRequest):
+    """
+    Apple 로그인/회원가입 처리
+    - 프론트엔드에서 받은 identity_token 검증
+    - 기존 사용자면 로그인 토큰 반환
+    - 신규 사용자면 회원가입 토큰 반환
+    """
+    try:
+        # 1. Apple Identity Token 검증
+        payload = await AuthService.verify_apple_identity_token(data.identity_token)
+        apple_user_id = payload.get("sub")  # Apple User ID
+        email = payload.get("email") or data.email  # 첫 로그인 시에만 email 제공됨
+        
+        print(f"🍎 Apple 인증 성공: {apple_user_id}, email: {email}")
+        
+        # 2. 기존 사용자 확인
+        existing_user = await AuthRepository.find_user_by_apple_id(apple_user_id)
+        
+        if existing_user:
+            # 기존 사용자 로그인
+            print(f"✅ 기존 Apple 사용자 로그인: {existing_user['email']}")
+            token = await AuthService.login_apple_user(apple_user_id)
+            return token
+        
+        # 3. 신규 사용자 - 회원가입 토큰 생성
+        print(f"🆕 신규 Apple 사용자 - 회원가입 필요")
+        register_payload = {
+            "apple_id": apple_user_id,
+            "email": email,
+            "name": data.full_name,
+            "provider": "apple",
+            "exp": dt.datetime.utcnow() + dt.timedelta(minutes=30)
+        }
+        register_token = jwt.encode(register_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+        
+        return {
+            "status": "register_required",
+            "register_token": register_token,
+            "email": email,
+            "name": data.full_name
+        }
+        
+    except Exception as e:
+        print(f"❌ Apple 인증 실패: {str(e)}")
+        raise HTTPException(status_code=401, detail=str(e))
+
+@router.post("/register/apple", response_model=TokenResponse)
+async def register_apple(data: AppleRegisterRequest):
+    """Apple 회원가입 완료 및 토큰 발급"""
+    try:
+        # 1. register_token 검증
+        payload = jwt.decode(data.register_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        
+        if payload.get("provider") != "apple":
+            raise HTTPException(status_code=400, detail="유효하지 않은 Apple 가입 토큰입니다.")
+        
+        # 2. 약관 동의 여부 확인
+        if not data.terms_agreed:
+            raise HTTPException(status_code=400, detail="서비스 이용약관 및 개인정보 처리방침에 동의해야 합니다.")
+        
+        # 3. 사용자 생성
+        apple_user_data = {
+            "email": payload["email"],
+            "name": data.name,
+            "handle": data.handle,
+            "apple_id": payload["apple_id"],
+            "status": True,
+            "terms_agreed": data.terms_agreed,
+            "terms_agreed_at": dt.datetime.utcnow().isoformat() if data.terms_agreed else None
+        }
+        
+        user = await AuthRepository.create_apple_user(apple_user_data)
+        
+        # 4. 로그인 처리 (JWT 발급)
+        token = await AuthService.login_apple_user(payload["apple_id"])
+        
+        return token
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="가입 토큰이 만료되었습니다.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="유효하지 않은 가입 토큰입니다.")
+    except Exception as e:
+        print(f"❌ Apple 회원가입 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
 @router.post("/login", response_model=TokenResponse)
 async def login(user_data: UserLogin):
     """사용자 로그인"""
@@ -75,6 +164,137 @@ async def login(user_data: UserLogin):
         return token
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+@router.get("/link/google")
+async def link_google_start(request: Request, redirect_scheme: Optional[str] = None):
+    """
+    Google 계정 연동 시작 (Apple 로그인 사용자용)
+    - redirect_scheme: 연동 완료 후 리다이렉트될 프론트엔드 URL
+    """
+    scopes = [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/calendar",
+    ]
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": " ".join(scopes),
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": json.dumps({"redirect_scheme": redirect_scheme, "action": "link"}) if redirect_scheme else json.dumps({"action": "link"})
+    }
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    return RedirectResponse(url=auth_url)
+
+@router.get("/link/callback")
+async def link_google_callback(code: str, request: Request, state: Optional[str] = None):
+    """Google 계정 연동 콜백 처리"""
+    try:
+        import httpx
+
+        # state에서 정보 추출
+        redirect_scheme = "frontend://link-success"
+        if state:
+            try:
+                state_data = json.loads(state)
+                if state_data.get("redirect_scheme"):
+                    redirect_scheme = state_data.get("redirect_scheme")
+            except:
+                pass
+
+        print("🔗 Google 계정 연동 콜백 시작...")
+
+        # 1) 액세스 토큰 교환
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            token_response = await client.post(token_url, data=token_data)
+            token_response.raise_for_status()
+            tokens = token_response.json()
+
+        # 만료 시각 계산
+        expires_in = tokens.get("expires_in", 3600)
+        token_expiry = (dt.datetime.utcnow() + dt.timedelta(seconds=expires_in)).isoformat()
+
+        # 2) Google 사용자 정보 가져오기
+        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            user_response = await client.get(user_info_url, headers=headers)
+            user_response.raise_for_status()
+            google_user = user_response.json()
+
+        google_id = google_user.get("id")
+        
+        # 3) 현재 로그인된 사용자 정보 가져오기 (세션 또는 쿠키에서)
+        # 이 예제에서는 state에 user_id를 포함시키거나, 
+        # 프론트에서 JWT를 함께 보내는 방식 사용
+        
+        # 연동 완료 토큰 생성 (프론트엔드에서 처리)
+        link_token = jwt.encode({
+            "google_id": google_id,
+            "access_token": tokens.get("access_token"),
+            "refresh_token": tokens.get("refresh_token"),
+            "token_expiry": token_expiry,
+            "exp": dt.datetime.utcnow() + dt.timedelta(minutes=10)
+        }, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+        # 리다이렉트
+        separator = "&" if "?" in redirect_scheme else "?"
+        final_redirect_url = f"{redirect_scheme}{separator}link_token={link_token}"
+        return RedirectResponse(url=final_redirect_url)
+
+    except Exception as e:
+        print(f"❌ Google 연동 콜백 오류: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/link/google/complete")
+async def complete_google_link(request: Request):
+    """Google 계정 연동 완료 (프론트엔드에서 JWT와 link_token 전송)"""
+    try:
+        body = await request.json()
+        link_token = body.get("link_token")
+        
+        if not link_token:
+            raise HTTPException(status_code=400, detail="link_token이 필요합니다.")
+        
+        # link_token 검증
+        payload = jwt.decode(link_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        
+        # 현재 사용자 정보 가져오기
+        current_user = await AuthService.get_current_user(request)
+        user_id = current_user["id"]
+        
+        # Google 계정 연결
+        await AuthRepository.link_google_to_user(
+            user_id=user_id,
+            google_id=payload["google_id"],
+            access_token=payload["access_token"],
+            refresh_token=payload.get("refresh_token"),
+            token_expiry=payload.get("token_expiry")
+        )
+        
+        return {"message": "Google 계정이 연동되었습니다.", "success": True}
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="연동 토큰이 만료되었습니다.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="유효하지 않은 연동 토큰입니다.")
+    except Exception as e:
+        print(f"❌ Google 연동 완료 오류: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/google")
 async def google_auth(request: Request, redirect_scheme: Optional[str] = None):
@@ -162,6 +382,28 @@ async def google_auth_callback(code: str, request: Request, state: Optional[str]
             user_response.raise_for_status()
             user_info = user_response.json()
             print(f"✅ Google 사용자 정보: {user_info.get('email')}, {user_info.get('name')}")
+
+        # [NEW] Link 액션 처리 (Apple 로그인 사용자의 Google 계정 연동)
+        if state:
+            try:
+                state_data = json.loads(state)
+                if state_data.get("action") == "link":
+                    # 연동 완료 토큰 생성
+                    link_token = jwt.encode({
+                        "google_id": user_info.get("id"),
+                        "access_token": tokens.get("access_token"),
+                        "refresh_token": tokens.get("refresh_token"),
+                        "token_expiry": token_expiry,
+                        "exp": dt.datetime.utcnow() + dt.timedelta(minutes=10)
+                    }, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+                    # 리다이렉트
+                    separator = "&" if "?" in redirect_scheme else "?"
+                    final_redirect_url = f"{redirect_scheme}{separator}link_token={link_token}"
+                    print(f"🔗 Google 연동 완료, 리다이렉트: {final_redirect_url}")
+                    return RedirectResponse(url=final_redirect_url)
+            except:
+                pass
 
         # 3) 기존 사용자 확인
         try:
