@@ -579,62 +579,74 @@ async def get_user_sessions(
                 # [FIX] 현재 세션의 thread_id (같은 thread = 같은 일정 요청)
                 my_thread_id = place_pref.get("thread_id") or session_id
                 
+                # [NEW] 빠르고 정확한 조회를 위해 전체 세션 ID 매핑 생성
+                if 'my_sessions_map' not in locals():
+                    my_sessions_map = {s['id']: s for s in sessions}
+
+                # [NEW] Enriched Session Map for resolving participant names
+                # grouped_sessions은 이미 place_pref가 파싱되고 participant_names가 채워져 있음
+                enriched_thread_map = {}
+                for gs in grouped_sessions:
+                    gs_pref = gs.get("place_pref", {})
+                    tid = gs_pref.get("thread_id") or gs.get("id")
+                    enriched_thread_map[tid] = gs
+
                 # [NEW] DB에 저장된 충돌 세션의 제목을 동적으로 보완
-                # 기존 데이터에 "일정" 또는 "확정된 일정"만 있는 경우 실제 제목으로 대체
-                # [FIX] rejected 상태인 세션 및 같은 thread_id인 세션은 충돌 목록에서 제외
                 enriched_conflicts = []
                 for conflict in db_conflicts:
                     conflict_id = conflict.get("id") or conflict.get("session_id")
                     conflict_title = conflict.get("title", "")
                     
-                    # grouped_sessions에서 해당 세션을 찾아서 상태 확인 및 제목 보완
-                    conflict_session = None
-                    for gs in grouped_sessions:
-                        if gs.get("id") == conflict_id:
-                            conflict_session = gs
-                            break
+                    # [FIX] 내 세션 목록(my_sessions_map)에서 조회
+                    conflict_session = my_sessions_map.get(conflict_id)
                     
+                    # 세션을 찾지 못한 경우(내가 참여자가 아님) -> 충돌 목록에서 제외
+                    if not conflict_session:
+                        continue
+
                     # [FIX] 충돌 세션의 상태가 rejected면 충돌 목록에서 제외
-                    if conflict_session:
-                        conflict_status = conflict_session.get("status", "").lower()
-                        if conflict_status == "rejected":
-                            continue  # rejected 상태인 세션은 충돌로 간주하지 않음
-                        
-                        # [FIX] 같은 thread_id인 세션은 같은 일정 요청의 일부이므로 충돌 아님
-                        conflict_pref = conflict_session.get("place_pref", {})
-                        if isinstance(conflict_pref, str):
-                            try: conflict_pref = json.loads(conflict_pref)
-                            except: conflict_pref = {}
-                        conflict_thread_id = conflict_pref.get("thread_id") or conflict_id
-                        if my_thread_id == conflict_thread_id:
-                            continue  # 같은 일정 그룹은 충돌로 보지 않음
+                    conflict_status = conflict_session.get("status", "").lower()
+                    if conflict_status == "rejected":
+                        continue
                     
-                    # 제목 보완 (제목이 없거나 기본값인 경우)
-                    if conflict_session and (not conflict_title or conflict_title in ["일정", "확정된 일정", "새 일정"]):
-                        gs_pref = conflict_session.get("place_pref", {})
-                        if isinstance(gs_pref, str):
-                            try: gs_pref = json.loads(gs_pref)
-                            except: gs_pref = {}
-                        
+                    # [FIX] 같은 thread_id인 세션은 같은 일정 요청의 일부이므로 충돌 아님
+                    conflict_pref = conflict_session.get("place_pref", {})
+                    if isinstance(conflict_pref, str):
+                        try: conflict_pref = json.loads(conflict_pref)
+                        except: conflict_pref = {}
+                    
+                    conflict_thread_id = conflict_pref.get("thread_id") or conflict_id
+                    if my_thread_id == conflict_thread_id:
+                        continue
+
+                    # Enriched Session 조회 (참여자 이름 등 확보)
+                    enriched_session = enriched_thread_map.get(conflict_thread_id)
+                    
+                    # 제목 보완
+                    if not conflict_title or conflict_title in ["일정", "확정된 일정", "새 일정"]:
                         # 제목 결정 (purpose > summary > 참여자 이름)
-                        new_title = gs_pref.get("purpose") or gs_pref.get("summary") or gs_pref.get("activity")
-                        if not new_title:
-                            p_names = conflict_session.get("participant_names", [])
+                        new_title = conflict_pref.get("purpose") or conflict_pref.get("summary") or conflict_pref.get("activity")
+                        
+                        if not new_title and enriched_session:
+                            p_names = enriched_session.get("participant_names", [])
                             if p_names:
-                                new_title = f"{', '.join(p_names)}와 약속"
+                                other_names = [n for n in p_names if n != "나"] # '나' 제외 (필요시)
+                                if other_names:
+                                    new_title = f"{', '.join(other_names)}와 약속"
+                                else:
+                                    new_title = "약속"
                         
                         if new_title:
                             conflict_title = new_title
                         
-                        # 참여자 이름도 보완
-                        if not conflict.get("participant_names"):
-                            conflict["participant_names"] = conflict_session.get("participant_names", [])
+                    # 참여자 이름 보완
+                    if not conflict.get("participant_names") and enriched_session:
+                        conflict["participant_names"] = enriched_session.get("participant_names", [])
                     
                     conflict["title"] = conflict_title or "일정"
                     enriched_conflicts.append(conflict)
                 
                 # [FIX] 필터링된 충돌 목록 기반으로 has_conflict 재계산
-                # DB에 저장된 충돌 정보 중 rejected 상태가 된 세션은 제외되었으므로 길이 기반으로 판단
                 has_conflict = len(enriched_conflicts) > 0
                 conflicting_sessions = enriched_conflicts
             
