@@ -3,6 +3,11 @@ node_modules/
 
 # 환경 변수 파일
 .env
+.env
+.env.*
+*.env
+*.env.*
+.env.backup
 
 # 로그 파일
 *.log
@@ -25,7 +30,28 @@ __pycache__/
 *.pyc
 
 # 개별 경로만
-git rm --cached src/calendar/__pycache__/router.cpython-313.pyc
+# Meta Llama model weights
+*.safetensors
+*.gguf
+models/
 
-# 디렉터리 통째로(권장)
-git rm -r --cached src/calendar/__pycache__/
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug logs
+debug_log.txt

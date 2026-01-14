@@ -7,10 +7,13 @@ import uuid
 class UserBase(BaseModel):
     email: EmailStr
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
 
 class UserCreate(UserBase):
     password: Optional[str] = None
     google_id: Optional[str] = None
+    terms_agreed: Optional[bool] = False  # 약관 동의 여부
+    terms_agreed_at: Optional[datetime] = None  # 약관 동의 시각
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -18,6 +21,7 @@ class UserLogin(BaseModel):
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     profile_image: Optional[str] = None
@@ -29,6 +33,8 @@ class User(UserBase):
     refresh_token: Optional[str] = None
     profile_image: Optional[str] = None
     status: Optional[bool] = None
+    terms_agreed: Optional[bool] = False  # 약관 동의 여부
+    terms_agreed_at: Optional[datetime] = None  # 약관 동의 시각
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -51,6 +57,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     profile_image: Optional[str] = None
     created_at: Optional[datetime] = None
 
@@ -58,10 +65,17 @@ class UserProfileResponse(BaseModel):
     id: uuid.UUID
     email: str
     name: Optional[str] = None
+    handle: Optional[str] = None  # handle 추가
     profile_image: Optional[str] = None
     status: Optional[bool] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
 class MessageResponse(BaseModel):
-    message: str 
+    message: str
+
+class UserRegisterRequest(BaseModel):
+    register_token: str
+    name: str
+    handle: str
+    terms_agreed: bool = True  # 약관 동의 여부 (필수)

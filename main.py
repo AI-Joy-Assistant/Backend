@@ -1,12 +1,22 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from config.settings import settings
-from src.auth.router import router as auth_router
-from src.chat.router import router as chat_router
-from src.friends.router import router as friends_router
-from src.calendar.router import router as calendar_router
+from src.auth.auth_router import router as auth_router
+from src.chat.chat_router import router as chat_router
+from src.friends.friends_router import router as friends_router
+from src.calendar.calender_router import router as calendar_router
+from src.a2a.a2a_router import router as a2a_router
+from src.intent.router import router as intent_router
+from src.websocket.websocket_manager import manager as ws_manager
+import logging
 
+# httpx (Supabase 통신) 로그 숨기기
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# uvicorn 접속 로그 (GET /chat/history ... 200 OK) 숨기기
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 # FastAPI 애플리케이션 생성
 app = FastAPI(
     title="AI Joy Assistant Backend API",
@@ -37,6 +47,8 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(friends_router)
 app.include_router(calendar_router)
+app.include_router(a2a_router)
+app.include_router(intent_router)
 
 @app.get("/")
 async def root():
@@ -62,6 +74,21 @@ async def debug():
         "supabase_url": settings.SUPABASE_URL if settings.SUPABASE_URL else "NOT_SET",
         "google_redirect_uri": settings.GOOGLE_REDIRECT_URI if settings.GOOGLE_REDIRECT_URI else "NOT_SET"
     }
+
+
+# WebSocket 엔드포인트 - 실시간 알림용
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    """WebSocket 연결 - 실시간 알림 수신"""
+    await ws_manager.connect(websocket, user_id)
+    try:
+        while True:
+            # 클라이언트로부터 메시지 수신 (ping/pong 또는 앱 상태 업데이트용)
+            data = await websocket.receive_text()
+            # 필요시 처리 (예: 읽음 확인 등)
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket, user_id)
+
 
 if __name__ == "__main__":
     import uvicorn

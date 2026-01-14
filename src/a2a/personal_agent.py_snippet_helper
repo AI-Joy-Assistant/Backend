@@ -1,0 +1,21 @@
+    def _format_proposal_string(self, proposal: Proposal) -> str:
+        """제안을 문자열로 변환 (다박 일정 처리 포함)"""
+        try:
+            duration_nights = getattr(proposal, 'duration_nights', 0)
+            
+            if duration_nights > 0:
+                # 시작일
+                start_weekday = _get_weekday_korean(proposal.date)
+                start_dt = datetime.strptime(proposal.date, "%Y-%m-%d")
+                
+                # 종료일 계산
+                end_dt = start_dt + timedelta(days=duration_nights)
+                end_date_str = end_dt.strftime("%Y-%m-%d")
+                end_weekday = _get_weekday_korean(end_date_str)
+                
+                return f"{start_dt.month}월 {start_dt.day}일 {start_weekday} ~ {end_dt.month}월 {end_dt.day}일 {end_weekday} ({duration_nights}박 {duration_nights+1}일)"
+            else:
+                return _format_date_with_weekday(proposal.date, proposal.time)
+        except Exception as e:
+            logger.warning(f"Formatting error: {e}")
+            return f"{proposal.date} {proposal.time}"
