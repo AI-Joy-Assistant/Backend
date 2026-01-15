@@ -36,6 +36,21 @@ class AuthRepository:
             return None
 
     @staticmethod
+    async def find_user_by_apple_id(apple_id: str) -> Optional[Dict[str, Any]]:
+        """Apple ID로 사용자 찾기"""
+        try:
+            print(f"🍎 Apple ID로 사용자 조회: {apple_id[:10]}...")
+            response = supabase.table('user').select('*').eq('apple_id', apple_id).maybe_single().execute()
+            if response is None or not response.data:
+                print(f"❌ Apple ID로 사용자를 찾을 수 없음")
+                return None
+            print(f"✅ Apple ID로 사용자 조회 성공: {response.data.get('email')}")
+            return response.data
+        except Exception as e:
+            print(f"❌ Apple ID로 사용자 조회 오류: {str(e)}")
+            return None
+
+    @staticmethod
     async def create_user(user_data: Dict[str, str]) -> Dict[str, Any]:
         """새 사용자 생성"""
         try:

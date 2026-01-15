@@ -169,11 +169,152 @@ async def get_google_auth_url():
     auth_url = service.get_authorization_url()
     return {"auth_url": auth_url}
 
+# ---------------------------
+# 캘린더 연동 전용 (Apple 로그인 사용자용)
+# ---------------------------
+@router.get("/link-url")
+async def get_calendar_link_url(
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """
+    Apple 로그인 사용자가 Google 캘린더를 연동할 때 사용하는 OAuth URL 반환.
+    state에 사용자 ID를 포함하여 콜백에서 어떤 사용자의 DB에 저장할지 알 수 있음.
+    """
+    import json
+    from urllib.parse import urlencode
+    
+    scopes = [
+        "openid", "email", "profile",
+        "https://www.googleapis.com/auth/calendar",
+    ]
+    
+    # state에 현재 사용자 ID 포함
+    state_data = {
+        "user_id": current_user["id"],
+        "action": "calendar_link",
+        "redirect_scheme": "frontend://calendar-linked"
+    }
+    
+    # 콜백 URI 설정
+    base_uri = settings.GOOGLE_REDIRECT_URI
+    callback_uri = base_uri.replace('/auth/google/callback', '/calendar/link-callback')
+    
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": callback_uri,
+        "scope": " ".join(scopes),
+        "response_type": "code",
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": json.dumps(state_data),
+    }
+    
+    qs = urlencode(params)
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{qs}"
+    
+    logger.info(f"캘린더 연동 URL 생성: user_id={current_user['id']}")
+    return {"auth_url": auth_url, "redirect_uri": callback_uri}
+
+@router.get("/link-callback")
+async def calendar_link_callback(code: str, state: Optional[str] = None):
+    """
+    Google OAuth 콜백 - Apple 로그인 사용자의 DB에 Google 토큰 저장
+    """
+    import json
+    from starlette.responses import RedirectResponse
+    
+    try:
+        # state에서 사용자 ID 및 리다이렉트 스킴 추출
+        user_id = None
+        redirect_scheme = "frontend://calendar-linked"
+        
+        if state:
+            try:
+                state_data = json.loads(state)
+                user_id = state_data.get("user_id")
+                redirect_scheme = state_data.get("redirect_scheme", redirect_scheme)
+            except:
+                pass
+        
+        if not user_id:
+            logger.error("캘린더 연동 콜백: user_id 없음")
+            return RedirectResponse(url=f"{redirect_scheme}?error=no_user_id")
+        
+        logger.info(f"캘린더 연동 콜백 시작: user_id={user_id}")
+        
+        # Google 토큰 교환
+        token_url = "https://oauth2.googleapis.com/token"
+        base_uri = settings.GOOGLE_REDIRECT_URI
+        callback_uri = base_uri.replace('/auth/google/callback', '/calendar/link-callback')
+        
+        token_data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": callback_uri,
+        }
+        
+        async with httpx.AsyncClient(timeout=15) as client:
+            token_response = await client.post(token_url, data=token_data)
+            token_response.raise_for_status()
+            tokens = token_response.json()
+        
+        logger.info(f"캘린더 토큰 교환 성공: user_id={user_id}")
+        
+        # 토큰 만료 시각 계산
+        expires_in = tokens.get("expires_in", 3600)
+        token_expiry = (dt.datetime.utcnow() + dt.timedelta(seconds=expires_in)).isoformat()
+        
+        # 사용자 DB에 Google 토큰 저장
+        await AuthRepository.update_user(
+            user_id,
+            {
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens.get("refresh_token"),
+                "token_expiry": token_expiry,
+                "google_calendar_linked": True,
+            }
+        )
+        
+        logger.info(f"캘린더 연동 완료: user_id={user_id}")
+        
+        # 앱으로 리다이렉트 (성공)
+        return RedirectResponse(url=f"{redirect_scheme}?success=true")
+        
+    except Exception as e:
+        logger.error(f"캘린더 연동 콜백 오류: {str(e)}")
+        return RedirectResponse(url=f"{redirect_scheme}?error={str(e)}")
+
 @router.post("/auth", response_model=GoogleAuthResponse)
-async def authenticate_google(request: GoogleAuthRequest):
+async def authenticate_google(
+    request: GoogleAuthRequest,
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """
+    Apple 로그인 사용자가 Google 캘린더를 연동할 때 사용.
+    Google OAuth 코드로 토큰을 교환하고 현재 사용자의 DB에 저장.
+    """
     try:
         service = GoogleCalendarService()
         token_data = await service.get_access_token(request.code)
+        
+        # 현재 로그인된 사용자의 DB에 Google 토큰 저장
+        now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        new_expiry = (now_utc + dt.timedelta(seconds=token_data.get("expires_in", 3600))).isoformat()
+        
+        await AuthRepository.update_user(
+            current_user["id"],
+            {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "token_expiry": new_expiry,
+                "google_calendar_linked": True,
+            }
+        )
+        logger.info(f"Google 캘린더 토큰 저장 완료: {current_user['email']}")
+        
         return GoogleAuthResponse(
             access_token=token_data["access_token"],
             refresh_token=token_data.get("refresh_token"),
@@ -181,6 +322,7 @@ async def authenticate_google(request: GoogleAuthRequest):
             token_type=token_data["token_type"],
         )
     except Exception as e:
+        logger.error(f"Google 캘린더 인증 실패: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Google 인증 실패: {str(e)}")
 
 # ---------------------------
