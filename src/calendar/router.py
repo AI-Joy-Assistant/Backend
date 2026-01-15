@@ -108,10 +108,34 @@ async def get_google_auth_url():
     return {"auth_url": auth_url}
 
 @router.post("/auth", response_model=GoogleAuthResponse)
-async def authenticate_google(request: GoogleAuthRequest):
+async def authenticate_google(
+    request: GoogleAuthRequest,
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """
+    Apple 로그인 사용자가 Google 캘린더를 연동할 때 사용.
+    Google OAuth 코드로 토큰을 교환하고 현재 사용자의 DB에 저장.
+    """
     try:
         service = GoogleCalendarService()
         token_data = await service.get_access_token(request.code)
+        
+        # 현재 로그인된 사용자의 DB에 Google 토큰 저장
+        import datetime as dt
+        now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        new_expiry = (now_utc + dt.timedelta(seconds=token_data.get("expires_in", 3600))).isoformat()
+        
+        await AuthRepository.update_user(
+            current_user["email"],
+            {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "token_expiry": new_expiry,
+                "google_calendar_linked": True,
+            }
+        )
+        logger.info(f"Google 캘린더 토큰 저장 완료: {current_user['email']}")
+        
         return GoogleAuthResponse(
             access_token=token_data["access_token"],
             refresh_token=token_data.get("refresh_token"),
@@ -119,6 +143,7 @@ async def authenticate_google(request: GoogleAuthRequest):
             token_type=token_data["token_type"],
         )
     except Exception as e:
+        logger.error(f"Google 캘린더 인증 실패: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Google 인증 실패: {str(e)}")
 
 # ---------------------------

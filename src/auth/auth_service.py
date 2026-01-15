@@ -4,12 +4,78 @@ from urllib.parse import urlencode
 from typing import Dict, Any, Optional, Tuple
 import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
+from jwt.algorithms import RSAAlgorithm
+import json
 from fastapi import Request, HTTPException
 from config.settings import settings
 from .auth_repository import AuthRepository
 from .auth_models import LoginResponse, TokenResponse, UserProfileResponse, UserCreate, UserLogin, UserResponse
 
 class AuthService:
+    
+    # Apple 공개키 캐시
+    _apple_public_keys = None
+    _apple_keys_fetched_at = None
+    
+    @staticmethod
+    async def verify_apple_token(identity_token: str) -> Dict[str, Any]:
+        """Apple identity_token 검증 및 사용자 정보 추출"""
+        try:
+            # 1. Apple 공개키 가져오기 (캐시 사용)
+            if (AuthService._apple_public_keys is None or 
+                AuthService._apple_keys_fetched_at is None or
+                (datetime.utcnow() - AuthService._apple_keys_fetched_at).total_seconds() > 86400):
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.get("https://appleid.apple.com/auth/keys")
+                    response.raise_for_status()
+                    AuthService._apple_public_keys = response.json()["keys"]
+                    AuthService._apple_keys_fetched_at = datetime.utcnow()
+                    print("✅ Apple 공개키 가져오기 성공")
+            
+            # 2. 토큰 헤더에서 kid 추출
+            unverified_header = jwt.get_unverified_header(identity_token)
+            kid = unverified_header.get("kid")
+            
+            # 3. 해당 kid에 맞는 공개키 찾기
+            public_key = None
+            for key in AuthService._apple_public_keys:
+                if key["kid"] == kid:
+                    public_key = RSAAlgorithm.from_jwk(json.dumps(key))
+                    break
+            
+            if not public_key:
+                raise Exception("Apple 공개키를 찾을 수 없습니다.")
+            
+            # 4. 토큰 검증
+            payload = jwt.decode(
+                identity_token,
+                public_key,
+                algorithms=["RS256"],
+                audience=settings.GOOGLE_CLIENT_ID.split(".")[0] + ".com.joyner.app",  # Bundle ID 형식
+                issuer="https://appleid.apple.com"
+            )
+            
+            # 5. 사용자 정보 추출
+            email = payload.get("email")
+            apple_user_id = payload.get("sub")
+            
+            if not email and not apple_user_id:
+                raise Exception("Apple 토큰에서 사용자 정보를 추출할 수 없습니다.")
+            
+            return {
+                "apple_id": apple_user_id,
+                "email": email,
+                "email_verified": payload.get("email_verified", False)
+            }
+            
+        except jwt.ExpiredSignatureError:
+            raise Exception("Apple 토큰이 만료되었습니다.")
+        except jwt.InvalidTokenError as e:
+            raise Exception(f"유효하지 않은 Apple 토큰입니다: {str(e)}")
+        except Exception as e:
+            print(f"❌ Apple 토큰 검증 실패: {str(e)}")
+            raise Exception(f"Apple 토큰 검증 실패: {str(e)}")
     
     @staticmethod
     def create_jwt_access_token(user: Dict[str, Any]) -> str:
