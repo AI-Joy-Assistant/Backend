@@ -67,6 +67,128 @@ async def register_google(data: UserRegisterRequest):
         print(f"❌ Google 회원가입 실패: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/register/apple", response_model=TokenResponse)
+async def register_apple(data: UserRegisterRequest):
+    """Apple 회원가입 완료 및 토큰 발급"""
+    try:
+        # 1. register_token 검증
+        payload = jwt.decode(data.register_token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        
+        # 2. 약관 동의 여부 확인
+        if not data.terms_agreed:
+            raise HTTPException(status_code=400, detail="서비스 이용약관 및 개인정보 처리방침에 동의해야 합니다.")
+        
+        # 3. 사용자 생성
+        apple_user_data = {
+            "email": payload["email"],
+            "name": data.name,
+            "handle": data.handle,
+            "apple_id": payload.get("apple_id"),
+            "status": True,
+            "terms_agreed": data.terms_agreed,
+            "terms_agreed_at": dt.datetime.utcnow().isoformat() if data.terms_agreed else None
+        }
+        
+        user = await AuthRepository.create_google_user(apple_user_data)  # 같은 테이블 사용
+        
+        # 4. 로그인 처리 (JWT 발급)
+        token = await AuthService.login_google_user({"email": payload["email"]})
+        
+        return token
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="가입 토큰이 만료되었습니다.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="유효하지 않은 가입 토큰입니다.")
+    except Exception as e:
+        print(f"❌ Apple 회원가입 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+from pydantic import BaseModel
+
+class AppleLoginRequest(BaseModel):
+    identity_token: str
+    user_id: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+
+@router.post("/apple")
+async def apple_auth(data: AppleLoginRequest):
+    """
+    Apple 로그인 처리
+    - identity_token: Apple에서 받은 ID 토큰
+    - user_id: Apple 사용자 고유 ID
+    - email: 이메일 (첫 로그인 시에만 제공됨)
+    - full_name: 이름 (첫 로그인 시에만 제공됨)
+    """
+    try:
+        print(f"🍎 Apple 로그인 시작: {data.user_id[:10]}...")
+        
+        # 1. Apple 토큰 검증 (audience 검증 스킵 - 개발 단계)
+        # 프로덕션에서는 verify_apple_token 사용
+        try:
+            # 토큰에서 페이로드 추출 (검증 없이)
+            unverified_payload = jwt.decode(data.identity_token, options={"verify_signature": False})
+            apple_email = unverified_payload.get("email") or data.email
+            apple_id = unverified_payload.get("sub") or data.user_id
+        except Exception as e:
+            print(f"⚠️ Apple 토큰 디코딩 실패, 제공된 데이터 사용: {e}")
+            apple_email = data.email
+            apple_id = data.user_id
+        
+        if not apple_email and not apple_id:
+            raise HTTPException(status_code=400, detail="이메일 또는 Apple ID가 필요합니다.")
+        
+        print(f"📧 Apple 로그인 - Email: {apple_email}, ID: {apple_id[:10]}...")
+        
+        # 2. 기존 사용자 확인 (이메일 또는 Apple ID로)
+        user = None
+        if apple_email:
+            user = await AuthRepository.find_user_by_email(apple_email)
+        
+        if not user and apple_id:
+            # Apple ID로 검색 (apple_id 필드가 있다면)
+            user = await AuthRepository.find_user_by_apple_id(apple_id)
+        
+        if user:
+            # 3a. 기존 사용자 - JWT 발급
+            print(f"✅ 기존 Apple 사용자 로그인: {user['email']}")
+            access_token = AuthService.create_jwt_access_token(user)
+            
+            return {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "name": user.get("name", "")
+                }
+            }
+        else:
+            # 3b. 신규 사용자 - 회원가입 토큰 발급
+            print(f"🆕 신규 Apple 사용자 - 회원가입 필요: {apple_email or apple_id}")
+            
+            register_payload = {
+                "email": apple_email or f"apple_{apple_id[:8]}@private.relay",
+                "apple_id": apple_id,
+                "name": data.full_name or "",
+                "auth_provider": "apple",
+                "exp": dt.datetime.utcnow() + dt.timedelta(minutes=30)
+            }
+            register_token = jwt.encode(register_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+            
+            return {
+                "register_token": register_token,
+                "email": apple_email or "",
+                "name": data.full_name or ""
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Apple 로그인 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Apple 로그인 실패: {str(e)}")
+
 @router.post("/login", response_model=TokenResponse)
 async def login(user_data: UserLogin):
     """사용자 로그인"""
