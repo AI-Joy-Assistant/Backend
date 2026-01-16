@@ -76,6 +76,7 @@ async def debug():
     }
 
 
+
 # WebSocket 엔드포인트 - 실시간 알림용
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
@@ -89,6 +90,24 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, user_id)
 
+# 정적 파일 서빙 (개인정보처리방침, 이용약관)
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+# static 디렉토리가 존재할 경우에만 마운트
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/privacy", response_class=FileResponse)
+    async def privacy_policy():
+        return FileResponse(os.path.join(static_dir, "privacy.html"))
+
+    @app.get("/terms", response_class=FileResponse)
+    async def terms_of_service():
+        return FileResponse(os.path.join(static_dir, "terms.html"))
+
 
 if __name__ == "__main__":
     import uvicorn
@@ -97,4 +116,4 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         reload=True
-    ) 
+    )
