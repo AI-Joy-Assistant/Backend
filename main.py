@@ -52,6 +52,9 @@ app.include_router(intent_router)
 
 @app.get("/")
 async def root():
+    # 정적 파일이 있으면 index.html 반환
+    if os.path.exists(os.path.join(static_dir, "index.html")):
+        return FileResponse(os.path.join(static_dir, "index.html"))
     return {"message": "AI Joy Assistant Backend API v1.0.0"}
 
 @app.get("/debug")
