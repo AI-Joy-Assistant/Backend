@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:19006",
-    "http://127.0.0.1:19006",# Expo 웹 대체 포트
+    "http://127.0.0.1:19006",  # Expo 웹 대체 포트
+    "https://joyner.co.kr",
+    "https://www.joyner.co.kr",
+    "https://joynerweb.vercel.app",
     ]
     CORS_CREDENTIALS: bool = True
 
