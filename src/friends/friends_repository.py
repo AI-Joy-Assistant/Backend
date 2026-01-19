@@ -92,6 +92,18 @@ class FriendsRepository:
             
             request = request_response.data[0]
             
+            # 이미 수락된 요청인지 확인
+            if request['follow_status'] != 'pending':
+                return {"success": False, "message": "이미 처리된 요청입니다."}
+            
+            # 이미 친구인지 확인 (중복 방지)
+            existing_friend = self.supabase.table('friend_list').select('*').eq('user_id', request['request_id']).eq('friend_id', request['receiver_id']).eq('status', True).execute()
+            
+            if existing_friend.data:
+                # 이미 친구인 경우, 요청만 accept로 변경하고 종료
+                self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+                return {"success": True, "message": "이미 친구입니다.", "from_user_id": request['request_id']}
+            
             # 요청 상태를 accept로 변경
             self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
             

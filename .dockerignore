@@ -1,0 +1,35 @@
+# 환경 파일 (중요! - 보안)
+.env
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Git
+.git/
+.gitignore
+
+# 로그 파일
+*.log
+debug_*.log
+
+# IDE
+.vscode/
+.idea/
+
+# 테스트
+*.test.py
+test_*.py
+.pytest_cache/
+
+# 문서
+*.md
+!README.md
