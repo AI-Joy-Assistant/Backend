@@ -52,6 +52,11 @@ app.include_router(intent_router)
 
 @app.get("/")
 async def root():
+    # Serve landing page if static/index.html exists
+    index_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(index_path):
+        from fastapi.responses import FileResponse
+        return FileResponse(index_path, media_type="text/html")
     return {"message": "AI Joy Assistant Backend API v1.0.0"}
 
 @app.get("/debug")
