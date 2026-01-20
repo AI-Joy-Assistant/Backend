@@ -52,6 +52,7 @@ app.include_router(intent_router)
 
 @app.get("/")
 async def root():
+    import os
     # Serve landing page if static/index.html exists
     index_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     if os.path.exists(index_path):
