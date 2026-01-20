@@ -129,6 +129,53 @@ class FriendsRepository:
             print(f"친구 요청 수락 오류: {e}")
             return {"success": False, "message": "친구 요청 수락 중 오류가 발생했습니다."}
     
+    async def accept_friend_request_as_guide(self, request_id: str, guide_user_id: str) -> Dict[str, Any]:
+        """튜토리얼 가이드 계정 입장에서 친구 요청 자동 수락 (receiver_id 체크 생략)"""
+        try:
+            # 친구 요청 조회 (receiver_id 체크 없이)
+            request_response = self.supabase.table('friend_follow').select('*').eq('id', request_id).execute()
+            
+            if not request_response.data:
+                return {"success": False, "message": "친구 요청을 찾을 수 없습니다."}
+            
+            request = request_response.data[0]
+            
+            # 이미 수락된 요청인지 확인
+            if request['follow_status'] != 'pending':
+                return {"success": False, "message": "이미 처리된 요청입니다."}
+            
+            # 이미 친구인지 확인 (중복 방지)
+            existing_friend = self.supabase.table('friend_list').select('*').eq('user_id', request['request_id']).eq('friend_id', request['receiver_id']).eq('status', True).execute()
+            
+            if existing_friend.data:
+                self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+                return {"success": True, "message": "이미 친구입니다.", "from_user_id": request['request_id']}
+            
+            # 요청 상태를 accept로 변경
+            self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+            
+            # 친구 관계 생성 (양방향)
+            friend_data1 = {
+                "user_id": request['request_id'],
+                "friend_id": request['receiver_id'],
+                "status": True,
+                "created_at": datetime.now().isoformat()
+            }
+            
+            friend_data2 = {
+                "user_id": request['receiver_id'],
+                "friend_id": request['request_id'],
+                "status": True,
+                "created_at": datetime.now().isoformat()
+            }
+            
+            self.supabase.table('friend_list').insert([friend_data1, friend_data2]).execute()
+            
+            return {"success": True, "message": "튜토리얼 친구 요청을 수락했습니다.", "from_user_id": request['request_id']}
+        except Exception as e:
+            print(f"튜토리얼 친구 요청 수락 오류: {e}")
+            return {"success": False, "message": "튜토리얼 친구 요청 수락 중 오류가 발생했습니다."}
+    
     async def reject_friend_request(self, request_id: str, user_id: str) -> Dict[str, Any]:
         """친구 요청 거절"""
         try:
