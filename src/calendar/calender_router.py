@@ -161,6 +161,30 @@ async def _ensure_access_token_by_user_id(user_id: str) -> str:
     return new_access
 
 # ---------------------------
+# 캘린더 연동 상태 확인
+# ---------------------------
+@router.get("/link-status")
+async def get_calendar_link_status(
+    current_user: dict = Depends(AuthService.get_current_user)
+):
+    """
+    현재 사용자의 Google 캘린더 연동 여부를 확인합니다.
+    Apple 로그인 사용자가 캘린더를 연동했는지 확인하는 데 사용됩니다.
+    """
+    try:
+        db_user = await AuthRepository.find_user_by_id(current_user["id"])
+        if not db_user:
+            return {"is_linked": False}
+        
+        # google_calendar_linked 필드 또는 refresh_token 존재 여부로 확인
+        is_linked = db_user.get("google_calendar_linked", False) or bool(db_user.get("refresh_token"))
+        
+        return {"is_linked": is_linked}
+    except Exception as e:
+        logger.error(f"캘린더 연동 상태 확인 실패: {str(e)}")
+        return {"is_linked": False}
+
+# ---------------------------
 # OAuth (선택 유지)
 # ---------------------------
 @router.get("/auth-url")
