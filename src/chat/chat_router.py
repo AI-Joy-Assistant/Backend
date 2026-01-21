@@ -4,10 +4,10 @@ from typing import Optional
 import jwt
 import logging
 from config.settings import settings
+from config.database import supabase, get_async_supabase
 from .chat_service import ChatService
 from .chat_models import SendMessageRequest, ChatRoomListResponse, ChatMessagesResponse, AIChatRequest
 from .chat_repository import ChatRepository
-from config.database import supabase
 
 logger = logging.getLogger(__name__)
 
@@ -201,16 +201,19 @@ async def get_or_create_default_session(
 ):
     """
     사용자의 기본 채팅 세션을 조회하거나 없으면 생성합니다.
-    기존 session_id가 NULL인 메시지들을 이 세션으로 마이그레이션합니다.
+    [최적화] Async Supabase + 백그라운드 마이그레이션
     """
+    import asyncio
+    
     try:
+        client = await get_async_supabase()
+        
         # 1. "기본 채팅" 제목의 세션이 있는지 확인
-        existing = supabase.table("chat_sessions").select("*").eq(
+        existing = await client.table("chat_sessions").select("id, title, created_at, updated_at").eq(
             "user_id", current_user_id
-        ).eq("title", "기본 채팅").execute()
+        ).eq("title", "기본 채팅").limit(1).execute()
         
         if existing.data and len(existing.data) > 0:
-            # 이미 기본 채팅 세션이 있음
             session = existing.data[0]
             return {
                 "id": session["id"],
@@ -221,7 +224,7 @@ async def get_or_create_default_session(
             }
         
         # 2. 기본 채팅 세션 생성
-        new_session = supabase.table("chat_sessions").insert({
+        new_session = await client.table("chat_sessions").insert({
             "user_id": current_user_id,
             "title": "기본 채팅",
         }).execute()
@@ -232,10 +235,17 @@ async def get_or_create_default_session(
         session = new_session.data[0]
         session_id = session["id"]
         
-        # 3. 기존 session_id가 NULL인 메시지들을 새 세션으로 마이그레이션
-        supabase.table("chat_log").update({
-            "session_id": session_id
-        }).eq("user_id", current_user_id).is_("session_id", "null").execute()
+        # 3. 마이그레이션을 백그라운드 태스크로 실행
+        async def migrate_old_messages():
+            try:
+                bg_client = await get_async_supabase()
+                await bg_client.table("chat_log").update({
+                    "session_id": session_id
+                }).eq("user_id", current_user_id).is_("session_id", "null").execute()
+            except Exception as e:
+                logger.warning(f"메시지 마이그레이션 실패: {e}")
+        
+        asyncio.create_task(migrate_old_messages())
         
         return {
             "id": session_id,
@@ -254,12 +264,10 @@ async def get_or_create_default_session(
 async def get_chat_sessions(
     current_user_id: str = Depends(get_current_user_id)
 ):
-    """
-    사용자의 채팅 세션 목록을 조회합니다.
-    최신순으로 정렬되어 반환됩니다.
-    """
+    """사용자의 채팅 세션 목록을 조회합니다."""
     try:
-        res = supabase.table("chat_sessions").select("*").eq(
+        client = await get_async_supabase()
+        res = await client.table("chat_sessions").select("id, title, created_at, updated_at").eq(
             "user_id", current_user_id
         ).order("updated_at", desc=True).execute()
         
@@ -270,7 +278,7 @@ async def get_chat_sessions(
                 "title": session.get("title", "새 채팅"),
                 "created_at": session.get("created_at"),
                 "updated_at": session.get("updated_at"),
-                "is_default": session.get("title") == "기본 채팅",  # 기본 채팅 여부 표시
+                "is_default": session.get("title") == "기본 채팅",
             })
         
         return {"sessions": sessions}
@@ -552,22 +560,32 @@ async def get_notifications(
             "created_at", desc=True
         ).limit(30).execute()
         
+        # [최적화] 모든 user_id를 먼저 수집하여 배치 조회
+        all_user_ids = set()
+        for log in (logs.data or []):
+            metadata = log.get("metadata", {}) or {}
+            friend_id = log.get("friend_id")
+            target_user_id = friend_id or metadata.get("rejected_by") or metadata.get("left_user_id")
+            if target_user_id:
+                all_user_ids.add(target_user_id)
+        
+        # [최적화] 한 번의 쿼리로 모든 사용자 이름 조회
+        user_name_map = {}
+        if all_user_ids:
+            try:
+                users_res = supabase.table("user").select("id, name").in_("id", list(all_user_ids)).execute()
+                user_name_map = {u["id"]: u.get("name", "상대방") for u in (users_res.data or [])}
+            except Exception as e:
+                logger.warning(f"사용자 이름 배치 조회 실패: {e}")
+        
         for log in (logs.data or []):
             msg_type = log.get("message_type")
             metadata = log.get("metadata", {}) or {}
             friend_id = log.get("friend_id")
             
-            # 상대방 이름 조회
+            # [최적화] 맵에서 조회 (DB 호출 없음)
             target_user_id = friend_id or metadata.get("rejected_by") or metadata.get("left_user_id")
-            target_user_name = "상대방"
-            
-            if target_user_id:
-                try:
-                    user_res = supabase.table("user").select("name").eq("id", target_user_id).execute()
-                    if user_res.data:
-                        target_user_name = user_res.data[0].get("name", "상대방")
-                except:
-                    pass
+            target_user_name = user_name_map.get(target_user_id, "상대방") if target_user_id else "상대방"
             
             if msg_type == "schedule_rejection":
                 # 일정 거절 메시지 구성
