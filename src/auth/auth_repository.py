@@ -28,7 +28,7 @@ class AuthRepository:
         """ID로 사용자 찾기 - 최적화됨"""
         try:
             client = await AuthRepository._get_client()
-            response = await client.table('user').select('id, email, name, profile_image, handle, auth_provider, created_at').eq('id', user_id).limit(1).execute()
+            response = await client.table('user').select('id, email, name, profile_image, handle, created_at').eq('id', user_id).limit(1).execute()
             if not response.data:
                 return None
             return response.data[0]
