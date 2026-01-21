@@ -643,8 +643,24 @@ async def get_multi_user_free_slots(
         if not user_ids:
             raise HTTPException(status_code=400, detail="user_ids가 필요합니다.")
         
-        # 현재 사용자 + 선택된 친구들
-        all_user_ids = [current_user["id"]] + user_ids
+        # [FIX] 가상 사용자 ID 필터링 (tutorial_guide_joyner 등 UUID가 아닌 ID 제외)
+        import uuid
+        def is_valid_uuid(val):
+            try:
+                uuid.UUID(str(val))
+                return True
+            except ValueError:
+                return False
+        
+        # UUID가 아닌 ID는 제외하고 경고 로그 출력
+        invalid_ids = [uid for uid in user_ids if not is_valid_uuid(uid)]
+        if invalid_ids:
+            logger.warning(f"[MULTI-FREE] 유효하지 않은 사용자 ID 제외: {invalid_ids}")
+        
+        valid_user_ids = [uid for uid in user_ids if is_valid_uuid(uid)]
+        
+        # 현재 사용자 + 선택된 친구들 (유효한 ID만)
+        all_user_ids = [current_user["id"]] + valid_user_ids
         total_participants = len(all_user_ids)
         
         service = GoogleCalendarService()
