@@ -1,35 +1,31 @@
 from typing import List, Dict, Any, Optional
-from supabase import create_client, Client
+from config.database import get_async_supabase
 from config.settings import settings
 from datetime import datetime
 import uuid
 
 class FriendsRepository:
-    def __init__(self):
-        self.supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+    """친구 관련 데이터베이스 작업 - Async 버전"""
+    
+    async def _get_client(self):
+        """비동기 Supabase 클라이언트 반환"""
+        return await get_async_supabase()
     
     async def get_user_by_email_or_handle(self, identifier: str) -> Optional[Dict[str, Any]]:
         """이메일 또는 handle로 사용자 조회"""
         try:
-            print(f"🔍 사용자 검색 시작: identifier='{identifier}'")
+            client = await self._get_client()
             
             # 먼저 이메일로 검색
-            print(f"📧 이메일로 검색 중...")
-            response = self.supabase.table('user').select('*').eq('email', identifier).execute()
-            print(f"📧 이메일 검색 결과: {len(response.data) if response.data else 0}개")
+            response = await client.table('user').select('id, name, email, profile_image, handle').eq('email', identifier).limit(1).execute()
             if response.data:
-                print(f"✅ 이메일로 사용자 찾음: {response.data[0].get('name')}")
                 return response.data[0]
             
             # 이메일로 찾지 못하면 handle로 검색
-            print(f"🏷️ handle로 검색 중...")
-            response = self.supabase.table('user').select('*').eq('handle', identifier).execute()
-            print(f"🏷️ handle 검색 결과: {len(response.data) if response.data else 0}개")
+            response = await client.table('user').select('id, name, email, profile_image, handle').eq('handle', identifier).limit(1).execute()
             if response.data:
-                print(f"✅ handle로 사용자 찾음: {response.data[0].get('name')}")
                 return response.data[0]
             
-            print(f"❌ 사용자를 찾을 수 없음 (이메일/handle 모두 실패)")
             return None
         except Exception as e:
             print(f"사용자 조회 오류: {e}")
@@ -38,7 +34,8 @@ class FriendsRepository:
     async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         """사용자 ID로 조회"""
         try:
-            response = self.supabase.table('user').select('*').eq('id', user_id).execute()
+            client = await self._get_client()
+            response = await client.table('user').select('id, name, email, profile_image').eq('id', user_id).limit(1).execute()
             return response.data[0] if response.data else None
         except Exception as e:
             print(f"사용자 조회 오류: {e}")
@@ -47,14 +44,16 @@ class FriendsRepository:
     async def create_friend_request(self, from_user_id: str, to_user_id: str) -> Dict[str, Any]:
         """친구 요청 생성"""
         try:
+            client = await self._get_client()
+            
             # 이미 친구 요청이 있는지 확인
-            existing_request = self.supabase.table('friend_follow').select('*').eq('request_id', from_user_id).eq('receiver_id', to_user_id).eq('follow_status', 'pending').execute()
+            existing_request = await client.table('friend_follow').select('id').eq('request_id', from_user_id).eq('receiver_id', to_user_id).eq('follow_status', 'pending').limit(1).execute()
             
             if existing_request.data:
                 return {"success": False, "message": "이미 친구 요청을 보냈습니다."}
             
             # 이미 친구인지 확인
-            existing_friend = self.supabase.table('friend_list').select('*').eq('user_id', from_user_id).eq('friend_id', to_user_id).eq('status', True).execute()
+            existing_friend = await client.table('friend_list').select('id').eq('user_id', from_user_id).eq('friend_id', to_user_id).eq('status', True).limit(1).execute()
             
             if existing_friend.data:
                 return {"success": False, "message": "이미 친구입니다."}
@@ -66,7 +65,7 @@ class FriendsRepository:
                 "requested_at": datetime.now().isoformat()
             }
             
-            response = self.supabase.table('friend_follow').insert(request_data).execute()
+            response = await client.table('friend_follow').insert(request_data).execute()
             return {"success": True, "data": response.data[0] if response.data else None}
         except Exception as e:
             print(f"친구 요청 생성 오류: {e}")
@@ -75,101 +74,86 @@ class FriendsRepository:
     async def get_friend_requests(self, user_id: str) -> List[Dict[str, Any]]:
         """받은 친구 요청 목록 조회"""
         try:
-            response = self.supabase.table('friend_follow').select('*, request_user:user!friend_follow_request_id_fkey(*)').eq('receiver_id', user_id).eq('follow_status', 'pending').order('requested_at', desc=True).execute()
-            return response.data
+            client = await self._get_client()
+            response = await client.table('friend_follow').select('*, request_user:user!friend_follow_request_id_fkey(id, name, email, profile_image)').eq('receiver_id', user_id).eq('follow_status', 'pending').order('requested_at', desc=True).execute()
+            return response.data if response.data else []
         except Exception as e:
             print(f"친구 요청 목록 조회 오류: {e}")
             return []
     
     async def accept_friend_request(self, request_id: str, user_id: str) -> Dict[str, Any]:
-        """친구 요청 수락"""
+        """친구 요청 수락 - 최적화됨"""
         try:
-            # 친구 요청 조회
-            request_response = self.supabase.table('friend_follow').select('*').eq('id', request_id).eq('receiver_id', user_id).execute()
+            client = await self._get_client()
+            
+            # 친구 요청 조회 (필요한 컬럼만 선택)
+            request_response = await client.table('friend_follow').select(
+                'id, request_id, receiver_id, follow_status'
+            ).eq('id', request_id).eq('receiver_id', user_id).limit(1).execute()
             
             if not request_response.data:
                 return {"success": False, "message": "친구 요청을 찾을 수 없습니다."}
             
             request = request_response.data[0]
             
-            # 이미 수락된 요청인지 확인
             if request['follow_status'] != 'pending':
                 return {"success": False, "message": "이미 처리된 요청입니다."}
             
-            # 이미 친구인지 확인 (중복 방지)
-            existing_friend = self.supabase.table('friend_list').select('*').eq('user_id', request['request_id']).eq('friend_id', request['receiver_id']).eq('status', True).execute()
+            from_user_id = request['request_id']
+            to_user_id = request['receiver_id']
+            
+            # 이미 친구인지 확인
+            existing_friend = await client.table('friend_list').select('id').eq(
+                'user_id', from_user_id
+            ).eq('friend_id', to_user_id).eq('status', True).limit(1).execute()
             
             if existing_friend.data:
-                # 이미 친구인 경우, 요청만 accept로 변경하고 종료
-                self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
-                return {"success": True, "message": "이미 친구입니다.", "from_user_id": request['request_id']}
+                await client.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+                return {"success": True, "message": "이미 친구입니다.", "from_user_id": from_user_id}
             
             # 요청 상태를 accept로 변경
-            self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+            await client.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
             
-            # 친구 관계 생성 (양방향)
-            friend_data1 = {
-                "user_id": request['request_id'],
-                "friend_id": request['receiver_id'],
-                "status": True,
-                "created_at": datetime.now().isoformat()
-            }
+            # 친구 관계 생성 (양방향) - 배치 insert
+            now = datetime.now().isoformat()
+            await client.table('friend_list').insert([
+                {"user_id": from_user_id, "friend_id": to_user_id, "status": True, "created_at": now},
+                {"user_id": to_user_id, "friend_id": from_user_id, "status": True, "created_at": now}
+            ]).execute()
             
-            friend_data2 = {
-                "user_id": request['receiver_id'],
-                "friend_id": request['request_id'],
-                "status": True,
-                "created_at": datetime.now().isoformat()
-            }
-            
-            self.supabase.table('friend_list').insert([friend_data1, friend_data2]).execute()
-            
-            return {"success": True, "message": "친구 요청을 수락했습니다.", "from_user_id": request['request_id']}
+            return {"success": True, "message": "친구 요청을 수락했습니다.", "from_user_id": from_user_id}
         except Exception as e:
             print(f"친구 요청 수락 오류: {e}")
             return {"success": False, "message": "친구 요청 수락 중 오류가 발생했습니다."}
     
     async def accept_friend_request_as_guide(self, request_id: str, guide_user_id: str) -> Dict[str, Any]:
-        """튜토리얼 가이드 계정 입장에서 친구 요청 자동 수락 (receiver_id 체크 생략)"""
+        """튜토리얼 가이드 계정 입장에서 친구 요청 자동 수락"""
         try:
-            # 친구 요청 조회 (receiver_id 체크 없이)
-            request_response = self.supabase.table('friend_follow').select('*').eq('id', request_id).execute()
+            client = await self._get_client()
+            
+            request_response = await client.table('friend_follow').select('*').eq('id', request_id).limit(1).execute()
             
             if not request_response.data:
                 return {"success": False, "message": "친구 요청을 찾을 수 없습니다."}
             
             request = request_response.data[0]
             
-            # 이미 수락된 요청인지 확인
             if request['follow_status'] != 'pending':
                 return {"success": False, "message": "이미 처리된 요청입니다."}
             
-            # 이미 친구인지 확인 (중복 방지)
-            existing_friend = self.supabase.table('friend_list').select('*').eq('user_id', request['request_id']).eq('friend_id', request['receiver_id']).eq('status', True).execute()
+            existing_friend = await client.table('friend_list').select('id').eq('user_id', request['request_id']).eq('friend_id', request['receiver_id']).eq('status', True).limit(1).execute()
             
             if existing_friend.data:
-                self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+                await client.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
                 return {"success": True, "message": "이미 친구입니다.", "from_user_id": request['request_id']}
             
-            # 요청 상태를 accept로 변경
-            self.supabase.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
+            await client.table('friend_follow').update({"follow_status": "accept"}).eq('id', request_id).execute()
             
-            # 친구 관계 생성 (양방향)
-            friend_data1 = {
-                "user_id": request['request_id'],
-                "friend_id": request['receiver_id'],
-                "status": True,
-                "created_at": datetime.now().isoformat()
-            }
-            
-            friend_data2 = {
-                "user_id": request['receiver_id'],
-                "friend_id": request['request_id'],
-                "status": True,
-                "created_at": datetime.now().isoformat()
-            }
-            
-            self.supabase.table('friend_list').insert([friend_data1, friend_data2]).execute()
+            now = datetime.now().isoformat()
+            await client.table('friend_list').insert([
+                {"user_id": request['request_id'], "friend_id": request['receiver_id'], "status": True, "created_at": now},
+                {"user_id": request['receiver_id'], "friend_id": request['request_id'], "status": True, "created_at": now}
+            ]).execute()
             
             return {"success": True, "message": "튜토리얼 친구 요청을 수락했습니다.", "from_user_id": request['request_id']}
         except Exception as e:
@@ -179,10 +163,10 @@ class FriendsRepository:
     async def reject_friend_request(self, request_id: str, user_id: str) -> Dict[str, Any]:
         """친구 요청 거절"""
         try:
-            response = self.supabase.table('friend_follow').update({"follow_status": "reject"}).eq('id', request_id).eq('receiver_id', user_id).execute()
+            client = await self._get_client()
+            response = await client.table('friend_follow').update({"follow_status": "reject"}).eq('id', request_id).eq('receiver_id', user_id).execute()
             
             if response.data:
-                # 거절된 요청 정보에서 요청자 ID 추출
                 rejected_request = response.data[0]
                 return {
                     "success": True, 
@@ -198,8 +182,9 @@ class FriendsRepository:
     async def get_friends(self, user_id: str) -> List[Dict[str, Any]]:
         """친구 목록 조회"""
         try:
-            response = self.supabase.table('friend_list').select('*, friend_user:user!friend_list_friend_id_fkey(*)').eq('user_id', user_id).eq('status', True).order('created_at', desc=True).execute()
-            return response.data
+            client = await self._get_client()
+            response = await client.table('friend_list').select('*, friend_user:user!friend_list_friend_id_fkey(id, name, email, profile_image)').eq('user_id', user_id).eq('status', True).order('created_at', desc=True).execute()
+            return response.data if response.data else []
         except Exception as e:
             print(f"친구 목록 조회 오류: {e}")
             return []
@@ -207,9 +192,8 @@ class FriendsRepository:
     async def delete_friend(self, user_id: str, friend_id: str) -> Dict[str, Any]:
         """친구 삭제"""
         try:
-            # 양방향 친구 관계를 비활성화 (status = False)
-            # PostgREST syntax for OR with AND groups: or=(and(user_id.eq.A,friend_id.eq.B),and(user_id.eq.B,friend_id.eq.A))
-            self.supabase.table('friend_list').update({
+            client = await self._get_client()
+            await client.table('friend_list').update({
                 "status": False, 
                 "updated_at": datetime.now().isoformat()
             }).or_(f"and(user_id.eq.{user_id},friend_id.eq.{friend_id}),and(user_id.eq.{friend_id},friend_id.eq.{user_id})").execute()
@@ -220,19 +204,22 @@ class FriendsRepository:
             return {"success": False, "message": "친구 삭제 중 오류가 발생했습니다."}
     
     async def search_users(self, query: str, current_user_id: str) -> List[Dict[str, Any]]:
-        """사용자 검색 (친구 추가용)"""
+        """사용자 검색 (친구 추가용) - 최적화됨"""
         try:
-            # 현재 사용자와 친구가 아닌 사용자들 검색
-            response = self.supabase.table('user').select('*').ilike('name', f'%{query}%').neq('id', current_user_id).execute()
+            client = await self._get_client()
             
-            # 친구 관계 확인하여 이미 친구인 사용자 제외
-            friends_response = self.supabase.table('friend_list').select('friend_id').eq('user_id', current_user_id).eq('status', True).execute()
-            friend_ids = [f['friend_id'] for f in friends_response.data]
+            # 1. 먼저 친구 ID 목록 조회
+            friends_response = await client.table('friend_list').select('friend_id').eq('user_id', current_user_id).eq('status', True).execute()
+            friend_ids = [f['friend_id'] for f in friends_response.data] if friends_response.data else []
             
-            # 친구가 아닌 사용자만 필터링
-            filtered_users = [user for user in response.data if user['id'] not in friend_ids]
+            # 2. 사용자 검색 시 친구 제외
+            user_query = client.table('user').select('id, name, email, profile_image').ilike('name', f'%{query}%').neq('id', current_user_id)
             
-            return filtered_users
+            if friend_ids:
+                user_query = user_query.not_.in_('id', friend_ids)
+            
+            response = await user_query.execute()
+            return response.data if response.data else []
         except Exception as e:
             print(f"사용자 검색 오류: {e}")
             return []
@@ -240,29 +227,15 @@ class FriendsRepository:
     async def delete_all_user_data(self, user_id: str) -> None:
         """사용자와 관련된 모든 친구 데이터 삭제 (탈퇴용)"""
         try:
+            client = await self._get_client()
             print(f"🗑️ [Friends] 사용자 관련 친구 데이터 삭제 시작: {user_id}")
             
-            # 1. friend_list 삭제 (user_id 또는 friend_id가 해당 사용자인 경우)
-            # 관계 끊기(status=False)가 아니라 실제 데이터 삭제
-            res_list = (
-                self.supabase
-                .table('friend_list')
-                .delete()
-                .or_(f"user_id.eq.{user_id},friend_id.eq.{user_id}")
-                .execute()
-            )
+            res_list = await client.table('friend_list').delete().or_(f"user_id.eq.{user_id},friend_id.eq.{user_id}").execute()
             print(f"✅ [Friends] 친구 목록 삭제: {len(res_list.data) if res_list.data else 0}건")
             
-            # 2. friend_follow 삭제 (request_id 또는 receiver_id가 해당 사용자인 경우)
-            res_follow = (
-                self.supabase
-                .table('friend_follow')
-                .delete()
-                .or_(f"request_id.eq.{user_id},receiver_id.eq.{user_id}")
-                .execute()
-            )
+            res_follow = await client.table('friend_follow').delete().or_(f"request_id.eq.{user_id},receiver_id.eq.{user_id}").execute()
             print(f"✅ [Friends] 친구 요청 삭제: {len(res_follow.data) if res_follow.data else 0}건")
             
         except Exception as e:
             print(f"❌ [Friends] 데이터 삭제 오류: {str(e)}")
-            raise Exception(f"친구 데이터 삭제 실패: {str(e)}") 
+            raise Exception(f"친구 데이터 삭제 실패: {str(e)}")

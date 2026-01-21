@@ -34,46 +34,34 @@ class ChatService:
 
     @staticmethod
     async def get_chat_rooms(user_id: str) -> Dict[str, Any]:
-        """사용자의 일정 조율 세션(채팅방) 목록 조회"""
+        """사용자의 일정 조율 세션(채팅방) 목록 조회 - 최적화됨"""
         try:
-            # chat_log에서 사용자의 세션들 조회
+            # Repository에서 이미 친구별 최신 메시지만 반환
             sessions = await ChatRepository.get_user_chat_sessions(user_id)
+            
+            if not sessions:
+                return {
+                    "status": 200,
+                    "data": ChatRoomListResponse(chat_rooms=[])
+                }
 
-            # 친구별로 그룹화
-            friend_map = defaultdict(lambda: {
-                'friend_id': None,
-                'friend_name': None,
-                'last_message': None,
-                'last_message_time': None
-            })
-
-            for session in sessions:
-                friend_id = session['friend_id']
-
-                if friend_map[friend_id]['last_message_time'] is None or session['created_at'] > friend_map[friend_id]['last_message_time']:
-                    friend_map[friend_id]['friend_id'] = friend_id
-                    friend_map[friend_id]['last_message'] = session['response_text'] or session['request_text']
-                    friend_map[friend_id]['last_message_time'] = session['created_at']
-
-            # 친구 이름들 조회
-            friend_ids = [data['friend_id'] for data in friend_map.values() if data['friend_id']]
+            # 친구 이름들 한 번에 조회
+            friend_ids = [s['friend_id'] for s in sessions if s.get('friend_id')]
             user_names = await ChatRepository.get_user_names_by_ids(friend_ids)
 
-            # ChatRoom 객체로 변환
+            # ChatRoom 객체로 변환 (이미 최신순 정렬됨)
             chat_rooms = []
-            for friend_data in friend_map.values():
-                friend_name = user_names.get(friend_data['friend_id'], '알 수 없음')
-
+            for session in sessions:
+                friend_id = session['friend_id']
+                friend_name = user_names.get(friend_id, '알 수 없음')
+                
                 chat_room = ChatRoom(
-                    participants=[user_id, friend_data['friend_id']],
-                    last_message=friend_data['last_message'],
-                    last_message_time=friend_data['last_message_time'],
-                    participant_names=[friend_name]  # 친구 이름만 표시
+                    participants=[user_id, friend_id],
+                    last_message=session.get('response_text') or session.get('request_text'),
+                    last_message_time=session.get('created_at'),
+                    participant_names=[friend_name]
                 )
                 chat_rooms.append(chat_room)
-
-            # 최근 활동 시간순으로 정렬
-            chat_rooms.sort(key=lambda x: x.last_message_time or '', reverse=True)
 
             return {
                 "status": 200,
