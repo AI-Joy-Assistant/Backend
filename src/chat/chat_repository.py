@@ -53,11 +53,25 @@ class ChatRepository:
             if not user_ids:
                 return {}
 
+            # [FIX] 가상 사용자 ID 필터링 (tutorial_guide_joyner 등 UUID가 아닌 ID 제외)
+            import uuid
+            def is_valid_uuid(val):
+                try:
+                    uuid.UUID(str(val))
+                    return True
+                except ValueError:
+                    return False
+            
+            valid_ids = [uid for uid in user_ids if is_valid_uuid(uid)]
+            
+            if not valid_ids:
+                return {}
+
             response = (
                 supabase
                 .table('user')
                 .select('id, name')
-                .in_('id', user_ids)
+                .in_('id', valid_ids)
                 .execute()
             )
 

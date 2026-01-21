@@ -202,6 +202,10 @@ class ChatService:
         is_all_day: bool = False,  # ✅ 종일 여부
     ) -> Dict[str, Any]:
         """AI와 일정 조율 대화 시작"""
+        import time
+        start_ts = time.time()
+        logger.info(f"⏱️ [PERF] start_ai_conversation start: user_id={user_id}")
+        
         print(f"DEBUG: start_ai_conversation params - title: '{explicit_title}', location: '{explicit_location}'")
         try:
             # 1. 사용자 메시지 저장
@@ -242,6 +246,9 @@ class ChatService:
             # [✅ UPDATED] 컨텍스트 개수 3 → 10으로 증가
             recent_logs = await ChatRepository.get_recent_chat_logs(user_id, limit=10, session_id=session_id)
             
+            t1 = time.time()
+            logger.info(f"⏱️ [PERF] History fetch took: {t1 - start_ts:.3f}s")
+
             # [✅ NEW] 1시간(3600초) 만료 체크
             CONTEXT_TIMEOUT_SECONDS = 3600  # 1시간
             context_expired = False
@@ -905,10 +912,12 @@ class ChatService:
             )
             
             # 병렬 실행 (클로저 대신 직접 호출)
+            t_parallel_start = time.time()
             schedule_info, fallback_ai_result = await asyncio.gather(
                 IntentService.extract_schedule_info(message),
                 openai_service.generate_response(message, conversation_history)
             )
+            logger.info(f"⏱️ [PERF] Parallel LLM execution took: {time.time() - t_parallel_start:.3f}s")
             
             # [FIX] IntentService가 None을 반환하는 경우 방어 코드
             if schedule_info is None:

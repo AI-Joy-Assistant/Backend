@@ -552,22 +552,32 @@ async def get_notifications(
             "created_at", desc=True
         ).limit(30).execute()
         
+        # [최적화] 모든 user_id를 먼저 수집하여 배치 조회
+        all_user_ids = set()
+        for log in (logs.data or []):
+            metadata = log.get("metadata", {}) or {}
+            friend_id = log.get("friend_id")
+            target_user_id = friend_id or metadata.get("rejected_by") or metadata.get("left_user_id")
+            if target_user_id:
+                all_user_ids.add(target_user_id)
+        
+        # [최적화] 한 번의 쿼리로 모든 사용자 이름 조회
+        user_name_map = {}
+        if all_user_ids:
+            try:
+                users_res = supabase.table("user").select("id, name").in_("id", list(all_user_ids)).execute()
+                user_name_map = {u["id"]: u.get("name", "상대방") for u in (users_res.data or [])}
+            except Exception as e:
+                logger.warning(f"사용자 이름 배치 조회 실패: {e}")
+        
         for log in (logs.data or []):
             msg_type = log.get("message_type")
             metadata = log.get("metadata", {}) or {}
             friend_id = log.get("friend_id")
             
-            # 상대방 이름 조회
+            # [최적화] 맵에서 조회 (DB 호출 없음)
             target_user_id = friend_id or metadata.get("rejected_by") or metadata.get("left_user_id")
-            target_user_name = "상대방"
-            
-            if target_user_id:
-                try:
-                    user_res = supabase.table("user").select("name").eq("id", target_user_id).execute()
-                    if user_res.data:
-                        target_user_name = user_res.data[0].get("name", "상대방")
-                except:
-                    pass
+            target_user_name = user_name_map.get(target_user_id, "상대방") if target_user_id else "상대방"
             
             if msg_type == "schedule_rejection":
                 # 일정 거절 메시지 구성
