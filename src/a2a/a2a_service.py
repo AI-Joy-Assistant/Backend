@@ -639,56 +639,91 @@ class A2AService:
             logger.info(f"📅 [Calendar Parse] date_str={date_str}, time_str={time_str}")
             logger.info(f"📅 [Calendar Parse] place_pref keys: {list(place_pref.keys()) if place_pref else 'None'}")
             
-            # proposedEndTime 추출 (종료 시간)
-            end_time_str = (place_pref.get("proposedEndTime") or 
-                           details.get("proposedEndTime") or details.get("end_time") or 
-                           place_pref.get("end_time") or "")
-            logger.info(f"📅 [Calendar Parse] end_time_str={end_time_str}")
+            # [FIX] duration_nights 확인 - 다박 일정은 종일 이벤트로 처리
+            duration_nights = place_pref.get("duration_nights", 0) if place_pref else 0
+            logger.info(f"📅 [Calendar Parse] duration_nights={duration_nights}")
             
-            if details.get("start_time"):
-                start_time = datetime.fromisoformat(details["start_time"].replace("Z", "+00:00")).astimezone(KST)
-                end_time = datetime.fromisoformat(details["end_time"].replace("Z", "+00:00")).astimezone(KST)
-            elif date_str and time_str:
-                # 표준 형식 (YYYY-MM-DD HH:MM 또는 YYYY-MM-DD + HH:MM) 먼저 시도
+            if duration_nights > 0:
+                # 다박 일정: 첫째 날 00:00 ~ 마지막 날 23:59
                 try:
-                    # time_str이 HH:MM 형식인지 확인
-                    if re.match(r'^\d{1,2}:\d{2}$', time_str):
-                        # date_str이 YYYY-MM-DD 형식인지 확인
+                    if date_str:
+                        # 여러 형식 지원 (YYYY-MM-DD, MM월 DD일 등)
                         if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
-                            combined_iso = f"{date_str}T{time_str}:00"
-                            start_time = datetime.fromisoformat(combined_iso).replace(tzinfo=KST)
-                            logger.info(f"📅 [Calendar Parse] ISO 파싱 성공: start_time={start_time}")
-                            
-                            # [FIX] proposedEndTime이 있으면 그것으로 end_time 계산
-                            if end_time_str and re.match(r'^\d{1,2}:\d{2}$', end_time_str):
-                                end_combined_iso = f"{date_str}T{end_time_str}:00"
-                                end_time = datetime.fromisoformat(end_combined_iso).replace(tzinfo=KST)
-                                logger.info(f"📅 [Calendar Parse] end_time ISO 파싱: {end_time}")
+                            start_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        elif "월" in date_str and "일" in date_str:
+                            match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+                            if match:
+                                month = int(match.group(1))
+                                day = int(match.group(2))
+                                start_date = datetime(datetime.now().year, month, day)
                             else:
-                                # fallback: duration_minutes 사용
-                                saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
-                                end_time = start_time + timedelta(minutes=saved_duration)
-                                logger.info(f"📅 [Calendar Parse] duration fallback: {saved_duration}min")
-                except Exception as e:
-                    logger.warning(f"표준 형식 파싱 실패: {e}")
-                
-                # 표준 형식 파싱 실패 시 ChatService 사용
-                if not start_time:
-                    from src.chat.chat_service import ChatService
-                    combined = f"{date_str} {time_str}".strip()
-                    logger.warning(f"📅 [Calendar Parse] ISO 파싱 실패, ChatService 사용: combined={combined}")
-                    parsed = await ChatService.parse_time_string(time_str, combined)
-                    if parsed:
-                        start_time = parsed['start_time']
-                        end_time = parsed['end_time']
-                        logger.info(f"📅 [Calendar Parse] ChatService 결과: start={start_time}, end={end_time}")
+                                start_date = None
+                        else:
+                            start_date = None
+                        
+                        if start_date:
+                            # 시작 시간: 첫째 날 00:00
+                            start_time = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=KST)
+                            # 종료 시간: 마지막 날(시작일 + duration_nights) 23:59
+                            end_date = start_date + timedelta(days=duration_nights)
+                            end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=KST)
+                            
+                            logger.info(f"📅 [다박 일정] {duration_nights}박 {duration_nights+1}일 - 시작: {start_time} / 종료: {end_time}")
+                except Exception as date_err:
+                    logger.error(f"다박 일정 날짜 파싱 실패: {date_err}")
             
-            # 시간 정보가 없으면 기본값 (내일 오후 2시)
+            # 다박 일정이 아니거나 파싱 실패 시 기존 로직 사용
             if not start_time:
-                start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                # [✅ FIX] 기본값에서도 duration_minutes 사용
-                saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
-                end_time = start_time + timedelta(minutes=saved_duration)
+                # proposedEndTime 추출 (종료 시간)
+                end_time_str = (place_pref.get("proposedEndTime") or 
+                               details.get("proposedEndTime") or details.get("end_time") or 
+                               place_pref.get("end_time") or "")
+                logger.info(f"📅 [Calendar Parse] end_time_str={end_time_str}")
+                
+                if details.get("start_time"):
+                    start_time = datetime.fromisoformat(details["start_time"].replace("Z", "+00:00")).astimezone(KST)
+                    end_time = datetime.fromisoformat(details["end_time"].replace("Z", "+00:00")).astimezone(KST)
+                elif date_str and time_str:
+                    # 표준 형식 (YYYY-MM-DD HH:MM 또는 YYYY-MM-DD + HH:MM) 먼저 시도
+                    try:
+                        # time_str이 HH:MM 형식인지 확인
+                        if re.match(r'^\d{1,2}:\d{2}$', time_str):
+                            # date_str이 YYYY-MM-DD 형식인지 확인
+                            if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                                combined_iso = f"{date_str}T{time_str}:00"
+                                start_time = datetime.fromisoformat(combined_iso).replace(tzinfo=KST)
+                                logger.info(f"📅 [Calendar Parse] ISO 파싱 성공: start_time={start_time}")
+                                
+                                # [FIX] proposedEndTime이 있으면 그것으로 end_time 계산
+                                if end_time_str and re.match(r'^\d{1,2}:\d{2}$', end_time_str):
+                                    end_combined_iso = f"{date_str}T{end_time_str}:00"
+                                    end_time = datetime.fromisoformat(end_combined_iso).replace(tzinfo=KST)
+                                    logger.info(f"📅 [Calendar Parse] end_time ISO 파싱: {end_time}")
+                                else:
+                                    # fallback: duration_minutes 사용
+                                    saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                                    end_time = start_time + timedelta(minutes=saved_duration)
+                                    logger.info(f"📅 [Calendar Parse] duration fallback: {saved_duration}min")
+                    except Exception as e:
+                        logger.warning(f"표준 형식 파싱 실패: {e}")
+                    
+                    # 표준 형식 파싱 실패 시 ChatService 사용
+                    if not start_time:
+                        from src.chat.chat_service import ChatService
+                        combined = f"{date_str} {time_str}".strip()
+                        logger.warning(f"📅 [Calendar Parse] ISO 파싱 실패, ChatService 사용: combined={combined}")
+                        parsed = await ChatService.parse_time_string(time_str, combined)
+                        if parsed:
+                            start_time = parsed['start_time']
+                            end_time = parsed['end_time']
+                            logger.info(f"📅 [Calendar Parse] ChatService 결과: start={start_time}, end={end_time}")
+                
+                # 시간 정보가 없으면 기본값 (내일 오후 2시)
+                if not start_time:
+                    start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                    # [✅ FIX] 기본값에서도 duration_minutes 사용
+                    saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                    end_time = start_time + timedelta(minutes=saved_duration)
             
             # 참여자 이름 조회
             initiator = await AuthRepository.find_user_by_id(initiator_user_id)
@@ -2128,6 +2163,9 @@ class A2AService:
                             # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                             "requestedDate": formatted_requested_date,
                             "requestedTime": formatted_requested_time,
+                            # [FIX] 프론트엔드 표시용 proposedDate/proposedTime 추가
+                            "proposedDate": formatted_requested_date or date,
+                            "proposedTime": formatted_requested_time or time,
                             "purpose": activity,
                             # 원본 채팅 세션 ID 저장 (거절 시 이 채팅방에 알림 전송)
                             "origin_chat_session_id": origin_chat_session_id,
@@ -2191,6 +2229,9 @@ class A2AService:
                         # 원래 요청 시간 (YYYY-MM-DD HH:MM 형식으로 변환하여 저장)
                         "requestedDate": formatted_requested_date,
                         "requestedTime": formatted_requested_time,
+                        # [FIX] 프론트엔드 표시용 proposedDate/proposedTime 추가
+                        "proposedDate": formatted_requested_date or date,
+                        "proposedTime": formatted_requested_time or time,
                         # [✅ NEW] 끝나는 시간 저장
                         "proposedEndTime": end_time,
                         "requestedEndTime": end_time,
@@ -2219,6 +2260,23 @@ class A2AService:
                     
                     # 세션 상태를 in_progress로 변경
                     await A2ARepository.update_session_status(session["id"], "in_progress")
+            
+            # [FIX] 세션 생성 직후 웹소켓 알림 먼저 전송 (협상 완료 전에 프론트엔드에서 목록 새로고침 가능)
+            try:
+                initiator = await AuthRepository.find_user_by_id(initiator_user_id)
+                initiator_name = initiator.get("name", "사용자") if initiator else "사용자"
+                for target_id in target_user_ids:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_request",
+                        "thread_id": thread_id,
+                        "from_user": initiator_name,
+                        "summary": summary or "일정 조율 요청",
+                        "session_created": True,  # 세션 생성 알림임을 표시
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, target_id)
+                logger.info(f"[WS] 세션 생성 즉시 알림 전송: {target_user_ids}")
+            except Exception as early_ws_err:
+                logger.warning(f"[WS] 세션 생성 즉시 알림 실패: {early_ws_err}")
             
             # 3) 다중 사용자 일정 조율 시뮬레이션 실행
             # 기존 세션을 재사용하는 경우, 기존 메시지에 이어서 추가
@@ -3488,15 +3546,50 @@ class A2AService:
                     
                     start_time = None
                     end_time = None
-
-                    if proposal.get("start_time"):
-                         start_time = datetime.fromisoformat(proposal["start_time"].replace("Z", "+00:00")).astimezone(KST)
-                         end_time = datetime.fromisoformat(proposal["end_time"].replace("Z", "+00:00")).astimezone(KST)
-                    else:
-                        parsed = await ChatService.parse_time_string(proposal.get("time"), f"{proposal.get('date')} {proposal.get('time')}")
-                        if parsed:
-                            start_time = parsed['start_time']
-                            end_time = parsed['end_time']
+                    
+                    # [FIX] duration_nights 확인 - 다박 일정은 종일 이벤트로 처리
+                    duration_nights = proposal.get("duration_nights", 0)
+                    
+                    if duration_nights > 0:
+                        # 다박 일정: 첫째 날 00:00 ~ 마지막 날 23:59
+                        try:
+                            date_str = proposal.get("date") or proposal.get("proposedDate")
+                            if date_str:
+                                # 여러 형식 지원 (YYYY-MM-DD, MM월 DD일 등)
+                                import re
+                                if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                                    start_date = datetime.strptime(date_str, "%Y-%m-%d")
+                                elif "월" in date_str and "일" in date_str:
+                                    match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_str)
+                                    if match:
+                                        month = int(match.group(1))
+                                        day = int(match.group(2))
+                                        start_date = datetime(datetime.now().year, month, day)
+                                    else:
+                                        start_date = datetime.now()
+                                else:
+                                    start_date = datetime.now()
+                                
+                                # 시작 시간: 첫째 날 00:00
+                                start_time = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=KST)
+                                # 종료 시간: 마지막 날(시작일 + duration_nights) 23:59
+                                end_date = start_date + timedelta(days=duration_nights)
+                                end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=KST)
+                                
+                                logger.info(f"[다박 일정] {duration_nights}박 {duration_nights+1}일 - 시작: {start_time} / 종료: {end_time}")
+                        except Exception as date_err:
+                            logger.error(f"다박 일정 날짜 파싱 실패: {date_err}")
+                    
+                    # 다박 일정이 아니거나 파싱 실패 시 기존 로직 사용
+                    if not start_time:
+                        if proposal.get("start_time"):
+                            start_time = datetime.fromisoformat(proposal["start_time"].replace("Z", "+00:00")).astimezone(KST)
+                            end_time = datetime.fromisoformat(proposal["end_time"].replace("Z", "+00:00")).astimezone(KST)
+                        else:
+                            parsed = await ChatService.parse_time_string(proposal.get("time"), f"{proposal.get('date')} {proposal.get('time')}")
+                            if parsed:
+                                start_time = parsed['start_time']
+                                end_time = parsed['end_time']
                     
                     if not start_time:
                          start_time = datetime.now(KST) + timedelta(days=1) # Fallback
