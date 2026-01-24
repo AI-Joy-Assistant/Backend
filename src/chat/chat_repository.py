@@ -145,11 +145,26 @@ class ChatRepository:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """chat_log 테이블에 한 줄 저장"""
+        # [FIX] friend_id가 유효한 UUID이고 user 테이블에 존재하는지 확인
+        validated_friend_id = None
+        if friend_id:
+            try:
+                uuid.UUID(str(friend_id))
+                # user 테이블에서 존재 여부 확인
+                client = await ChatRepository._get_client()
+                user_check = await client.table("user").select("id").eq("id", friend_id).limit(1).execute()
+                if user_check.data and len(user_check.data) > 0:
+                    validated_friend_id = friend_id
+                else:
+                    logger.warning(f"create_chat_log: friend_id '{friend_id}' 가 user 테이블에 없음 → None 처리")
+            except ValueError:
+                logger.warning(f"create_chat_log: 잘못된 friend_id 형식: {friend_id}")
+        
         payload: Dict[str, Any] = {
             "user_id": user_id,
             "request_text": request_text,
             "response_text": response_text,
-            "friend_id": friend_id,
+            "friend_id": validated_friend_id,
             "message_type": message_type,
         }
 
