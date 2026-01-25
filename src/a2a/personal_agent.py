@@ -557,7 +557,9 @@ class PersonalAgent:
                         date=actual_date,
                         time=actual_time,
                         activity=activity,
-                        location=location
+                        location=location,
+                        duration_minutes=60,
+                        duration_nights=duration_nights
                     )
                 else:
                     # 지정 시간이 충돌하더라도 Initiator는 자신이 선택한 시간이므로 그대로 제안!
@@ -569,7 +571,9 @@ class PersonalAgent:
                         date=actual_date,
                         time=actual_time,
                         activity=activity,
-                        location=location
+                        location=location,
+                        duration_minutes=60,
+                        duration_nights=duration_nights
                     )
                     
                     time_was_changed = False  # 시간 변경 안 함 (사용자 의도 존중)
