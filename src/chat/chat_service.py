@@ -194,7 +194,7 @@ class ChatService:
         start_ts = time.time()
         logger.info(f"⏱️ [PERF] start_ai_conversation start: user_id={user_id}")
         
-        print(f"DEBUG: start_ai_conversation params - title: '{explicit_title}', location: '{explicit_location}'")
+        print(f"DEBUG: start_ai_conversation params - title: '{explicit_title}', location: '{explicit_location}', start_date: '{start_date}', start_time: '{start_time}'")
         try:
             # 1. 사용자 메시지 저장
             await ChatRepository.create_chat_log(
