@@ -354,16 +354,27 @@ class ChatRepository:
             client = await ChatRepository._get_client()
             print(f"🗑️ [Chat] 사용자 관련 모든 채팅 삭제 시작: {user_id}")
             
-            response = await (
+            # 1. chat_log 삭제
+            response1 = await (
                 client
                 .table('chat_log')
                 .delete()
                 .or_(f"user_id.eq.{user_id},friend_id.eq.{user_id}")
                 .execute()
             )
+            deleted_logs = len(response1.data) if response1.data else 0
+            print(f"✅ [Chat] chat_log 삭제 완료: {deleted_logs}건")
             
-            deleted_count = len(response.data) if response.data else 0
-            print(f"✅ [Chat] 사용자 관련 채팅 삭제 완료: {deleted_count}건")
+            # 2. chat_sessions 삭제 (FK 제약으로 인해 user 삭제 전 필수)
+            response2 = await (
+                client
+                .table('chat_sessions')
+                .delete()
+                .eq('user_id', user_id)
+                .execute()
+            )
+            deleted_sessions = len(response2.data) if response2.data else 0
+            print(f"✅ [Chat] chat_sessions 삭제 완료: {deleted_sessions}건")
             
         except Exception as e:
             print(f"❌ [Chat] 데이터 삭제 오류: {str(e)}")
