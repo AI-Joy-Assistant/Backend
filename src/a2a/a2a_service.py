@@ -794,11 +794,6 @@ class A2AService:
                         try:
                             p_name = participant_names.get(str(pid), "사용자")
                             
-                            access_token = await AuthService.get_valid_access_token_by_user_id(pid)
-                            if not access_token:
-                                logger.error(f"유저 {pid} 토큰 갱신 실패")
-                                continue
-                            
                             # 다른 참여자들 이름 (본인 제외)
                             other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
                             # 전체 참여자 이름 (본인 포함)
@@ -829,30 +824,47 @@ class A2AService:
                             }
                             evt_description = f"A2A Agent에 의해 자동 생성된 일정입니다.\n\n[A2A_DATA]{json.dumps(description_json, ensure_ascii=False)}[/A2A_DATA]"
                             
-                            event_req = CreateEventRequest(
+                            # [FIX] Google Calendar 토큰 확인 - 없어도 DB에는 저장
+                            access_token = await AuthService.get_valid_access_token_by_user_id(pid)
+                            google_event_id = None
+                            html_link = None
+                            
+                            if access_token:
+                                # Google Calendar 연동된 사용자: Google Calendar에도 동기화
+                                try:
+                                    event_req = CreateEventRequest(
+                                        summary=evt_summary,
+                                        start_time=start_time.isoformat(),
+                                        end_time=end_time.isoformat(),
+                                        location=location,
+                                        description=evt_description,
+                                        attendees=[]
+                                    )
+                                    
+                                    gc_service = GoogleCalendarService()
+                                    evt = await gc_service.create_calendar_event(access_token, event_req)
+                                    
+                                    if evt:
+                                        google_event_id = evt.id
+                                        html_link = evt.htmlLink
+                                        logger.info(f"✅ Google Calendar 동기화 성공: {evt_summary} (user: {pid})")
+                                except Exception as gc_error:
+                                    logger.warning(f"⚠️ Google Calendar 동기화 실패 (DB에는 저장): {gc_error}")
+                            else:
+                                logger.info(f"📱 유저 {pid}는 Google Calendar 미연동 - 앱 자체 캘린더에만 저장")
+                            
+                            # [FIX] 항상 DB에 저장 (Google Calendar 연동 여부와 무관)
+                            await A2AService._save_calendar_event_to_db(
+                                session_id=session_id,
+                                owner_user_id=pid,
+                                google_event_id=google_event_id,  # None이면 앱 자체 캘린더만
                                 summary=evt_summary,
-                                start_time=start_time.isoformat(),
-                                end_time=end_time.isoformat(),
                                 location=location,
-                                description=evt_description,
-                                attendees=[]
+                                start_at=start_time.isoformat(),
+                                end_at=end_time.isoformat(),
+                                html_link=html_link  # None이면 앱에서 직접 표시
                             )
-                            
-                            gc_service = GoogleCalendarService()
-                            evt = await gc_service.create_calendar_event(access_token, event_req)
-                            
-                            if evt:
-                                await A2AService._save_calendar_event_to_db(
-                                    session_id=session_id,
-                                    owner_user_id=pid,
-                                    google_event_id=evt.id,
-                                    summary=evt_summary,
-                                    location=location,
-                                    start_at=start_time.isoformat(),
-                                    end_at=end_time.isoformat(),
-                                    html_link=evt.htmlLink
-                                )
-                                # logger.info(f"✅ 캘린더 일정 생성 성공: {evt_summary} (user: {pid})")
+                            logger.info(f"✅ 캘린더 일정 DB 저장 완료: {evt_summary} (user: {pid}, google_linked: {bool(access_token)})")
                                 
                         except Exception as e:
                             logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
@@ -3602,13 +3614,6 @@ class A2AService:
                             p_user = await AuthRepository.find_user_by_id(pid)
                             p_name = p_user.get("name", "사용자") if p_user else "사용자"
 
-                            # 토큰 확보
-                            access_token = await AuthService.get_valid_access_token_by_user_id(pid)
-                            if not access_token:
-                                logger.error(f"유저 {pid} 토큰 갱신 실패. 캘린더 등록 불가.")
-                                failed_users.append(p_name)
-                                continue
-                            
                             from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
                             
                             # 제목 설정
@@ -3638,33 +3643,47 @@ class A2AService:
                             if proposal.get("location"):
                                 evt_summary += f" ({proposal.get('location')})"
 
-                            # attendees=[] 로 설정하여 중복 초대 메일 방지하고 각자 캘린더에 생성
-                            event_req = CreateEventRequest(
-                                summary=evt_summary,
-                                start_time=start_time.isoformat(),
-                                end_time=end_time.isoformat(),
-                                location=proposal.get("location"),
-                                description="A2A Agent에 의해 자동 생성된 일정입니다.",
-                                attendees=[] 
-                            )
+                            # [FIX] Google Calendar 토큰 확인 - 없어도 DB에는 저장
+                            access_token = await AuthService.get_valid_access_token_by_user_id(pid)
+                            google_event_id = None
+                            html_link = None
                             
-                            gc_service = GoogleCalendarService()
-                            evt = await gc_service.create_calendar_event(access_token, event_req)
-                            
-                            if evt:
-                                # DB 저장
-                                await A2AService._save_calendar_event_to_db(
-                                    session_id=sessions[0]["id"],
-                                    owner_user_id=pid,
-                                    google_event_id=evt.id,
-                                    summary=evt_summary,
-                                    location=proposal.get("location"),
-                                    start_at=start_time.isoformat(),
-                                    end_at=end_time.isoformat(),
-                                    html_link=evt.htmlLink
-                                )
+                            if access_token:
+                                # Google Calendar 연동된 사용자: Google Calendar에도 동기화
+                                try:
+                                    event_req = CreateEventRequest(
+                                        summary=evt_summary,
+                                        start_time=start_time.isoformat(),
+                                        end_time=end_time.isoformat(),
+                                        location=proposal.get("location"),
+                                        description="A2A Agent에 의해 자동 생성된 일정입니다.",
+                                        attendees=[] 
+                                    )
+                                    
+                                    gc_service = GoogleCalendarService()
+                                    evt = await gc_service.create_calendar_event(access_token, event_req)
+                                    
+                                    if evt:
+                                        google_event_id = evt.id
+                                        html_link = evt.htmlLink
+                                        logger.info(f"✅ Google Calendar 동기화 성공: {evt_summary} (user: {pid})")
+                                except Exception as gc_error:
+                                    logger.warning(f"⚠️ Google Calendar 동기화 실패 (DB에는 저장): {gc_error}")
                             else:
-                                failed_users.append(p_name)
+                                logger.info(f"📱 유저 {pid}는 Google Calendar 미연동 - 앱 자체 캘린더에만 저장")
+                            
+                            # [FIX] 항상 DB에 저장 (Google Calendar 연동 여부와 무관)
+                            await A2AService._save_calendar_event_to_db(
+                                session_id=sessions[0]["id"],
+                                owner_user_id=pid,
+                                google_event_id=google_event_id,
+                                summary=evt_summary,
+                                location=proposal.get("location"),
+                                start_at=start_time.isoformat(),
+                                end_at=end_time.isoformat(),
+                                html_link=html_link
+                            )
+                            logger.info(f"✅ 캘린더 일정 DB 저장 완료: {evt_summary} (user: {pid}, google_linked: {bool(access_token)})")
                                 
                         except Exception as e:
                             logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
