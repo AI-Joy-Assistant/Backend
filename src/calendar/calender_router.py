@@ -492,6 +492,158 @@ async def delete_calendar_event(
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
 
 # ---------------------------
+# 앱 자체 캘린더 API (Google Calendar 미연동 사용자용)
+# ---------------------------
+from config.database import supabase
+import uuid
+
+@router.get("/app-events", summary="앱 자체 캘린더 이벤트 조회")
+async def get_app_calendar_events(
+    current_user: dict = Depends(AuthService.get_current_user),
+    time_min: Optional[str] = Query(None, description="ISO8601 시작 시간"),
+    time_max: Optional[str] = Query(None, description="ISO8601 종료 시간"),
+):
+    """
+    앱 자체 캘린더(calendar_event 테이블)에서 이벤트를 조회합니다.
+    Google Calendar 연동 여부와 관계없이 사용 가능합니다.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        query = supabase.table('calendar_event').select('*').eq('owner_user_id', user_id)
+        
+        # 시간 필터 적용
+        if time_min:
+            query = query.gte('start_at', time_min)
+        if time_max:
+            query = query.lte('end_at', time_max)
+        
+        response = query.order('start_at', desc=False).execute()
+        
+        # Google Calendar 형식으로 변환
+        events = []
+        for row in response.data or []:
+            # start_at, end_at을 Google Calendar 형식으로 변환
+            start_at = row.get('start_at')
+            end_at = row.get('end_at')
+            
+            event = {
+                "id": row.get('id'),
+                "summary": row.get('summary'),
+                "location": row.get('location'),
+                "start": {"dateTime": start_at} if start_at else {},
+                "end": {"dateTime": end_at} if end_at else {},
+                "htmlLink": row.get('html_link'),
+                "status": row.get('status', 'confirmed'),
+                "source": "app"  # 앱 자체 캘린더임을 표시
+            }
+            events.append(event)
+        
+        return {"events": events}
+    except Exception as e:
+        logger.error(f"앱 캘린더 이벤트 조회 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"이벤트 조회 실패: {str(e)}")
+
+
+@router.post("/app-events", summary="앱 자체 캘린더에 이벤트 추가")
+async def create_app_calendar_event(
+    event_data: CreateEventRequest,
+    current_user: dict = Depends(AuthService.get_current_user),
+):
+    """
+    앱 자체 캘린더(calendar_event 테이블)에 이벤트를 추가합니다.
+    Google Calendar 연동 여부와 관계없이 사용 가능합니다.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # 시간 파싱 (KST 처리)
+        def parse_datetime(s: str):
+            if not s:
+                return None
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            if "T" in s and "+" not in s and "Z" not in s:
+                s += "+09:00"
+            return dt.datetime.fromisoformat(s)
+        
+        start_dt = parse_datetime(event_data.start_time)
+        end_dt = parse_datetime(event_data.end_time)
+        
+        if not start_dt or not end_dt:
+            raise HTTPException(status_code=400, detail="시작/종료 시간이 필요합니다.")
+        
+        # UUID 형식의 고유 ID 생성 (Google event ID 대신)
+        app_event_id = f"app_{uuid.uuid4().hex[:16]}"
+        
+        event_record = {
+            "owner_user_id": user_id,
+            "google_event_id": app_event_id,  # 앱 자체 이벤트 ID
+            "summary": event_data.summary,
+            "location": event_data.location,
+            "start_at": start_dt.isoformat(),
+            "end_at": end_dt.isoformat(),
+            "time_zone": "Asia/Seoul",
+            "status": "confirmed",
+            "session_id": None,  # 개인 일정은 A2A 세션 없음
+            "html_link": None
+        }
+        
+        response = supabase.table('calendar_event').insert(event_record).execute()
+        
+        if response.data and len(response.data) > 0:
+            created = response.data[0]
+            logger.info(f"앱 캘린더 이벤트 생성 완료: {event_data.summary} (user: {user_id})")
+            return {
+                "id": created.get('id'),
+                "summary": created.get('summary'),
+                "start": {"dateTime": created.get('start_at')},
+                "end": {"dateTime": created.get('end_at')},
+                "location": created.get('location'),
+                "source": "app"
+            }
+        
+        raise HTTPException(status_code=400, detail="이벤트 생성에 실패했습니다.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"앱 캘린더 이벤트 생성 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"이벤트 생성 실패: {str(e)}")
+
+
+@router.delete("/app-events/{event_id}", summary="앱 자체 캘린더 이벤트 삭제")
+async def delete_app_calendar_event(
+    event_id: str,
+    current_user: dict = Depends(AuthService.get_current_user),
+):
+    """
+    앱 자체 캘린더(calendar_event 테이블)에서 이벤트를 삭제합니다.
+    본인의 이벤트만 삭제 가능합니다.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # 소유자 확인
+        existing = supabase.table('calendar_event').select('id, owner_user_id').eq('id', event_id).execute()
+        
+        if not existing.data or len(existing.data) == 0:
+            raise HTTPException(status_code=404, detail="이벤트를 찾을 수 없습니다.")
+        
+        if existing.data[0].get('owner_user_id') != user_id:
+            raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
+        
+        # 삭제
+        supabase.table('calendar_event').delete().eq('id', event_id).execute()
+        
+        logger.info(f"앱 캘린더 이벤트 삭제 완료: {event_id} (user: {user_id})")
+        return {"message": "이벤트가 성공적으로 삭제되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"앱 캘린더 이벤트 삭제 실패: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
+
+# ---------------------------
 # 공통 가용 시간 계산
 # ---------------------------
 @router.get("/common-free")
