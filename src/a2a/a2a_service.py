@@ -986,11 +986,17 @@ class A2AService:
                 confirmed_date = confirmed_details.get("proposedDate")
                 confirmed_time = confirmed_details.get("proposedTime")
                 
+                # [FIX] participant_names 정의 (백그라운드 태스크 외부에서 사용하기 위해)
+                participant_names_for_noti = {}
+                for pid in active_participants:
+                    p_user = await AuthRepository.find_user_by_id(pid)
+                    participant_names_for_noti[str(pid)] = p_user.get("name", "사용자") if p_user else "사용자"
+                
                 # 모든 활성 참여자에게 알림 (본인은 리스트에서 어떻게 처리할지 결정 - 여기선 모두에게 남김)
                 # 알림 탭에서 '내가 참여한 일정 확정됨'을 볼 수 있게 함
                 for pid in active_participants:
                     # 상대방 이름 찾기 (알림 메시지용 - "OOO님과의 일정이 확정됨")
-                    other_names = [name for uid, name in participant_names.items() if uid != str(pid)]
+                    other_names = [name for uid, name in participant_names_for_noti.items() if uid != str(pid)]
                     if not other_names:
                         msg_title = "일정 확정"
                         msg_text = f"{confirmed_date} {confirmed_time} 일정이 확정되었습니다."
