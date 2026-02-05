@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # JWT 설정
     JWT_SECRET: str = "PLEASE_SET_JWT_SECRET_IN_ENV_FILE"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_HOURS: int = 1
+    JWT_EXPIRE_HOURS: int = 720  # 30일
     
     # Google OAuth 설정
     GOOGLE_CLIENT_ID: str = "PLEASE_SET_GOOGLE_CLIENT_ID_IN_ENV_FILE"
