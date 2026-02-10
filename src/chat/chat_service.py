@@ -402,22 +402,17 @@ class ChatService:
                         # 끝나는 시간 확보됨 → A2A 시작
                         from src.a2a.a2a_service import A2AService
                         
-                        # 끝 시간 처리 메시지가 있으면 먼저 전송
-                        if end_time_msg:
-                            await ChatRepository.create_chat_log(
-                                user_id=user_id,
-                                request_text=None,
-                                response_text=end_time_msg,
-                                friend_id=None,
-                                message_type="ai_response",
-                                session_id=session_id,
-                            )
-                        
+                        # 끝 시간 처리 메시지와 확인 메시지를 합쳐서 한 번에 전송 (메시지 순서 꼬임 방지)
                         confirm_msg = f"{selected_date} {selected_start_time}~{selected_end_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        if end_time_msg:
+                            combined_msg = f"{end_time_msg}\n\n{confirm_msg}"
+                        else:
+                            combined_msg = confirm_msg
+                        
                         await ChatRepository.create_chat_log(
                             user_id=user_id,
                             request_text=None,
-                            response_text=confirm_msg,
+                            response_text=combined_msg,
                             friend_id=None,
                             message_type="ai_response",
                             session_id=session_id,
@@ -451,7 +446,7 @@ class ChatService:
                             "status": 200,
                             "data": {
                                 "user_message": message,
-                                "ai_response": confirm_msg,
+                                "ai_response": combined_msg,
                                 "schedule_info": {"selected_date": selected_date, "selected_time": selected_start_time, "end_time": selected_end_time},
                                 "calendar_event": None,
                                 "usage": None,
@@ -733,17 +728,6 @@ class ChatService:
                         saved_schedule_info["end_time"] = selected_end_time
                         saved_schedule_info["start_time"] = parsed_start_time
                         
-                        # 끝 시간 메시지가 있으면 먼저 전송
-                        if end_time_msg:
-                            await ChatRepository.create_chat_log(
-                                user_id=user_id,
-                                request_text=None,
-                                response_text=end_time_msg,
-                                friend_id=None,
-                                message_type="ai_response",
-                                session_id=session_id,
-                            )
-                        
                         # 캘린더에 일정 추가
                         calendar_event = await ChatService._add_schedule_to_calendar(user_id, saved_schedule_info, original_text=original_message)
                         
@@ -755,10 +739,16 @@ class ChatService:
                         else:
                             confirm_msg = "일정 등록 중 문제가 발생했습니다. 다시 시도해주세요."
                         
+                        # 끝 시간 메시지와 확인 메시지를 합쳐서 한 번에 전송 (메시지 순서 꼬임 방지)
+                        if end_time_msg:
+                            combined_msg = f"{end_time_msg}\n\n{confirm_msg}"
+                        else:
+                            combined_msg = confirm_msg
+                        
                         await ChatRepository.create_chat_log(
                             user_id=user_id,
                             request_text=None,
-                            response_text=confirm_msg,
+                            response_text=combined_msg,
                             friend_id=None,
                             message_type="ai_response",
                             session_id=session_id,
@@ -768,7 +758,7 @@ class ChatService:
                             "status": 200,
                             "data": {
                                 "user_message": message,
-                                "ai_response": confirm_msg,
+                                "ai_response": combined_msg,
                                 "schedule_info": saved_schedule_info,
                                 "calendar_event": calendar_event,
                                 "usage": None
@@ -1210,23 +1200,13 @@ class ChatService:
                     from src.a2a.a2a_repository import A2ARepository
                     from src.auth.auth_repository import AuthRepository
 
-                    # "조율 중" 메시지
+                    # "조율 중" 메시지 - 미리 변수만 설정 (A2A 시작 직전에 저장)
                     if len(friend_names) > 1:
                         wait_msg = f"{', '.join(friend_names)}님들의 Agent와 일정을 조율하고 있습니다..."
                     else:
                         wait_msg = f"{friend_names[0]}님의 Agent와 일정을 조율하고 있습니다..."
-
-                    first_friend_id = friend_ids[0] if friend_ids else None
-                    await ChatRepository.create_chat_log(
-                        user_id=user_id,
-                        request_text=None,
-                        response_text=wait_msg,
-                        friend_id=first_friend_id if len(friend_ids) == 1 else None,
-                        message_type="ai_response",
-                        session_id=session_id,
-                    )
-                    response_sent_to_db = True
-                    ai_response = wait_msg
+                    
+                    # [FIX] 여기서 미리 저장하지 않음 - A2A 시작 직전에 저장
 
                     # [✅ UPDATED] 스마트 추천 vs 바로 협상 결정
                     # 날짜와 시간이 명확하면 추천 건너뛰고 바로 A2A 협상
@@ -1399,6 +1379,10 @@ class ChatService:
                             confirm_msg = f"{selected_date} {selected_time}~{end_time_from_param}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
                         else:
                             confirm_msg = f"{selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                        
+                        first_friend_id = friend_ids[0] if friend_ids else None
+                        
+                        # [FIX] 순서 변경: 1) confirm_msg 먼저, 2) wait_msg 나중에
                         await ChatRepository.create_chat_log(
                             user_id=user_id,
                             request_text=None,
@@ -1407,6 +1391,17 @@ class ChatService:
                             message_type="ai_response",
                             session_id=session_id,
                         )
+                        
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=wait_msg,
+                            friend_id=first_friend_id if len(friend_ids) == 1 else None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                        )
+                        response_sent_to_db = True
+                        ai_response = wait_msg
                         
                         # A2A 협상 시작
                         # [✅ 수정] explicit_title이 있으면 그것을 summary로 사용
@@ -1576,6 +1571,19 @@ class ChatService:
                         user_info = await AuthRepository.find_user_by_id(user_id)
                         initiator_name = user_info.get("name", "사용자") if user_info else "사용자"
 
+                        # [FIX] 재조율 시작 전에 "조율 중" 메시지 저장
+                        first_friend_id = friend_ids[0] if friend_ids else None
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=wait_msg,
+                            friend_id=first_friend_id if len(friend_ids) == 1 else None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                        )
+                        response_sent_to_db = True
+                        ai_response = wait_msg
+
                         # 세션 상태 업데이트
                         for session_id_for_update in session_ids_for_recoordination:
                             await A2ARepository.update_session_status(session_id_for_update, "in_progress")
@@ -1627,6 +1635,19 @@ class ChatService:
                         # 명시적 duration_minutes가 있으면 우선 사용
                         if duration_minutes and duration_minutes > 0:
                             calculated_duration = duration_minutes
+
+                        # [FIX] A2A 시작 직전에 "조율 중" 메시지 저장 (신규 세션)
+                        first_friend_id = friend_ids[0] if friend_ids else None
+                        await ChatRepository.create_chat_log(
+                            user_id=user_id,
+                            request_text=None,
+                            response_text=wait_msg,
+                            friend_id=first_friend_id if len(friend_ids) == 1 else None,
+                            message_type="ai_response",
+                            session_id=session_id,
+                        )
+                        response_sent_to_db = True
+                        ai_response = wait_msg
 
                         a2a_result = await A2AService.start_multi_user_session(
                             initiator_user_id=user_id,
