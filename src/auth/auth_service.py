@@ -497,8 +497,10 @@ class AuthService:
             update_data = {'updated_at': 'NOW()'}
             
             # name 필드가 있으면 추가
+            name_changed = False
             if 'name' in user_data and user_data['name']:
                 update_data['name'] = user_data['name']
+                name_changed = True
                 print(f"✅ 닉네임 업데이트: {user_data['name']}")
             
             # 다른 필드들도 필요시 추가 가능
@@ -509,6 +511,28 @@ class AuthService:
             # Supabase에서 사용자 정보 업데이트
             updated_user = await AuthRepository.update_user(user_id, update_data)
             print(f"✅ 사용자 정보 수정 성공: {user_id}")
+            
+            # 닉네임이 변경된 경우, 친구들에게 WebSocket 알림 전송
+            if name_changed:
+                try:
+                    from src.websocket.websocket_manager import manager as ws_manager
+                    from src.friends.friends_repository import FriendsRepository
+                    
+                    # 친구 목록 조회
+                    friends_repo = FriendsRepository()
+                    friends = await friends_repo.get_friends(user_id)
+                    friend_ids = [f['friend_user']['id'] for f in friends if f.get('friend_user')]
+                    
+                    if friend_ids:
+                        # 친구들에게 사용자 정보 업데이트 알림 전송
+                        await ws_manager.broadcast_to_users({
+                            "type": "user_info_updated",
+                            "user_id": user_id,
+                            "name": user_data['name']
+                        }, friend_ids)
+                        print(f"📢 [WS] 친구 {len(friend_ids)}명에게 닉네임 변경 알림 전송")
+                except Exception as ws_error:
+                    print(f"⚠️ WebSocket 알림 전송 실패 (무시됨): {ws_error}")
             
             return updated_user
         except Exception as e:
