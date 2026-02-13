@@ -18,7 +18,6 @@ from .a2a_protocol import (
 from .personal_agent import PersonalAgent
 from .a2a_repository import A2ARepository
 from src.auth.auth_repository import AuthRepository
-from src.chat.chat_repository import ChatRepository
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -381,6 +380,7 @@ class NegotiationEngine:
         협상 실행 (실시간 스트리밍)
         각 메시지마다 yield하여 SSE로 전송
         """
+        logger.info(f"🚀 [협상 시작] session_id={self.session_id}, initiator={self.initiator_user_id}, participants={self.participant_user_ids}, date={self.target_date}, time={self.target_time}")
         await self.initialize_agents()
         
         initiator_agent = self.agents[self.initiator_user_id]
@@ -414,16 +414,19 @@ class NegotiationEngine:
         
         # 에이전트 가용시간 없음 → 사용자 개입
         if initial_decision.action == MessageType.NEED_HUMAN:
+            logger.warning(f"⚠️ [협상] 초기 제안 실패 - NEED_HUMAN: {initial_decision.message}")
             msg = self._create_message(
                 msg_type=MessageType.NEED_HUMAN,
                 sender_id=self.initiator_user_id,
                 message=initial_decision.message
             )
+            await self._save_message(msg)  # NEED_HUMAN 메시지도 DB에 저장
             yield msg
             self.status = NegotiationStatus.NEED_HUMAN
             return
         
         current_proposal = initial_decision.proposal
+        logger.info(f"✅ [협상] 초기 제안 생성: date={current_proposal.date}, time={current_proposal.time}, message={initial_decision.message[:50]}...")
         
         # 초기 제안 메시지
         propose_msg = self._create_message(
@@ -455,6 +458,7 @@ class NegotiationEngine:
                 await asyncio.sleep(0.3)
                 
                 # 제안 평가
+                logger.info(f"🔄 [협상] Round {self.current_round} - {self.user_names.get(participant_id, '?')} 제안 평가 시작")
                 decision = await agent.evaluate_proposal(
                     proposal=current_proposal,
                     context={
@@ -462,6 +466,7 @@ class NegotiationEngine:
                         "participant_count": len(self.participant_user_ids) + 1
                     }
                 )
+                logger.info(f"📋 [협상] Round {self.current_round} - {self.user_names.get(participant_id, '?')} 결과: action={decision.action}, message={decision.message[:50] if decision.message else 'N/A'}...")
                 
                 response_msg = self._create_message(
                     msg_type=decision.action,
@@ -476,84 +481,9 @@ class NegotiationEngine:
                 if decision.action == MessageType.ACCEPT:
                     continue
                 elif decision.action == MessageType.COUNTER:
-                    # 충돌 정보가 있으면 사용자 선택 대기
-                    if decision.conflict_info:
-                        all_accepted = False
-                        
-                        # 충돌 선택지 메시지 생성
-                        conflict_choice_msg = self._create_message(
-                            msg_type=MessageType.CONFLICT_CHOICE,
-                            sender_id=participant_id,
-                            proposal=current_proposal,
-                            message=f"{self.user_names.get(participant_id, '사용자')}님은 그 시간에 [{decision.conflict_info.event_name}]이 있습니다. 참석 불가 또는 일정 조정을 선택해주세요."
-                        )
-                        # 충돌 정보 추가
-                        conflict_choice_msg.conflict_info = {
-                            "event_name": decision.conflict_info.event_name,
-                            "event_time_display": decision.conflict_info.event_time_display,
-                            "user_id": participant_id,
-                            "user_name": self.user_names.get(participant_id, "사용자")
-                        }
-                        yield conflict_choice_msg
-                        await self._save_message(conflict_choice_msg)
-                        
-                        # 📢 충돌 사용자의 ChatScreen에 알림 메시지 저장
-                        try:
-                            initiator_name = self.user_names.get(self.initiator_user_id, "사용자")
-                            participant_name = self.user_names.get(participant_id, "사용자")
-                            
-                            # 충돌 알림 메시지 JSON
-                            chat_notification = {
-                                "type": "schedule_conflict_choice",
-                                "session_id": self.session_id,
-                                "initiator_name": initiator_name,
-                                "other_count": len(self.participant_user_ids),
-                                "proposed_date": current_proposal.date,
-                                "proposed_time": current_proposal.time,
-                                "conflict_event_name": decision.conflict_info.event_name,
-                                "text": f"🔔 {initiator_name}님이 {current_proposal.date} {current_proposal.time}에 일정을 잡으려 합니다. 그 시간에 [{decision.conflict_info.event_name}]이 있으시네요.",
-                                "choices": [
-                                    {"id": "skip", "label": "참석 불가"},
-                                    {"id": "adjust", "label": "일정 조정 가능"}
-                                ]
-                            }
-                            
-                            # 참여자의 기본 채팅 세션에 알림 저장
-                            default_session = await ChatRepository.get_default_session(participant_id)
-                            if default_session:
-                                await ChatRepository.add_message(
-                                    session_id=default_session["id"],
-                                    user_message=None,
-                                    ai_response=json.dumps(chat_notification, ensure_ascii=False),
-                                    intent="a2a_conflict_notification"
-                                )
-                                logger.info(f"[협상] 충돌 알림을 {participant_name}의 ChatScreen에 저장")
-                        except Exception as chat_err:
-                            logger.warning(f"[협상] 채팅 알림 저장 실패: {chat_err}")
-                        
-                        # 사용자 선택 대기 상태로 전환
-                        self.status = NegotiationStatus.AWAITING_USER_CHOICE
-                        self.awaiting_choice_from = [participant_id]
-                        
-                        # 협상 일시 중단 - 사용자 응답 후 재개
-                        logger.info(f"[협상] 충돌 감지 - {participant_id} 사용자 선택 대기")
-                        
-                        # 세션 상태 업데이트
-                        await A2ARepository.update_session_status(
-                            self.session_id,
-                            "awaiting_user_choice",
-                            details={
-                                "awaiting_from": participant_id,
-                                "conflict_event": decision.conflict_info.event_name,
-                                "proposed_date": current_proposal.date,
-                                "proposed_time": current_proposal.time
-                            }
-                        )
-                        return
-                    else:
-                        # 충돌 정보 없는 일반 COUNTER - 기존 로직 유지
-                        all_accepted = False
-                        counter_proposals.append((participant_id, decision.proposal))
+                    # 충돌 감지 포함 모든 COUNTER는 자동 재제안 흐름으로 처리
+                    all_accepted = False
+                    counter_proposals.append((participant_id, decision.proposal))
                 elif decision.action == MessageType.NEED_HUMAN:
                     self.status = NegotiationStatus.NEED_HUMAN
                     return
@@ -561,6 +491,7 @@ class NegotiationEngine:
             # 전원 동의
             if all_accepted:
                 self.status = NegotiationStatus.AGREED
+                logger.info(f"🎉 [협상] 전원 동의! 최종 제안: date={current_proposal.date}, time={current_proposal.time}")
                 
                 # 합의 완료 메시지
                 agreed_msg = self._create_message(
@@ -569,6 +500,7 @@ class NegotiationEngine:
                     proposal=current_proposal,
                     message="전원 동의! 일정이 확정되었습니다!"
                 )
+                await self._save_message(agreed_msg)  # 합의 메시지도 DB에 저장
                 yield agreed_msg
                 
                 # 세션 업데이트

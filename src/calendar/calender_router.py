@@ -4,11 +4,13 @@ from typing import Optional
 import datetime as dt
 import httpx
 import logging
+import uuid
 
 from .calender_models import CalendarEvent, CreateEventRequest, GoogleAuthRequest, GoogleAuthResponse
 from .calender_service import GoogleCalendarService
 
 from config.settings import settings
+from config.database import supabase
 from src.auth.auth_service import AuthService
 from src.auth.auth_repository import AuthRepository
 
@@ -476,6 +478,8 @@ async def delete_calendar_event(
         calendar_id: str = Query("primary", description="캘린더 ID"),
 ):
     try:
+        user_id = current_user["id"]
+        logger.info(f"[CAL][DELETE][GOOGLE_ROUTE] 요청 시작 - user_id={user_id}, event_id={event_id}, calendar_id={calendar_id}")
         google_access_token = await _ensure_access_token(current_user)
         service = GoogleCalendarService()
         success = await service.delete_calendar_event(
@@ -483,18 +487,43 @@ async def delete_calendar_event(
             event_id=event_id,
             calendar_id=calendar_id,
         )
-        if success:
+        logger.info(f"[CAL][DELETE][GOOGLE_ROUTE] Google API 삭제 결과 - event_id={event_id}, success={success}")
+        # Google 삭제 성공/실패와 무관하게 로컬 DB 정합성 정리
+        # - Google에서 이미 삭제된(404) 이벤트라도 DB 레코드가 남아 있으면 제거
+        # - event_id가 row.id로 들어온 경우도 대비하여 id / google_event_id 둘 다 매칭
+        # event_id가 UUID가 아닐 수 있으므로(id 컬럼은 uuid 타입) 안전하게 조건 구성
+        is_uuid_event_id = False
+        try:
+            uuid.UUID(str(event_id))
+            is_uuid_event_id = True
+        except Exception:
+            is_uuid_event_id = False
+
+        query = supabase.table('calendar_event').select('id').eq('owner_user_id', user_id)
+        if is_uuid_event_id:
+            local_rows = query.or_(f"google_event_id.eq.{event_id},id.eq.{event_id}").execute()
+        else:
+            local_rows = query.eq('google_event_id', event_id).execute()
+        local_ids = [row.get("id") for row in (local_rows.data or []) if row.get("id")]
+        logger.info(f"[CAL][DELETE][GOOGLE_ROUTE] 로컬 정리 대상 - event_id={event_id}, local_ids={local_ids}")
+        if local_ids:
+            supabase.table('calendar_event').delete().in_('id', local_ids).execute()
+            logger.info(f"[CAL][DELETE][GOOGLE_ROUTE] 로컬 DB 삭제 완료 - deleted_count={len(local_ids)}")
+
+        if success or local_ids:
+            logger.info(f"[CAL][DELETE][GOOGLE_ROUTE] 삭제 성공 응답 - event_id={event_id}, success={success}, local_deleted={len(local_ids)}")
             return {"message": "이벤트가 성공적으로 삭제되었습니다."}
-        raise HTTPException(status_code=400, detail="이벤트 삭제에 실패했습니다.")
+        logger.warning(f"[CAL][DELETE][GOOGLE_ROUTE] 삭제 대상 없음 - event_id={event_id}")
+        raise HTTPException(status_code=404, detail="이벤트를 찾을 수 없습니다.")
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[CAL][DELETE][GOOGLE_ROUTE] 예외 - event_id={event_id}, error={str(e)}")
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
 
 # ---------------------------
 # 앱 자체 캘린더 API (Google Calendar 미연동 사용자용)
 # ---------------------------
-from config.database import supabase
 import uuid
 
 @router.get("/app-events", summary="앱 자체 캘린더 이벤트 조회")
@@ -535,7 +564,9 @@ async def get_app_calendar_events(
                 "end": {"dateTime": end_at} if end_at else {},
                 "htmlLink": row.get('html_link'),
                 "status": row.get('status', 'confirmed'),
-                "source": "app"  # 앱 자체 캘린더임을 표시
+                "source": "app",  # 앱 자체 캘린더임을 표시
+                "google_event_id": row.get('google_event_id'),
+                "session_id": row.get('session_id'),
             }
             events.append(event)
         
@@ -622,25 +653,29 @@ async def delete_app_calendar_event(
     """
     try:
         user_id = current_user["id"]
+        logger.info(f"[CAL][DELETE][APP_ROUTE] 요청 시작 - user_id={user_id}, event_id={event_id}")
         
         # 소유자 확인
         existing = supabase.table('calendar_event').select('id, owner_user_id').eq('id', event_id).execute()
+        logger.info(f"[CAL][DELETE][APP_ROUTE] 조회 결과 - found={len(existing.data or [])}")
         
         if not existing.data or len(existing.data) == 0:
+            logger.warning(f"[CAL][DELETE][APP_ROUTE] 이벤트 없음 - user_id={user_id}, event_id={event_id}")
             raise HTTPException(status_code=404, detail="이벤트를 찾을 수 없습니다.")
         
         if existing.data[0].get('owner_user_id') != user_id:
+            logger.warning(f"[CAL][DELETE][APP_ROUTE] 권한 없음 - owner={existing.data[0].get('owner_user_id')}, user_id={user_id}, event_id={event_id}")
             raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
         
         # 삭제
         supabase.table('calendar_event').delete().eq('id', event_id).execute()
         
-        logger.info(f"앱 캘린더 이벤트 삭제 완료: {event_id} (user: {user_id})")
+        logger.info(f"[CAL][DELETE][APP_ROUTE] 삭제 완료 - user_id={user_id}, event_id={event_id}")
         return {"message": "이벤트가 성공적으로 삭제되었습니다."}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"앱 캘린더 이벤트 삭제 실패: {str(e)}")
+        logger.error(f"[CAL][DELETE][APP_ROUTE] 예외 - user_id={current_user.get('id')}, event_id={event_id}, error={str(e)}")
         raise HTTPException(status_code=400, detail=f"이벤트 삭제 실패: {str(e)}")
 
 # ---------------------------

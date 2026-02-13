@@ -139,6 +139,66 @@ class IntentService:
                 date_expr = m.group(0)
                 break
 
+        # [NEW] 상대 날짜를 YYYY-MM-DD로 변환
+        from datetime import datetime as dt_cls, timedelta
+        from zoneinfo import ZoneInfo
+        today = dt_cls.now(ZoneInfo("Asia/Seoul"))
+        heuristic_start_date = None
+        heuristic_end_date = None
+
+        weekday_map = {"월요일": 0, "화요일": 1, "수요일": 2, "목요일": 3, "금요일": 4, "토요일": 5, "일요일": 6}
+
+        if "오늘" in text:
+            heuristic_start_date = today.strftime("%Y-%m-%d")
+            heuristic_end_date = heuristic_start_date
+        elif "모레" in text:
+            target = today + timedelta(days=2)
+            heuristic_start_date = target.strftime("%Y-%m-%d")
+            heuristic_end_date = heuristic_start_date
+        elif "내일" in text:
+            target = today + timedelta(days=1)
+            heuristic_start_date = target.strftime("%Y-%m-%d")
+            heuristic_end_date = heuristic_start_date
+        elif "다음" in text and "주" in text:
+            for name, idx in weekday_map.items():
+                if name in text:
+                    days_until_next_monday = (7 - today.weekday()) % 7
+                    if days_until_next_monday == 0:
+                        days_until_next_monday = 7
+                    next_monday = today + timedelta(days=days_until_next_monday)
+                    target = next_monday + timedelta(days=idx)
+                    heuristic_start_date = target.strftime("%Y-%m-%d")
+                    heuristic_end_date = heuristic_start_date
+                    break
+        elif "이번" in text and "주" in text:
+            for name, idx in weekday_map.items():
+                if name in text:
+                    days_diff = idx - today.weekday()
+                    if days_diff <= 0:
+                        days_diff += 7
+                    target = today + timedelta(days=days_diff)
+                    heuristic_start_date = target.strftime("%Y-%m-%d")
+                    heuristic_end_date = heuristic_start_date
+                    break
+
+        # 명시적 날짜: "2월 15일" 등
+        explicit_date_match = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', text)
+        if explicit_date_match and not heuristic_start_date:
+            month = int(explicit_date_match.group(1))
+            day = int(explicit_date_match.group(2))
+            year = today.year
+            try:
+                target = dt_cls(year, month, day, tzinfo=ZoneInfo("Asia/Seoul"))
+                if target.date() < today.date():
+                    target = dt_cls(year + 1, month, day, tzinfo=ZoneInfo("Asia/Seoul"))
+                heuristic_start_date = target.strftime("%Y-%m-%d")
+                heuristic_end_date = heuristic_start_date
+            except ValueError:
+                pass
+
+        if heuristic_start_date:
+            logger.info(f"[HEURISTIC DATE] '{text}' → {heuristic_start_date}")
+
         # 시간 표현 추출 (오전/오후 HH시)
         time_expr = None
         time_patterns = [
@@ -151,6 +211,64 @@ class IntentService:
             if m:
                 time_expr = m.group(0).replace(" ", "")
                 break
+
+        # [NEW] start_time / end_time를 HH:MM 형식으로 직접 추출
+        heuristic_start_time = None
+        heuristic_end_time = None
+
+        # "오후 5시부터 7시까지", "오전 9시부터 오전 10시까지" 등 패턴
+        range_match = re.search(
+            r'(오전|오후)?\s*(\d{1,2})\s*시\s*(반|(\d{1,2})\s*분)?\s*부터\s*(오전|오후)?\s*(\d{1,2})\s*시\s*(반|(\d{1,2})\s*분)?\s*까지',
+            text
+        )
+        if range_match:
+            # 시작 시간
+            start_ampm = range_match.group(1)  # 오전/오후 or None
+            start_h = int(range_match.group(2))
+            start_m = 30 if range_match.group(3) == '반' else (int(range_match.group(4)) if range_match.group(4) else 0)
+
+            # 끝 시간
+            end_ampm = range_match.group(5)  # 오전/오후 or None
+            end_h = int(range_match.group(6))
+            end_m = 30 if range_match.group(7) == '반' else (int(range_match.group(8)) if range_match.group(8) else 0)
+
+            # 오전/오후 변환
+            if start_ampm == '오후' and start_h < 12:
+                start_h += 12
+            elif start_ampm == '오전' and start_h == 12:
+                start_h = 0
+
+            if end_ampm:
+                if end_ampm == '오후' and end_h < 12:
+                    end_h += 12
+                elif end_ampm == '오전' and end_h == 12:
+                    end_h = 0
+            elif not end_ampm and start_ampm == '오후' and end_h < 12:
+                # "오후 5시부터 7시까지" → end도 오후로 추론 (7시→19시)
+                end_h += 12
+            elif not end_ampm and not start_ampm and end_h < start_h and end_h < 12:
+                # 숫자만 있고 end < start일 때 오후로 추론
+                end_h += 12
+
+            heuristic_start_time = f"{start_h:02d}:{start_m:02d}"
+            heuristic_end_time = f"{end_h:02d}:{end_m:02d}"
+            logger.info(f"[HEURISTIC TIME] range: {text} → {heuristic_start_time}~{heuristic_end_time}")
+        else:
+            # 단일 시간 패턴: "오후 5시", "오전 9시 30분" 등
+            single_time_match = re.search(r'(오전|오후)?\s*(\d{1,2})\s*시\s*(반|(\d{1,2})\s*분)?', text)
+            if single_time_match:
+                ampm = single_time_match.group(1)
+                h = int(single_time_match.group(2))
+                m = 30 if single_time_match.group(3) == '반' else (int(single_time_match.group(4)) if single_time_match.group(4) else 0)
+
+                if ampm == '오후' and h < 12:
+                    h += 12
+                elif ampm == '오전' and h == 12:
+                    h = 0
+                elif not ampm and h < 7:
+                    h += 12  # 7 미만이면 오후로 추정
+
+                heuristic_start_time = f"{h:02d}:{m:02d}"
 
         # 장소 추출
         location = None
@@ -206,7 +324,11 @@ class IntentService:
             "friend_name": friend_name,
             "friend_names": friend_names if len(friend_names) > 1 else None,  # 여러 명일 때
             "date": date_expr,
+            "start_date": heuristic_start_date,
+            "end_date": heuristic_end_date,
             "time": time_expr,
+            "start_time": heuristic_start_time,
+            "end_time": heuristic_end_time,
             "activity": activity,
             "title": title,
             "location": location,
@@ -290,11 +412,11 @@ class IntentService:
             "friend_name": friend_name,
             "friend_names": friend_names_list if friend_names_list and len(friend_names_list) > 1 else None,
             "date": final_date,
-            "start_date": raw.get("start_date"),
-            "end_date": raw.get("end_date"),
+            "start_date": raw.get("start_date") or heuristic_result.get("start_date"),
+            "end_date": raw.get("end_date") or heuristic_result.get("end_date"),
             "time": raw.get("time") or heuristic_result.get("time"),
-            "start_time": raw.get("start_time"),
-            "end_time": raw.get("end_time"),
+            "start_time": raw.get("start_time") or heuristic_result.get("start_time"),
+            "end_time": raw.get("end_time") or heuristic_result.get("end_time"),
             "activity": raw.get("activity") if raw.get("activity") and len(raw.get("activity")) <= 10 and raw.get("activity") in message else heuristic_result.get("activity"),
             "title": raw.get("title") or heuristic_result.get("title"),
             "location": raw.get("location") or heuristic_result.get("location"),
@@ -352,9 +474,26 @@ class IntentService:
             except ValueError:
                 pass  # 유효하지 않은 날짜는 무시
 
+        # [DEBUG] 시간 파싱 추적 로그
+        logger.info(f"[TIME DEBUG] LLM: start={raw.get('start_time')}, end={raw.get('end_time')}")
+        logger.info(f"[TIME DEBUG] Heuristic: start={heuristic_result.get('start_time')}, end={heuristic_result.get('end_time')}")
+        logger.info(f"[TIME DEBUG] Merged: start={final_result.get('start_time')}, end={final_result.get('end_time')}")
+
+        # [FIX] 휴리스틱이 range(부터~까지) 매칭으로 start_time/end_time을 모두 추출했으면
+        # LLM보다 휴리스틱을 신뢰 (정규식이 시간 파싱은 LLM보다 정확)
+        h_start = heuristic_result.get("start_time")
+        h_end = heuristic_result.get("end_time")
+        if h_start and h_end:
+            if final_result["start_time"] != h_start or final_result["end_time"] != h_end:
+                logger.info(f"[TIME OVERRIDE] 휴리스틱 range 우선 적용: {h_start}~{h_end} (기존: {final_result['start_time']}~{final_result['end_time']})")
+                final_result["start_time"] = h_start
+                final_result["end_time"] = h_end
+
         # [NEW] 시간 보정 휴리스틱: LLM이 '오후 10시'를 잘못 파싱할 경우 보정
-        # 원본 메시지에서 '오후' + 숫자시 패턴을 직접 확인해서 start_time 보정
-        if final_result.get("start_time"):
+        # ⚠️ 단, 휴리스틱 range 매칭(부터~까지)으로 이미 양쪽 시간을 추출했으면 건너뜀
+        # (range 파서가 이미 AM/PM을 정확히 처리하므로, 단일 시간 보정이 오히려 충돌함)
+        has_heuristic_range = bool(h_start and h_end)
+        if final_result.get("start_time") and not has_heuristic_range:
             time_text = final_result.get("time", "") or ""
             start_time = final_result.get("start_time", "")
             
@@ -399,8 +538,8 @@ class IntentService:
                     logger.info(f"[TIME FIX] 오전 시간 보정: '{start_time}' → '{correct_time}' (원문: 오전 {am_hour}시 {am_minute}분)")
                     final_result["start_time"] = correct_time
         
-        # end_time도 같은 로직으로 보정 (분 단위 지원)
-        if final_result.get("end_time"):
+        # end_time도 같은 로직으로 보정 (분 단위 지원) — range 매칭 없을 때만
+        if final_result.get("end_time") and not has_heuristic_range:
             end_time = final_result.get("end_time", "")
             
             # 원본 메시지에서 끝 시간 패턴 추출 (예: "~오후 11시 30분", "오후 11시까지")
