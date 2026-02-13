@@ -518,7 +518,12 @@ async def get_user_sessions(
                 
             # print(f"📌 [get_a2a_sessions] Session {session.get('id')}: place_pref = {place_pref}")
             
-            summary = place_pref.get("summary") or session.get("summary")
+            summary = (
+                place_pref.get("summary")
+                or place_pref.get("purpose")
+                or place_pref.get("activity")
+                or session.get("summary")
+            )
             
             # Title
             p_names = session.get("participant_names", [])
@@ -558,8 +563,17 @@ async def get_user_sessions(
             
             # place_pref에서 직접 날짜/시간 정보 추출 (details 컬럼은 DB에 없음)
             # 재조율 시 proposedDate/proposedTime 키, 초기 생성 시 date/time 키 사용
-            proposed_date = place_pref.get("proposedDate") or place_pref.get("date")
-            proposed_time = place_pref.get("proposedTime") or place_pref.get("time") or "미정"
+            proposed_date = (
+                place_pref.get("proposedDate")
+                or place_pref.get("requestedDate")
+                or place_pref.get("date")
+            )
+            proposed_time = (
+                place_pref.get("proposedTime")
+                or place_pref.get("requestedTime")
+                or place_pref.get("time")
+                or "미정"
+            )
             
             # [OPTIMIZED] 충돌 감지: 메모리 내에서 비교 (N개 DB 쿼리 대신)
             # [FIX] DB에 저장된 충돌 정보 우선 로드
@@ -793,6 +807,10 @@ async def get_user_sessions(
                 "purpose": place_pref.get("purpose") or summary or "일정 조율",
                 "proposedTime": proposed_time,
                 "proposedDate": proposed_date,
+                "requestedDate": place_pref.get("requestedDate"),
+                "requestedTime": place_pref.get("requestedTime"),
+                "proposedEndDate": place_pref.get("proposedEndDate"),
+                "proposedEndTime": place_pref.get("proposedEndTime"),
                 "location": place_pref.get("location") or "미정",
                 "process": process,
                 "has_conflict": has_conflict,
@@ -975,10 +993,7 @@ async def get_pending_requests(
         # 응답 데이터 구성
         requests = []
         for session in sessions:
-            # [FILTER] 완료되었거나 진행 중(시스템 처리 중)인 세션 숨기기
             status = session.get("status")
-            if status in ['completed', 'rejected', 'in_progress', 'failed']:
-                continue
 
             # place_pref 파싱
             place_pref = session.get("place_pref", {}) or {}
@@ -988,6 +1003,16 @@ async def get_pending_requests(
                     place_pref = json.loads(place_pref)
                 except:
                     place_pref = {}
+
+            # 재조율 요청 여부 판별
+            is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
+
+            # [FILTER] 완료/거절/실패는 숨김
+            # 단, in_progress라도 "재조율 요청"이면 상대방에게 보이도록 유지
+            if status in ['completed', 'rejected', 'failed']:
+                continue
+            if status == 'in_progress' and not is_reschedule:
+                continue
             
             # [FILTER] 내 행동이 필요한지 확인 (My Turn)
             # 내가 이미 승인했거나(보낸 사람), 내가 처리할 차례가 아니면 숨김
@@ -1000,7 +1025,7 @@ async def get_pending_requests(
                 # 단순 요청: 대상자만 볼 수 있음
                 if str(session.get("target_user_id")) == str(current_user_id):
                     is_action_required = True
-            elif status in ['pending_approval', 'needs_reschedule', 'awaiting_user_choice']:
+            elif status in ['pending_approval', 'needs_reschedule', 'awaiting_user_choice'] or (status == 'in_progress' and is_reschedule):
                 # 승인 대기 / 재조율: 아직 승인하지 않은 참여자만 볼 수 있음
                 # (재조율 신청자는 reschedule_session에서 approved_by_list에 자동 추가됨)
                 if str(current_user_id) not in approved_ids:
@@ -1010,7 +1035,13 @@ async def get_pending_requests(
                 continue
 
             thread_id = place_pref.get("thread_id") if isinstance(place_pref, dict) else None
-            summary = place_pref.get("summary") if isinstance(place_pref, dict) else None
+            summary = None
+            if isinstance(place_pref, dict):
+                summary = (
+                    place_pref.get("summary")
+                    or place_pref.get("purpose")
+                    or place_pref.get("activity")
+                )
             
             # 요청자 정보
             initiator_id = session.get("initiator_user_id")
@@ -1067,13 +1098,21 @@ async def get_pending_requests(
             
             if not proposed_date or not proposed_time:
                 if isinstance(place_pref, dict):
-                    proposed_date = proposed_date or place_pref.get("proposedDate") or place_pref.get("date")
-                    proposed_time = proposed_time or place_pref.get("proposedTime") or place_pref.get("time")
-            
+                    proposed_date = (
+                        proposed_date
+                        or place_pref.get("proposedDate")
+                        or place_pref.get("requestedDate")
+                        or place_pref.get("date")
+                    )
+                    proposed_time = (
+                        proposed_time
+                        or place_pref.get("proposedTime")
+                        or place_pref.get("requestedTime")
+                        or place_pref.get("time")
+                    )
+
             # NOTE: 날짜 기반 필터링은 이미 사전 필터링 단계에서 수행됨 (라인 805-858)
             
-            # 재조율 요청 여부 판별
-            is_reschedule = bool(place_pref.get("rescheduleRequestedBy")) if isinstance(place_pref, dict) else False
             reschedule_requested_at = place_pref.get("rescheduleRequestedAt") if isinstance(place_pref, dict) else None
 
             requests.append({
@@ -1087,6 +1126,7 @@ async def get_pending_requests(
                 "participant_count": participant_count,
                 "proposed_date": proposed_date,
                 "proposed_time": proposed_time,
+                "location": place_pref.get("location") if isinstance(place_pref, dict) else None,
                 "status": session.get("status"),
                 "created_at": session.get("created_at"),
                 "reschedule_requested_at": reschedule_requested_at,

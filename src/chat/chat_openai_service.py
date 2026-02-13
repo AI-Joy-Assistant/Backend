@@ -16,23 +16,30 @@ class OpenAIService:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
+        self._is_reasoning_model = self.model.startswith("o1") or "gpt-5" in self.model
     
-    async def request_chat_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 200) -> str:
+    def _get_max_tokens(self, desired_output_tokens: int) -> int:
+        """reasoning 모델은 내부 추론에 토큰을 소비하므로 여유분 추가"""
+        if self._is_reasoning_model:
+            return desired_output_tokens + 1000  # reasoning overhead (safe margin)
+        return desired_output_tokens
+    
+    async def request_chat_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_completion_tokens: int = 200) -> str:
         """Llama 또는 OpenAI 모델을 사용하여 채팅 응답 생성 (통합 메서드)"""
         # Llama API 우선 사용
         if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
-            return await self._call_custom_model(messages, temperature, max_tokens)
+            return await self._call_custom_model(messages, temperature, max_completion_tokens)
         
         # OpenAI 폴백
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature
+            max_completion_tokens=self._get_max_tokens(max_completion_tokens),
+            **({"temperature": temperature} if not self._is_reasoning_model else {"temperature": 1})
         )
         return response.choices[0].message.content.strip()
 
-    async def _call_custom_model(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 500) -> str:
+    async def _call_custom_model(self, messages: List[Dict[str, str]], temperature: float = 0.7, max_completion_tokens: int = 500) -> str:
         """커스텀 LLM (Llama 등) 호출 - 새 API 스펙"""
         url = settings.LLM_API_URL or os.getenv("LLM_API_URL")
         if not url:
@@ -46,7 +53,7 @@ class OpenAIService:
         payload = {
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_completion_tokens": max_completion_tokens
         }
         
         # logger.info(f"[Llama API] 요청 전송: {url}")
@@ -141,7 +148,7 @@ AI: "알겠습니다! 내일 오후 3시 '치과 예약' 일정으로 등록했�
             
             # Llama API 우선 사용
             if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
-                ai_response = await self._call_custom_model(messages, temperature=0.5, max_tokens=300)
+                ai_response = await self._call_custom_model(messages, temperature=0.5, max_completion_tokens=300)
                 logger.info(f"[Llama API] 원본 응답: {ai_response[:100]}...")
                 
                 # JSON 응답인 경우 message 필드 추출
@@ -163,8 +170,8 @@ AI: "알겠습니다! 내일 오후 3시 '치과 예약' 일정으로 등록했�
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=500,
-                temperature=0.7
+                max_completion_tokens=self._get_max_tokens(500),
+                **({"temperature": 0.7} if not self._is_reasoning_model else {"temperature": 1})
             )
             
             ai_response = response.choices[0].message.content
@@ -312,7 +319,7 @@ JSON 반환 형식:
                         {"role": "user", "content": message}
                     ],
                     temperature=0.1,
-                    max_tokens=200
+                    max_completion_tokens=200
                 )
                 # logger.info(f"[Llama API] 일정 정보 추출 완료")
             else:
@@ -323,8 +330,8 @@ JSON 반환 형식:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": message}
                     ],
-                    max_tokens=200,
-                    temperature=0.1
+                    max_completion_tokens=self._get_max_tokens(500),
+                    **({"temperature": 0.1} if not self._is_reasoning_model else {"temperature": 1})
                 )
                 content = response.choices[0].message.content
             
@@ -400,14 +407,14 @@ JSON 반환 형식:
                 return await self._call_custom_model(
                     [{"role": "system", "content": system_prompt}],
                     temperature=0.7,
-                    max_tokens=150
+                    max_completion_tokens=150
                 )
             
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": system_prompt}],
-                max_tokens=150,
-                temperature=0.7
+                max_completion_tokens=self._get_max_tokens(150),
+                **({"temperature": 0.7} if not self._is_reasoning_model else {"temperature": 1})
             )
             return response.choices[0].message.content
             
@@ -447,7 +454,7 @@ JSON 반환 형식:
             
             # Llama API 우선 사용
             if settings.LLM_API_URL or os.getenv("LLM_API_URL"):
-                result = await self._call_custom_model(messages, temperature=0.8, max_tokens=100)
+                result = await self._call_custom_model(messages, temperature=0.8, max_completion_tokens=100)
                 result = result.strip()
                 
                 # JSON 응답이 오면 자연스러운 텍스트만 추출
@@ -515,11 +522,16 @@ JSON 반환 형식:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=100,
-                temperature=0.8
+                max_completion_tokens=self._get_max_tokens(200),
+                **({"temperature": 0.8} if not self._is_reasoning_model else {"temperature": 1})
             )
             
-            return response.choices[0].message.content.strip()
+            content = response.choices[0].message.content.strip()
+            if not content:
+                logger.warning(f"[OpenAI] A2A 메시지 생성 결과가 비어있습니다. (model={self.model})")
+            else:
+                logger.info(f"[OpenAI] A2A 메시지 생성 완료 ({len(content)}자): {content[:30]}...")
+            return content
             
         except Exception as e:
             logger.error(f"A2A 메시지 생성 실패: {str(e)}")

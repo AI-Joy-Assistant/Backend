@@ -280,6 +280,24 @@ class ChatService:
                     break
             
             if date_selected_context:
+                # [FIX] 명시적 파라미터가 있으면 컨텍스트 무시 (프론트엔드에서 넘어온 새 요청)
+                if explicit_title or start_date:
+                    logger.info(f"[CONTEXT OVERRIDE] 명시적 파라미터 감지, date_selected_context 무시. explicit_title={explicit_title}, start_date={start_date}")
+                    date_selected_context = None
+                
+                # [FIX] 새로운 완전한 일정 요청인지 감지: 날짜 + 시간 범위가 메시지에 포함되면
+                # 이전 date_selected_context 무시하고 새 요청으로 처리
+                if date_selected_context:
+                    date_keywords = ["내일", "모레", "오늘", "다음주", "이번주"]
+                    time_range_pattern = re.search(r'\d{1,2}\s*시.*부터.*\d{1,2}\s*시.*까지', message) or \
+                                         re.search(r'(오전|오후)\s*\d{1,2}\s*시.*부터', message)
+                has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
+                
+                if has_new_date and time_range_pattern:
+                    logger.info(f"[CONTEXT OVERRIDE] 새로운 완전한 일정 요청 감지, date_selected_context 무시: '{message}'")
+                    date_selected_context = None  # 컨텍스트 해제 → 아래 메인 로직으로 진행
+
+            if date_selected_context:
                 # [NEW] 끝나는 시간 대기 모드인지 확인
                 waiting_for_end_time = date_selected_context.get("waiting_for_end_time")
                 
@@ -1231,7 +1249,8 @@ class ChatService:
                     is_all_day_mode = is_all_day == True  # ✅ 종일 모드 확인
                     logger.info(f"[DEBUG] is_all_day={is_all_day}, type={type(is_all_day)}, is_all_day_mode={is_all_day_mode}")
                     should_skip_recommendation = (has_explicit_date and has_explicit_time and not is_date_range) or (is_travel_mode and has_explicit_date) or (is_all_day_mode and has_explicit_date)
-                    should_use_recommendation = len(friend_ids) >= 1 and not recoordination_needed and not should_skip_recommendation
+                    # [DISABLED] 추천 날짜 기능 비활성화 - 항상 바로 A2A 협상 시작
+                    should_use_recommendation = False
                     
                     logger.info(f"[DEBUG] has_explicit_date={has_explicit_date}, has_explicit_time={has_explicit_time}, is_date_range={is_date_range}, friend_ids={len(friend_ids)}")
                     logger.info(f"[DEBUG] should_skip_recommendation={should_skip_recommendation}, is_all_day_mode={is_all_day_mode}")
@@ -1284,15 +1303,18 @@ class ChatService:
                             }
                         }
                     
-                    if should_skip_recommendation and len(friend_ids) >= 1:
+                    if len(friend_ids) >= 1:
                         # 바로 A2A 협상 시작
                         from src.a2a.a2a_service import A2AService
                         
                         # [✅ FIX] 명시적으로 전달된 시간 정보 우선 사용, 없으면 schedule_info에서 fallback
                         selected_date = start_date or schedule_info.get("start_date")
-                        selected_time = start_time or schedule_info.get("start_time") or "09:00"  # ✅ 기본 시간
+                        selected_time = start_time or schedule_info.get("start_time")
+                        if not selected_time:
+                            logger.warning(f"[TIME FALLBACK] start_time을 추출하지 못함, message='{message}', schedule_info={schedule_info}")
+                            selected_time = "09:00"  # 최후 fallback (여기까지 오면 안 됨)
                         end_time_from_param = end_time or schedule_info.get("end_time")
-                        activity = schedule_info.get("activity")
+                        activity = schedule_info.get("activity") or schedule_info.get("title") or explicit_title
                         location = schedule_info.get("location") or explicit_location
                         
                         # 명시적 duration_minutes 사용
@@ -1404,23 +1426,30 @@ class ChatService:
                         ai_response = wait_msg
                         
                         # A2A 협상 시작
+                        logger.info(f"[DEBUG_A2A_TRACE] A2A Start Logic Reached. explicit_title={explicit_title}, activity={activity}, date={selected_date}, time={selected_time}, end_time={end_time_from_param}, duration_nights={duration_nights}")
+                        
                         # [✅ 수정] explicit_title이 있으면 그것을 summary로 사용
                         final_summary = explicit_title or activity or "약속"
                         
-                        a2a_result = await A2AService.start_multi_user_session(
-                            initiator_user_id=user_id,
-                            target_user_ids=friend_ids,
-                            summary=final_summary,
-                            date=selected_date,
-                            time=selected_time,
-                            end_time=end_time_from_param,  # [✅ FIX] 명시적 끝나는 시간 전달
-                            location=location,
-                            activity=final_summary,
-                            duration_minutes=final_duration_minutes,  # [✅ FIX] 명시적 duration 사용
-                            force_new=True,
-                            origin_chat_session_id=session_id,
-                            duration_nights=duration_nights  # ✅ 박 수 전달
-                        )
+                        try:
+                            a2a_result = await A2AService.start_multi_user_session(
+                                initiator_user_id=user_id,
+                                target_user_ids=friend_ids,
+                                summary=final_summary,
+                                date=selected_date,
+                                time=selected_time,
+                                end_time=end_time_from_param,  # [✅ FIX] 명시적 끝나는 시간 전달
+                                location=location,
+                                activity=final_summary,
+                                duration_minutes=final_duration_minutes,  # [✅ FIX] 명시적 duration 사용
+                                force_new=True,
+                                origin_chat_session_id=session_id,
+                                duration_nights=duration_nights  # ✅ 박 수 전달
+                            )
+                            logger.info(f"[DEBUG_A2A_TRACE] start_multi_user_session returned: {a2a_result}")
+                        except Exception as e:
+                            logger.error(f"[DEBUG_A2A_TRACE] start_multi_user_session FAILED: {e}", exc_info=True)
+                            raise e
                         
                         return {
                             "status": 200,

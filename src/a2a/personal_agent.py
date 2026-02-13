@@ -373,7 +373,7 @@ class PersonalAgent:
                         duration_nights=proposal.duration_nights
                     )
                     
-                    # 충돌 일정명 표시
+                    # 충돌 일정명은 내부 로그/판단용으로만 사용하고, 사용자 메시지에는 노출하지 않음
                     conflict_event_name = conflict_info.event_name if conflict_info else "일정"
                     logger.info(f"[{self.user_name}] 🚫 캘린더 충돌! [{conflict_event_name}] - 제안: {proposal.date} {proposal.time} → 역제안: {counter_proposal.date} {counter_proposal.time}")
                     
@@ -381,22 +381,31 @@ class PersonalAgent:
                     original_formatted = self._format_proposal_string(proposal)
                     counter_formatted = self._format_proposal_string(counter_proposal)
                     
-                    # 메시지만 LLM으로 생성 (팩트 주입 - 충돌 일정명 포함)
+                    # 메시지만 LLM으로 생성 (팩트 주입 - 충돌 사유 + 대안 시간 명시)
                     try:
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"그 시간에 [{conflict_event_name}] 일정이 있어서 '{counter_formatted}'을 대안으로 정중하게 제안하는 메시지를 작성하세요. (기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)",
+                            context=(
+                                f"상대가 제안한 '{original_formatted}'은 내 개인 일정과 겹쳐 참석이 어렵습니다. "
+                                f"그래서 대안으로 '{counter_formatted}'을 제안해야 합니다. "
+                                "메시지에 '기존 시간은 충돌이라 어렵다'와 '대안 시간 제안'이 모두 드러나게 작성하세요. "
+                                "개인 일정의 구체적인 이름이나 내용은 절대 노출하지 마세요. "
+                                "(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)"
+                            ),
                             tone="friendly_counter"
                         )
                     except Exception as e:
                         logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
-                        counter_message = f"그 시간엔 [{conflict_event_name}]이 있어요 {counter_formatted}은 어떠세요?"
+                        counter_message = (
+                            f"{original_formatted}에는 개인 일정이 있어 참석이 어려워요. "
+                            f"대신 {counter_formatted}은 어떠세요?"
+                        )
                     
                     return AgentDecision(
                         action=MessageType.COUNTER,
                         proposal=counter_proposal,
-                        reason=f"캘린더 충돌: {conflict_event_name}",
+                        reason="캘린더 충돌: 개인 일정",
                         message=counter_message,
                         conflict_info=conflict_info  # 충돌 일정 정보 포함
                     )
@@ -431,6 +440,8 @@ class PersonalAgent:
                                 ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if getattr(proposal, 'duration_nights', 0) > 0 else ""),
                         tone="friendly_accept"
                     )
+                    if not accept_message:
+                        raise ValueError("Empty message generated")
                 except Exception as e:
                     logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
                     accept_message = f"좋아요! {formatted_datetime}에 뵐게요 😊"
@@ -462,18 +473,29 @@ class PersonalAgent:
                         duration_nights=proposal.duration_nights
                     )
                     
-                    # 메시지만 LLM으로 생성 (팩트 주입)
+                    # 메시지만 LLM으로 생성 (팩트 주입 - 기존 제안 충돌 + 대안 제시)
                     try:
+                        original_formatted = self._format_proposal_string(proposal)
+                        counter_formatted = self._format_proposal_string(counter_proposal)
                         counter_message = await self.openai.generate_a2a_message(
                             agent_name=f"{self.user_name}의 비서",
                             receiver_name=context.get("other_names", "상대방"),
-                            context=f"일정 충돌로 대안 시간을 제안합니다. '{self._format_proposal_string(counter_proposal)}'을 정중하게 제안하는 메시지를 작성하세요. " + 
-                                    ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if getattr(counter_proposal, 'duration_nights', 0) > 0 else ""),
+                            context=(
+                                f"상대가 제안한 '{original_formatted}' 시간은 내 일정과 겹쳐 참석이 어렵습니다. "
+                                f"대안으로 '{counter_formatted}'을 제안해야 합니다. "
+                                "메시지에 '기존 시간 참석 어려움'과 '대안 시간 제안'이 모두 드러나게 작성하세요. "
+                                + ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if getattr(counter_proposal, 'duration_nights', 0) > 0 else "")
+                            ),
                             tone="friendly_counter"
                         )
+                        if not counter_message:
+                            raise ValueError("Empty message generated")
                     except Exception as e:
                         logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
-                        counter_message = f"그 시간은 일정이 있어요 {best_slot.start.strftime('%m/%d %H:%M')} 어때요?"
+                        counter_message = (
+                            f"{self._format_proposal_string(proposal)}에는 참석이 어려워요. "
+                            f"대신 {self._format_proposal_string(counter_proposal)}은 어떠세요?"
+                        )
                     
                     return AgentDecision(
                         action=MessageType.COUNTER,
@@ -627,15 +649,19 @@ class PersonalAgent:
                                 ("(기간이 있는 일정이므로 구체적인 시간은 언급하지 마세요)" if duration_nights > 0 else ""),
                         tone="friendly_alternative"
                     )
+                    if not message:
+                        raise ValueError("Empty message generated")
                 else:
                     # 시간 변경 없음 - 흔쾌히 초대
-                        message = await self.openai.generate_a2a_message(
+                    message = await self.openai.generate_a2a_message(
                         agent_name=f"{self.user_name}의 비서",
                         receiver_name=context.get("other_names", "상대방"),
                         context=f"'{proposal_formatted}'에 {activity or '여행/일정'}을 제안합니다. '어떠세요?' 형식으로 자연스럽게 제안하는 메시지를 작성하세요. " +
                                 ("(기간이 있는 일정이므로 날짜 범위만 명확히 하고, 구체적인 시간은 언급하지 마세요)" if duration_nights > 0 else "(기간이 있는 일정이므로 날짜 범위를 명확히 언급하세요)"),
                         tone="friendly_propose"
                     )
+                    if not message:
+                        raise ValueError("Empty message generated")
             except Exception as e:
                 logger.warning(f"[{self.user_name}] 메시지 생성 실패, 기본 메시지 사용: {e}")
                 if time_was_changed:

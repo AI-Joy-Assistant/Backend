@@ -24,7 +24,7 @@ try:
         messages=[
             {"role": "user", "content": "Hello! Can you hear me?"}
         ],
-        max_tokens=10
+        max_completion_tokens=10
     )
     print("\n✅ API Success!")
     print(f"Response: {response.choices[0].message.content}")
