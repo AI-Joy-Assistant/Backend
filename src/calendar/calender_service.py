@@ -219,12 +219,13 @@ class GoogleCalendarService:
     async def delete_calendar_event(self, access_token: str, event_id: str, calendar_id: str = "primary") -> bool:
         url = f"{self.base_url}/calendars/{calendar_id}/events/{event_id}"
         headers = {"Authorization": f"Bearer {access_token}"}
-        # logger.info(f"[CAL][DELETE] DELETE {url}")
+        logger.info(f"[CAL][DELETE][GOOGLE_API] 요청 - calendar_id={calendar_id}, event_id={event_id}, url={url}")
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.delete(url, headers=headers)
+            logger.info(f"[CAL][DELETE][GOOGLE_API] 응답 - event_id={event_id}, status={r.status_code}")
             if r.status_code in (200, 204):
-                # logger.info(f"[CAL][DELETE] 성공: {event_id}")
+                logger.info(f"[CAL][DELETE][GOOGLE_API] 성공 - event_id={event_id}")
                 return True
             logger.error(f"[CAL][DELETE] 실패: {r.status_code} - {r.text}")
             return False

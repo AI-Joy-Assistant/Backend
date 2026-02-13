@@ -755,29 +755,37 @@ class A2AService:
                     from src.calendar.calender_service import CreateEventRequest, GoogleCalendarService
                     
                     # [재조율 시] 기존 캘린더 일정 삭제
+                    # 중요: thread 내 모든 session_id 기준으로 삭제해야 기존 일정이 남지 않음
                     reschedule_requester = place_pref.get("rescheduleRequestedBy")
                     if reschedule_requester:
-                        # logger.info(f"🗑️ 재조율 감지 - 기존 캘린더 일정 삭제 시작 (session_id: {session_id})")
                         try:
-                            existing_events = supabase.table('calendar_event').select('*').eq('session_id', session_id).execute()
-                            
-                            if existing_events.data:
-                                gc_service = GoogleCalendarService()
-                                for old_event in existing_events.data:
+                            thread_session_ids = [ts.get("id") for ts in all_thread_sessions if ts.get("id")]
+                            if not thread_session_ids:
+                                thread_session_ids = [session_id]
+
+                            gc_service = GoogleCalendarService()
+                            all_existing_rows = []
+
+                            for sid in thread_session_ids:
+                                resp = supabase.table('calendar_event').select('*').eq('session_id', sid).execute()
+                                if resp.data:
+                                    all_existing_rows.extend(resp.data)
+
+                            if all_existing_rows:
+                                for old_event in all_existing_rows:
                                     owner_id = old_event.get('owner_user_id')
                                     old_google_id = old_event.get('google_event_id')
-                                    
+
                                     if owner_id and old_google_id:
                                         try:
                                             owner_token = await AuthService.get_valid_access_token_by_user_id(owner_id)
                                             if owner_token:
                                                 await gc_service.delete_calendar_event(owner_token, old_google_id)
-                                                # logger.info(f"🗑️ 구글 캘린더 일정 삭제 성공: {old_google_id}")
                                         except Exception as del_error:
                                             logger.warning(f"🗑️ 구글 캘린더 일정 삭제 실패 (무시): {del_error}")
-                                
-                                supabase.table('calendar_event').delete().eq('session_id', session_id).execute()
-                                # logger.info(f"🗑️ calendar_event DB 레코드 삭제 완료")
+
+                                for sid in thread_session_ids:
+                                    supabase.table('calendar_event').delete().eq('session_id', sid).execute()
                         except Exception as e:
                             logger.error(f"🗑️ 기존 캘린더 일정 삭제 중 오류: {e}")
                     
@@ -1178,6 +1186,30 @@ class A2AService:
             
             if not participant_user_ids:
                 print(f"⚠️ [Reschedule] 참여자가 없습니다! (모든 참여자가 나갔거나 target_user_id 없음)")
+
+            # 4-1. 재조율 요청 즉시 알림 전송 (요청자 제외 모든 참여자)
+            try:
+                requester = await AuthRepository.find_user_by_id(user_id)
+                requester_name = requester.get("name", "사용자") if requester else "사용자"
+
+                notify_targets = set([initiator_user_id] + participant_user_ids)
+                notify_targets.discard(user_id)  # 요청자 본인은 제외
+
+                for target_id in notify_targets:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_request",
+                        "session_id": session_id,
+                        "thread_id": thread_id,
+                        "from_user": requester_name,
+                        "summary": place_pref.get("summary") or place_pref.get("activity") or "일정 재조율 요청",
+                        "is_reschedule": True,
+                        "new_date": formatted_date,
+                        "new_time": formatted_time,
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, target_id)
+                logger.info(f"[WS] 재조율 요청 즉시 알림 전송: {list(notify_targets)}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] 재조율 요청 알림 전송 실패: {ws_err}")
             
             # 5. 협상 재실행 (백그라운드 태스크로 실행 - 즉시 응답)
             async def run_negotiation_background():
@@ -2016,16 +2048,27 @@ class A2AService:
             start_dt = parse_datetime(start_at)
             end_dt = parse_datetime(end_at)
             
-            # 이미 존재하는지 확인
+            # [FIX] 멱등성 보장: 같은 세션/사용자 조합은 1건만 유지
+            # 1순위: session_id + owner_user_id로 조회
             existing = supabase.table('calendar_event').select('id').eq(
-                'google_event_id', google_event_id
+                'session_id', session_id
+            ).eq(
+                'owner_user_id', owner_user_id
             ).execute()
+
+            # 2순위: google_event_id가 있을 때 기존 레코드 조회 (레거시 데이터 호환)
+            if (not existing.data or len(existing.data) == 0) and google_event_id:
+                existing = supabase.table('calendar_event').select('id').eq(
+                    'google_event_id', google_event_id
+                ).execute()
             
             if existing.data and len(existing.data) > 0:
                 # 이미 존재하면 업데이트
                 event_id = existing.data[0]['id']
                 supabase.table('calendar_event').update({
                     "session_id": session_id,
+                    "owner_user_id": owner_user_id,
+                    "google_event_id": google_event_id,
                     "summary": summary,
                     "location": location,
                     "start_at": start_dt.isoformat(),
@@ -3817,8 +3860,6 @@ class A2AService:
                 
                 from src.chat.chat_repository import ChatRepository
                 
-                reject_msg = f"{user_name}님이 약속에서 나갔습니다."
-                
                 # [중요] thread_id가 있으면 해당 thread의 모든 세션을 업데이트해야 함
                 # 각 참여자가 서로 다른 세션 ID를 보고 있기 때문
                 all_thread_sessions = sessions  # 기본: 전달받은 세션들
@@ -3933,21 +3974,7 @@ class A2AService:
                         except Exception as ws_err:
                             logger.warning(f"[WS] 거절 알림 전송 실패 ({pid}): {ws_err}")
 
-                # 2. 시스템 메시지: 남은 참여자들에게 거절 알림 (Loop 밖에서 한 번만 전송)
-                # thread_id로 묶여있으므로 하나의 세션에만 추가하면 됨
-                if all_thread_sessions:
-                    target_session = all_thread_sessions[0]
-                    tsid = target_session["id"]
-                    # 메시지 수신자는 해당 세션의 상대방 (나 자신 제외)
-                    receiver = target_session.get("target_user_id") if target_session.get("target_user_id") != user_id else target_session.get("initiator_user_id")
-                    
-                    await A2ARepository.add_message(
-                        session_id=tsid,
-                        sender_user_id=user_id,
-                        receiver_user_id=receiver,
-                        message_type="schedule_rejection",
-                        message={"text": reject_msg, "left_user_id": user_id, "left_user_name": user_name}
-                    )
+                # 2. 시스템 메시지 비노출: 채팅방/A2A 로그에 "약속에서 나갔습니다" 메시지는 저장하지 않음
 
                 # 3. chat_log 메타데이터 업데이트 (거절 상태 기록)
                 for pid in all_participants:
@@ -4015,27 +4042,7 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
-                    # [RE-ENABLED] 상대방에게 알림 전송 (알림 탭에 표시)
-                    # 거절한 본인에게는 알림을 보내지 않음
-                    if str(pid) != str(user_id):
-                        await ChatRepository.create_chat_log(
-                            user_id=pid,
-                            request_text=None,
-                            response_text=f"{user_name}님이 약속에서 나갔습니다.",
-                            friend_id=target_friend_id,
-                            session_id=target_session_id,
-                            message_type="schedule_rejection",
-                            metadata={
-                                "rejected_by": user_id,
-                                "rejected_by_name": user_name,
-                                "thread_id": thread_id,
-                                "session_ids": session_ids,
-                                "schedule_date": proposal.get("date"),
-                                "schedule_time": proposal.get("time"),
-                                "schedule_activity": proposal.get("activity"),
-                                "schedule_location": proposal.get("location"),
-                            }
-                        )
+                    # [DISABLED] 거절 시스템 문구를 채팅방에 남기지 않기 위해 chat_log 저장 생략
                     
                 return {"status": 200, "message": "약속에서 나갔습니다."}
 
