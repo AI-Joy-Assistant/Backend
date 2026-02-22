@@ -1242,7 +1242,14 @@ async def approve_session(
         if not session:
             raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
         
-        if session["initiator_user_id"] != current_user_id and session["target_user_id"] != current_user_id:
+        # [FIX] participant_user_ids도 확인 (3명 이상 그룹 세션 지원)
+        participant_ids = session.get("participant_user_ids") or []
+        is_participant = (
+            session["initiator_user_id"] == current_user_id or
+            session["target_user_id"] == current_user_id or
+            current_user_id in participant_ids
+        )
+        if not is_participant:
             raise HTTPException(status_code=403, detail="승인 권한이 없습니다.")
 
         # 승인 로직 실행 (Service에 위임)
@@ -1275,6 +1282,7 @@ async def reschedule_session(
         new_time = body.get("time")  # 새로 선택한 시작 시간
         end_date = body.get("endDate")  # 종료 날짜
         end_time = body.get("endTime")  # 종료 시간
+        duration_nights = body.get("duration_nights", 0)  # [NEW] 박 수 (0=당일, 1+=다박)
 
         # 권한 확인 및 세션 조회
         session = await A2ARepository.get_session(session_id)
@@ -1294,7 +1302,8 @@ async def reschedule_session(
             new_date=new_date,
             new_time=new_time,
             end_date=end_date,
-            end_time=end_time
+            end_time=end_time,
+            duration_nights=duration_nights  # [NEW] 박 수 전달
         )
         
         return result
