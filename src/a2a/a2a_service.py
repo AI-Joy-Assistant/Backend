@@ -493,18 +493,24 @@ class A2AService:
                 # Fallback: initiator + target
                 participant_user_ids = [initiator_user_id, target_user_id]
             
-            # 나간 참여자 제외
-            left_participants = set(str(lp) for lp in place_pref.get("left_participants", []))
-            active_participants = [str(pid) for pid in participant_user_ids if str(pid) not in left_participants]
-            
-            # logger.info(f"📌 [다인세션] 전체 참여자: {participant_user_ids}, 활성 참여자: {active_participants}")
-            
             # [FIX] 다인세션의 경우 thread_id로 모든 세션을 조회하여 승인 상태 동기화
             thread_id = place_pref.get("thread_id")
             all_thread_sessions = [session]
             if thread_id:
                 all_thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
-                # logger.info(f"📌 [다인세션] thread_id={thread_id}, 총 세션 수: {len(all_thread_sessions)}")
+            
+            # [FIX] 나간 참여자를 모든 thread 세션에서 합쳐서 수집 (단일 세션만 보면 동기화 누락 가능)
+            left_participants = set(str(lp) for lp in place_pref.get("left_participants", []))
+            for ts in all_thread_sessions:
+                ts_pref = ts.get("place_pref", {})
+                if isinstance(ts_pref, str):
+                    try: ts_pref = json.loads(ts_pref)
+                    except: ts_pref = {}
+                for lp in ts_pref.get("left_participants", []):
+                    left_participants.add(str(lp))
+            
+            active_participants = [str(pid) for pid in participant_user_ids if str(pid) not in left_participants]
+            logger.info(f"📌 [approve_session] 전체: {[str(p) for p in participant_user_ids]}, 나간: {left_participants}, 활성: {active_participants}")
             
             # 모든 thread 세션에서 approved_by_list 수집 및 현재 사용자 추가
             approved_by_list = []
@@ -643,8 +649,9 @@ class A2AService:
             duration_nights = place_pref.get("duration_nights", 0) if place_pref else 0
             logger.info(f"📅 [Calendar Parse] duration_nights={duration_nights}")
             
+            is_all_day_event = False  # [NEW] 종일 이벤트 플래그
             if duration_nights > 0:
-                # 다박 일정: 첫째 날 00:00 ~ 마지막 날 23:59
+                # 다박 일정: 종일 이벤트로 처리
                 try:
                     if date_str:
                         # 여러 형식 지원 (YYYY-MM-DD, MM월 DD일 등)
@@ -662,13 +669,14 @@ class A2AService:
                             start_date = None
                         
                         if start_date:
-                            # 시작 시간: 첫째 날 00:00
+                            # [FIX] 종일 이벤트: 시작일 00:00 ~ 마지막 날+1 00:00 (Google Calendar은 종료일이 exclusive)
                             start_time = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=KST)
-                            # 종료 시간: 마지막 날(시작일 + duration_nights) 23:59
-                            end_date = start_date + timedelta(days=duration_nights)
-                            end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=KST)
+                            # 종료: 시작일 + duration_nights + 1 (exclusive end for all-day events)
+                            end_date = start_date + timedelta(days=duration_nights + 1)
+                            end_time = datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=KST)
+                            is_all_day_event = True
                             
-                            logger.info(f"📅 [다박 일정] {duration_nights}박 {duration_nights+1}일 - 시작: {start_time} / 종료: {end_time}")
+                            logger.info(f"📅 [다박 일정] {duration_nights}박 {duration_nights+1}일 종일 이벤트 - 시작: {start_time} / 종료(exclusive): {end_time}")
                 except Exception as date_err:
                     logger.error(f"다박 일정 날짜 파싱 실패: {date_err}")
             
@@ -725,22 +733,38 @@ class A2AService:
                     saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
                     end_time = start_time + timedelta(minutes=saved_duration)
             
-            # 참여자 이름 조회
+            # 참여자 이름 조회 (활성 참여자 전원)
             initiator = await AuthRepository.find_user_by_id(initiator_user_id)
             target = await AuthRepository.find_user_by_id(target_user_id)
             initiator_name = initiator.get("name", "요청자") if initiator else "요청자"
             target_name = target.get("name", "상대방") if target else "상대방"
             
+            # [FIX] 활성 참여자 전원의 이름 조회 (3명 이상 지원)
+            active_participant_names = []
+            for pid in active_participants:
+                p_user = await AuthRepository.find_user_by_id(pid)
+                p_name = p_user.get("name", "사용자") if p_user else "사용자"
+                active_participant_names.append(p_name)
+            
             # 확정된 정보를 details에 저장 (먼저 상태 업데이트)
+            # [FIX] 다박 일정일 때 날짜 표시 개선
+            if duration_nights > 0:
+                proposed_date_display = f"{start_time.strftime('%m월 %d일')} ~ {end_time.strftime('%m월 %d일')} ({duration_nights}박 {duration_nights+1}일)"
+                proposed_time_display = "종일"
+            else:
+                proposed_date_display = start_time.strftime("%m월 %d일")
+                proposed_time_display = start_time.strftime("%p %I시").replace("AM", "오전").replace("PM", "오후")
+            
             confirmed_details = {
-                "proposedDate": start_time.strftime("%m월 %d일"),
-                "proposedTime": start_time.strftime("%p %I시").replace("AM", "오전").replace("PM", "오후"),
+                "proposedDate": proposed_date_display,
+                "proposedTime": proposed_time_display,
                 "location": location,
                 "purpose": activity,
                 "proposer": initiator_name,
-                "participants": [initiator_name, target_name],
+                "participants": active_participant_names,
                 "start_time": start_time.isoformat(),
-                "end_time": end_time.isoformat()
+                "end_time": end_time.isoformat(),
+                "duration_nights": duration_nights,  # [NEW] 프론트엔드에서 다박 여부 확인용
             }
             
             # 세션 상태를 completed로 업데이트 (모든 thread 세션)
@@ -846,7 +870,8 @@ class A2AService:
                                         end_time=end_time.isoformat(),
                                         location=location,
                                         description=evt_description,
-                                        attendees=[]
+                                        attendees=[],
+                                        is_all_day=is_all_day_event  # [NEW] 다박이면 종일 이벤트
                                     )
                                     
                                     gc_service = GoogleCalendarService()
@@ -1056,7 +1081,8 @@ class A2AService:
         new_date: Optional[str] = None,
         new_time: Optional[str] = None,
         end_date: Optional[str] = None,
-        end_time: Optional[str] = None
+        end_time: Optional[str] = None,
+        duration_nights: int = 0  # [NEW] 박 수 (0=당일, 1+=다박)
     ) -> Dict[str, Any]:
         """
         A2A 세션의 재조율을 요청합니다.
@@ -1081,6 +1107,7 @@ class A2AService:
             print(f"   - Reason: {reason}")
             print(f"   - New Date: {new_date}")
             print(f"   - New Time: {new_time}")
+            print(f"   - Duration Nights: {duration_nights}")
             
             # 1. thread_id로 관련된 모든 세션 찾기 (3명 이상 그룹 지원)
             thread_id = place_pref.get("thread_id")
@@ -1126,6 +1153,7 @@ class A2AService:
                 "has_conflict": False,  # [NEW] 충돌 플래그 초기화
                 "conflicting_sessions": [],  # [NEW] 충돌 세션 목록 초기화
                 "conflict_reason": None,  # [NEW] 충돌 사유 초기화
+                "duration_nights": duration_nights,  # [NEW] 박 수 저장 (approve_session에서 사용)
             }
             print(f"🔄 [Reschedule] 초기화 - approved_by_list: {[user_id]}, left_participants 유지: {existing_left_participants}")
             
@@ -1223,7 +1251,8 @@ class A2AService:
                         target_date=formatted_date,
                         target_time=formatted_time,
                         location=place_pref.get("location"),
-                        all_session_ids=all_session_ids  # 모든 관련 세션에 협상 로그 저장
+                        all_session_ids=all_session_ids,  # 모든 관련 세션에 협상 로그 저장
+                        duration_nights=duration_nights  # [NEW] 박 수 전달
                     )
                     print(f"✅ [Reschedule Background] 협상 완료: {result.get('status')}")
                 except Exception as bg_error:
@@ -1242,6 +1271,18 @@ class A2AService:
                             update_details["proposedDate"] = proposal.get("date")
                             update_details["proposedTime"] = proposal.get("time")
                             update_details["location"] = proposal.get("location")
+                        # [NEW] duration_nights 보존 (approve_session에서 종일 이벤트 생성에 필요)
+                        if duration_nights > 0:
+                            update_details["duration_nights"] = duration_nights
+                            # 다박일 때 proposedEndDate도 저장
+                            if update_details.get("proposedDate"):
+                                try:
+                                    pd = update_details["proposedDate"]
+                                    if re.match(r'^\d{4}-\d{2}-\d{2}$', pd):
+                                        end_d = datetime.strptime(pd, "%Y-%m-%d") + timedelta(days=duration_nights)
+                                        update_details["proposedEndDate"] = end_d.strftime("%Y-%m-%d")
+                                except Exception:
+                                    pass
                         
                         for sid in all_session_ids:
                             await A2ARepository.update_session_status(sid, "pending_approval", details=update_details)
