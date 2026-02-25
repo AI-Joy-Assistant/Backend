@@ -1236,6 +1236,31 @@ class A2AService:
                         "timestamp": datetime.now(KST).isoformat()
                     }, target_id)
                 logger.info(f"[WS] 재조율 요청 즉시 알림 전송: {list(notify_targets)}")
+                
+                # [NEW] 알림 탭에 재조율 요청 알림 영속 저장 (chat_log)
+                from src.chat.chat_repository import ChatRepository
+                activity_name = place_pref.get("summary") or place_pref.get("activity") or "일정"
+                for target_id in notify_targets:
+                    try:
+                        await ChatRepository.create_chat_log(
+                            user_id=target_id,
+                            request_text=None,
+                            response_text=f"{requester_name}님이 '{activity_name}' 일정의 재조율을 요청했습니다. ({formatted_date} {formatted_time})",
+                            friend_id=user_id,
+                            message_type="schedule_reschedule",
+                            session_id=None,
+                            metadata={
+                                "session_id": session_id,
+                                "thread_id": thread_id,
+                                "reschedule_by": user_id,
+                                "reschedule_by_name": requester_name,
+                                "schedule_date": formatted_date,
+                                "schedule_time": formatted_time,
+                                "schedule_activity": activity_name,
+                            }
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"재조율 알림 chat_log 저장 실패: {log_err}")
             except Exception as ws_err:
                 logger.warning(f"[WS] 재조율 요청 알림 전송 실패: {ws_err}")
             
@@ -3741,13 +3766,15 @@ class A2AService:
                             if access_token:
                                 # Google Calendar 연동된 사용자: Google Calendar에도 동기화
                                 try:
+                                    is_all_day_event = duration_nights > 0
                                     event_req = CreateEventRequest(
                                         summary=evt_summary,
                                         start_time=start_time.isoformat(),
                                         end_time=end_time.isoformat(),
                                         location=proposal.get("location"),
                                         description="A2A Agent에 의해 자동 생성된 일정입니다.",
-                                        attendees=[] 
+                                        attendees=[],
+                                        is_all_day=is_all_day_event  # [NEW] 다박이면 종일 이벤트
                                     )
                                     
                                     gc_service = GoogleCalendarService()
@@ -3999,10 +4026,25 @@ class A2AService:
                     # 일부만 거절함 → left_participants만 업데이트하고 세션은 활성 상태 유지
                     logger.info(f"🔴 [거절] 일부만 나감 - left_participants 업데이트만 수행, 세션 상태 유지")
                 
-                # [추가] WebSocket으로 상대방에게 거절 알림 전송
+                # [추가] WebSocket으로 상대방에게 거절 알림 전송 및 DB 알림 기록
+                from src.chat.chat_repository import ChatRepository
+                
+                place_pref_first = first_session.get("place_pref", {}) if first_session else {}
+                if isinstance(place_pref_first, str):
+                    try:
+                        import json
+                        place_pref_first = json.loads(place_pref_first)
+                    except:
+                        place_pref_first = {}
+                
+                req_date = place_pref_first.get("date") or place_pref_first.get("proposedDate")
+                req_time = place_pref_first.get("time") or place_pref_first.get("proposedTime")
+                activity = place_pref_first.get("activity") or place_pref_first.get("purpose")
+                
                 for pid in all_participants:
                     if str(pid) != str(user_id):  # 거절한 본인 제외
                         try:
+                            # 1. WebSocket 알림
                             await ws_manager.send_personal_message({
                                 "type": "a2a_rejected",
                                 "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
@@ -4012,8 +4054,25 @@ class A2AService:
                                 "all_rejected": all_others_left  # 전원 거절 여부 전달
                             }, str(pid))
                             logger.info(f"[WS] 거절 알림 전송: {pid}")
+                            
+                            # 2. DB 시스템 알림 추가 (Notification 탭에 보이기 위함)
+                            await ChatRepository.create_chat_log(
+                                user_id=pid,
+                                request_text=None,
+                                response_text=f"{user_name}님이 일정을 거절했습니다.",
+                                friend_id=user_id,
+                                message_type="schedule_rejection",
+                                metadata={
+                                    "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
+                                    "rejected_by": user_id,
+                                    "rejected_by_name": user_name,
+                                    "schedule_date": req_date,
+                                    "schedule_time": req_time,
+                                    "schedule_activity": activity
+                                }
+                            )
                         except Exception as ws_err:
-                            logger.warning(f"[WS] 거절 알림 전송 실패 ({pid}): {ws_err}")
+                            logger.warning(f"[WS/DB] 거절 알림 전송/저장 실패 ({pid}): {ws_err}")
 
                 # 2. 시스템 메시지 비노출: 채팅방/A2A 로그에 "약속에서 나갔습니다" 메시지는 저장하지 않음
 
@@ -4085,6 +4144,38 @@ class A2AService:
 
                     # [DISABLED] 거절 시스템 문구를 채팅방에 남기지 않기 위해 chat_log 저장 생략
                     
+                # [NEW] 남은 참여자들이 모두 승인 완료한 상태인지 확인 후 완료 처리
+                if not all_others_left:
+                    # 1. 나머지 '활성 참여자' (거절하지 않은 사람) 구하기
+                    active_participants = [str(p) for p in all_participants if str(p) not in global_left_participants]
+                    
+                    # 2. 모든 세션(또는 첫 번째 세션)의 approved_by_list 취합
+                    approved_by_list = set()
+                    for t_session in all_thread_sessions:
+                        tp = t_session.get("place_pref", {})
+                        if isinstance(tp, str):
+                            try: tp = json.loads(tp)
+                            except: tp = {}
+                        for ab in tp.get("approved_by_list", []):
+                            approved_by_list.add(str(ab))
+                    
+                    # 3. 요청자(initiator or rescheduleRequestedBy) 자동 승인 간주
+                    if actual_requester and str(actual_requester) not in approved_by_list:
+                        approved_by_list.add(str(actual_requester))
+                    
+                    # 4. 남은 활성 참여자가 모두 승인했는지 확인
+                    if active_participants and all(str(p) in approved_by_list for p in active_participants):
+                        logger.info(f"🔴 [거절 후 완료 체크] 거절 후 남은 참여자({active_participants})가 모두 승인 상태임! 완료 처리 진행.")
+                        # approved_by_list 중 아무나 한 명의 ID로 approve_session을 다시 호출하여 완료 프로세스(달력 저장 등)를 태움
+                        any_approved_user = active_participants[0]
+                        try:
+                            # 이미 현재 함수가 reject_or_leave_session이므로, 클래스 메서드 approve_session을 호출
+                            # first_session["id"]를 사용하여 호출
+                            await A2AService.approve_session(first_session["id"], any_approved_user)
+                            logger.info(f"🔴 [거절 후 완료 체크] 자동 승인 완료 프로세스 실행 성공")
+                        except Exception as e:
+                            logger.error(f"🔴 [거절 후 완료 체크] 자동 승인 완료 프로세스 실행 실패: {e}")
+
                 return {"status": 200, "message": "약속에서 나갔습니다."}
 
         except Exception as e:
