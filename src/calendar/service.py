@@ -162,11 +162,19 @@ class GoogleCalendarService:
             logger.error(f"날짜 파싱 실패: start={event_data.start_time}, end={event_data.end_time}, {e}")
             raise Exception(f"잘못된 날짜 형식: {str(e)}")
 
-        event_body: Dict[str, Any] = {
-            "summary": event_data.summary,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Seoul"},
-            "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "Asia/Seoul"},
-        }
+        if getattr(event_data, "is_all_day", False):
+            # 구글 캘린더 '종일' 이벤트는 dateTime 대신 date 파라미터를 사용해야 함
+            event_body: Dict[str, Any] = {
+                "summary": event_data.summary,
+                "start": {"date": start_dt.strftime("%Y-%m-%d")},
+                "end":   {"date": end_dt.strftime("%Y-%m-%d")},
+            }
+        else:
+            event_body: Dict[str, Any] = {
+                "summary": event_data.summary,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Seoul"},
+                "end":   {"dateTime": end_dt.isoformat(),   "timeZone": "Asia/Seoul"},
+            }
         if getattr(event_data, "description", None):
             event_body["description"] = event_data.description
         if getattr(event_data, "location", None):
@@ -214,8 +222,9 @@ class GoogleCalendarService:
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.delete(url, headers=headers)
-            if r.status_code in (200, 204):
-                logger.info(f"[CAL][DELETE] 성공: {event_id}")
+            if r.status_code in (200, 204, 410):
+                # 410 = Resource already deleted (이미 삭제된 이벤트) → 성공으로 처리
+                logger.info(f"[CAL][DELETE] 성공: {event_id} (status={r.status_code})")
                 return True
             logger.error(f"[CAL][DELETE] 실패: {r.status_code} - {r.text}")
             return False
@@ -305,7 +314,8 @@ class CalendarService:
                 start_time=event_data.get("start_time"),
                 end_time=event_data.get("end_time"),
                 location=event_data.get("location", ""),
-                attendees=event_data.get("attendees", [])
+                attendees=event_data.get("attendees", []),
+                is_all_day=event_data.get("is_all_day", False)
             )
             
             # Google Calendar에 이벤트 생성
