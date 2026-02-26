@@ -894,9 +894,116 @@ class ChatService:
                         }
                     }
             
+            # ─────────────────────────────────────────────────────
+            # [✅ FAST PATH] RequestMeetingScreen에서 모든 정보가 명시적으로 전달된 경우
+            # LLM 호출(IntentService + OpenAI) 완전 스킵 → 바로 A2A 시작
+            # ─────────────────────────────────────────────────────
+            import asyncio
+            
+            if selected_friend_ids and start_date and (start_time or is_all_day):
+                t_fast = time.time()
+                logger.info(f"⚡ [FAST PATH] 명시적 파라미터 감지 - LLM 스킵. friends={len(selected_friend_ids)}, date={start_date}, time={start_time}, is_all_day={is_all_day}")
+                
+                from src.a2a.a2a_service import A2AService
+                
+                # 친구 이름 조회
+                user_names = await ChatRepository.get_user_names_by_ids(selected_friend_ids)
+                friend_names = [user_names.get(fid, '사용자') for fid in selected_friend_ids]
+                
+                # 시간/날짜 정보 설정
+                selected_date = start_date
+                selected_time = start_time or "00:00"
+                end_time_val = end_time
+                final_duration = duration_minutes if duration_minutes else 60
+                final_summary = explicit_title or "약속"
+                final_location = explicit_location
+                is_travel = duration_nights > 0
+                
+                # 종일 모드 처리
+                if is_all_day:
+                    selected_time = "00:00"
+                    end_time_val = "23:59"
+                    days = duration_nights + 1 if duration_nights > 0 else 1
+                    final_duration = 1440 * days
+                
+                # 확인 메시지 생성
+                if is_travel:
+                    confirm_msg = f"{selected_date}부터 {duration_nights}박 {duration_nights + 1}일 여행 일정을 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                elif is_all_day:
+                    if duration_nights > 0:
+                        confirm_msg = f"{selected_date}부터 {duration_nights}박 {duration_nights + 1}일 종일 일정을 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                    else:
+                        confirm_msg = f"{selected_date} 종일 일정을 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                elif end_time_val:
+                    confirm_msg = f"{selected_date} {selected_time}~{end_time_val}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                else:
+                    confirm_msg = f"{selected_date} {selected_time}로 상대방에게 요청을 보냈습니다. A2A 화면에서 확인해주세요!"
+                
+                if len(friend_names) > 1:
+                    wait_msg = f"{', '.join(friend_names)}님들의 Agent와 일정을 조율하고 있습니다..."
+                else:
+                    wait_msg = f"{friend_names[0]}님의 Agent와 일정을 조율하고 있습니다..."
+                
+                # DB에 메시지 저장
+                await ChatRepository.create_chat_log(
+                    user_id=user_id,
+                    request_text=None,
+                    response_text=confirm_msg,
+                    friend_id=None,
+                    message_type="ai_response",
+                    session_id=session_id,
+                )
+                await ChatRepository.create_chat_log(
+                    user_id=user_id,
+                    request_text=None,
+                    response_text=wait_msg,
+                    friend_id=selected_friend_ids[0] if len(selected_friend_ids) == 1 else None,
+                    message_type="ai_response",
+                    session_id=session_id,
+                )
+                
+                # ✅ A2A 협상을 백그라운드 태스크로 실행 (HTTP 응답 즉시 반환)
+                async def _run_a2a_background():
+                    try:
+                        await A2AService.start_multi_user_session(
+                            initiator_user_id=user_id,
+                            target_user_ids=selected_friend_ids,
+                            summary=final_summary,
+                            date=selected_date,
+                            time=selected_time,
+                            end_time=end_time_val,
+                            location=final_location,
+                            activity=final_summary,
+                            duration_minutes=final_duration,
+                            force_new=True,
+                            origin_chat_session_id=session_id,
+                            duration_nights=duration_nights
+                        )
+                    except Exception as bg_err:
+                        logger.error(f"[FAST PATH] 백그라운드 A2A 실패: {bg_err}", exc_info=True)
+                
+                asyncio.create_task(_run_a2a_background())
+                
+                logger.info(f"⚡ [FAST PATH] 완료: {time.time() - t_fast:.3f}s (A2A는 백그라운드)")
+                
+                return {
+                    "status": 200,
+                    "data": {
+                        "user_message": message,
+                        "ai_response": confirm_msg,
+                        "schedule_info": {
+                            "selected_date": selected_date,
+                            "selected_time": selected_time,
+                            "end_time": end_time_val,
+                        },
+                        "calendar_event": None,
+                        "usage": None,
+                        "a2a_started": True
+                    }
+                }
+            
             # 3. [✅ 병렬화] 의도 파악 + 응답 생성을 동시에 실행
             # 일정 추출과 LLM 응답 생성을 병렬로 실행하여 속도 향상
-            import asyncio
             
             # OpenAI 서비스 인스턴스 생성 (병렬 작업 전에 미리 생성)
             openai_service = OpenAIService()

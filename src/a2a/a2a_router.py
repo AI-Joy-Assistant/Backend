@@ -270,64 +270,47 @@ async def get_a2a_session(
                 if target_id and target_id != initiator_id:
                     participant_ids.append(target_id)
             
-            print(f"🔍 [Attendees] participant_user_ids: {participant_ids}")
-            
             # place_pref에서 left_participants 가져오기
             left_participants = place_pref.get("left_participants", [])
-            print(f"🔍 [Attendees] left_participants: {left_participants}")
             
             # [NEW] 승인된 사용자 목록 조회 (place_pref에서 approved_by_list 확인)
             if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
-                # 1. 명시적 승인 목록 추가
                 approved_list = place_pref.get("approved_by_list", [])
                 if approved_list:
                     for uid in approved_list:
                         approved_user_ids.add(str(uid))
-                    print(f"🔍 [Attendees] place_pref approved_by_list: {approved_list}")
                 
-                # 2. 요청자(Initiator 또는 Rescheduler) 자동 추가 (항상 승인 상태)
-                # approved_by_list의 유무와 관계없이, 제안자는 항상 승인자로 포함해야 함
                 reschedule_requested_by = place_pref.get("rescheduleRequestedBy")
                 if reschedule_requested_by:
                     approved_user_ids.add(str(reschedule_requested_by))
                 elif initiator_id:
-                    # 원래 요청자(initiator)는 자동 승인
                     approved_user_ids.add(str(initiator_id))
             elif session_status == "completed":
-                # 완료된 세션은 모든 참여자가 승인됨
                 for pid in participant_ids:
                     if pid not in left_participants:
                         approved_user_ids.add(str(pid))
             
-            print(f"🔍 [Attendees] approved_user_ids: {approved_user_ids}")
-            
-            # 3. 모든 참여자 정보 조회 (나간 사람 제외)
-            for participant_id in participant_ids:
-                # 나간 참여자는 제외
-                if participant_id in left_participants:
-                    print(f"🔍 [Attendees] Skipping left participant: {participant_id}")
-                    continue
-                    
-                if participant_id and participant_id not in added_ids:
-                    try:
-                        participant_info = await AuthRepository.find_user_by_id(participant_id)
-                        if participant_info:
-                            attendees.append({
-                                "id": participant_id,
-                                "name": participant_info.get("name") or "알 수 없음",
-                                "avatar": participant_info.get("profile_image") or "https://picsum.photos/150",
-                                "isCurrentUser": participant_id == current_user_id,
-                                "is_approved": str(participant_id) in approved_user_ids  # NEW
-                            })
-                            added_ids.add(participant_id)
-                    except Exception as e:
-                        print(f"참여자 조회 실패 ({participant_id}): {e}")
+            # [OPTIMIZATION] 일괄 조회로 N+1 쿼리 제거
+            active_participant_ids = [pid for pid in participant_ids if pid and pid not in left_participants]
+            if active_participant_ids:
+                participant_details_map = await ChatRepository.get_user_details_by_ids(active_participant_ids)
+                
+                for participant_id in active_participant_ids:
+                    if participant_id not in added_ids:
+                        p_info = participant_details_map.get(participant_id, {})
+                        attendees.append({
+                            "id": participant_id,
+                            "name": p_info.get("name") or "알 수 없음",
+                            "avatar": p_info.get("profile_image") or "https://picsum.photos/150",
+                            "isCurrentUser": participant_id == current_user_id,
+                            "is_approved": str(participant_id) in approved_user_ids
+                        })
+                        added_ids.add(participant_id)
         except Exception as e:
             print(f"참여자 정보 조회 오류: {e}")
         
-        print(f"📋 [Attendees Final] Total: {len(attendees)}, IDs: {added_ids}")
         details["attendees"] = attendees
-        details["approved_user_ids"] = list(approved_user_ids)  # NEW
+        details["approved_user_ids"] = list(approved_user_ids)
 
 
         session["details"] = details
@@ -466,7 +449,8 @@ async def get_user_sessions(
         # 최근 순으로 정렬
         grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
-        # 3. 상세 정보 일괄 조회 (DB 부하 감소)
+        # 3. 상세 정보 일괄 조회 (DB 부하 감소) - 현재 사용자도 포함
+        all_participant_ids.add(current_user_id)  # [OPTIMIZATION] attendees에 필요
         user_details_map = {}
         if all_participant_ids:
             user_details_map = await ChatRepository.get_user_details_by_ids(list(all_participant_ids))
@@ -819,6 +803,50 @@ async def get_user_sessions(
                 # [NEW] 다박 일정 정보 - 1박 이상이면 시간 대신 날짜 범위 표시
                 "duration_nights": place_pref.get("duration_nights", 0)
             }
+            
+            # [OPTIMIZATION] attendees를 목록 API에서도 제공 (모달에서 즉시 표시)
+            list_attendees = []
+            approved_user_ids = set()
+            p_ids = session.get("participant_ids", [])
+            
+            # 승인자 계산
+            if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
+                for uid in place_pref.get("approved_by_list", []):
+                    approved_user_ids.add(str(uid))
+                reschedule_by = place_pref.get("rescheduleRequestedBy")
+                if reschedule_by:
+                    approved_user_ids.add(str(reschedule_by))
+                elif initiator_id:
+                    approved_user_ids.add(str(initiator_id))
+            elif session_status == "completed":
+                for pid in (session.get("participant_user_ids") or []):
+                    if pid not in left_participants:
+                        approved_user_ids.add(str(pid))
+            
+            # 참여자 정보 구성 (user_details_map에서 가져옴 - 추가 DB 쿼리 없음)
+            all_p_ids = set(p_ids)
+            for pid in (session.get("participant_user_ids") or []):
+                all_p_ids.add(pid)
+            if initiator_id:
+                all_p_ids.add(initiator_id)
+            
+            for pid in all_p_ids:
+                if pid in left_participants:
+                    continue
+                user_info = user_details_map.get(pid, {})
+                if not user_info and pid == current_user_id:
+                    # 현재 사용자는 user_details_map에 없을 수 있음
+                    user_info = {"name": "나"}
+                list_attendees.append({
+                    "id": pid,
+                    "name": user_info.get("name") or "알 수 없음",
+                    "avatar": user_info.get("profile_image") or None,
+                    "isCurrentUser": pid == current_user_id,
+                    "is_approved": str(pid) in approved_user_ids
+                })
+            
+            details["attendees"] = list_attendees
+            details["approved_user_ids"] = list(approved_user_ids)
 
             session["title"] = title
             session["summary"] = summary

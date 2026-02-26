@@ -92,8 +92,20 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         while True:
             # 클라이언트로부터 메시지 수신 (ping/pong 또는 앱 상태 업데이트용)
             data = await websocket.receive_text()
-            # 필요시 처리 (예: 읽음 확인 등)
+            # [NEW] ping/pong 하트비트 처리
+            try:
+                import json as _json
+                msg = _json.loads(data)
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+            except (ValueError, TypeError):
+                pass
+            # 기타 메시지 처리 (읽음 확인 등)
     except WebSocketDisconnect:
+        ws_manager.disconnect(websocket, user_id)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"[WS] 연결 오류 ({user_id}): {e}")
         ws_manager.disconnect(websocket, user_id)
 
 # 정적 파일 서빙 (개인정보처리방침, 이용약관)
