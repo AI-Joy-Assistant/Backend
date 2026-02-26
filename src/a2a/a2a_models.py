@@ -56,4 +56,22 @@ class A2AMessageResponse(BaseModel):
     created_at: datetime
 
 
+class A2AQuickCreateRequest(BaseModel):
+    participant_user_ids: List[str]
+    title: str
+    start_date: str  # YYYY-MM-DD
+    start_time: Optional[str] = None  # HH:MM
+    end_date: Optional[str] = None  # YYYY-MM-DD
+    end_time: Optional[str] = None  # HH:MM
+    location: Optional[str] = None
+    is_all_day: bool = False
+    duration_minutes: int = 60
+    duration_nights: int = 0
+
+
+class A2AQuickCreateResponse(BaseModel):
+    thread_id: str
+    session_ids: List[str]
+    status: str = "in_progress"
+
 

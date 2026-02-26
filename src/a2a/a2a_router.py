@@ -8,7 +8,13 @@ from config.settings import settings
 from config.settings import settings
 from .a2a_service import A2AService, convert_relative_date, convert_relative_time
 from .a2a_repository import A2ARepository
-from .a2a_models import A2ASessionCreate, A2ASessionResponse, A2AMessageResponse
+from .a2a_models import (
+    A2ASessionCreate,
+    A2ASessionResponse,
+    A2AMessageResponse,
+    A2AQuickCreateRequest,
+    A2AQuickCreateResponse,
+)
 from .negotiation_engine import NegotiationEngine
 from .a2a_protocol import NegotiationStatus
 from src.auth.auth_service import AuthService
@@ -32,6 +38,39 @@ def get_current_user_id(request: Request) -> str:
         return str(user_id)
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
+
+
+@router.post("/session/quick-create", response_model=A2AQuickCreateResponse, summary="홈 화면용 빠른 A2A 세션 생성")
+async def quick_create_a2a_session(
+    request: A2AQuickCreateRequest,
+    current_user_id: str = Depends(get_current_user_id),
+):
+    """
+    홈 화면에서 날짜/시간이 이미 확정된 상태로 요청할 때 사용하는 경량 API.
+    - LLM/의도분석/협상 과정을 건너뛰고 세션만 즉시 생성합니다.
+    """
+    result = await A2AService.quick_create_multi_user_session(
+        initiator_user_id=current_user_id,
+        participant_user_ids=request.participant_user_ids,
+        title=request.title,
+        start_date=request.start_date,
+        start_time=request.start_time,
+        end_date=request.end_date,
+        end_time=request.end_time,
+        location=request.location,
+        is_all_day=request.is_all_day,
+        duration_minutes=request.duration_minutes,
+        duration_nights=request.duration_nights,
+    )
+
+    if result.get("status") != 200:
+        raise HTTPException(status_code=result.get("status", 500), detail=result.get("error", "빠른 세션 생성 실패"))
+
+    return A2AQuickCreateResponse(
+        thread_id=result["thread_id"],
+        session_ids=result["session_ids"],
+        status="in_progress",
+    )
 
 @router.post("/session/start", summary="A2A 세션 시작 및 전체 시뮬레이션 실행")
 async def start_a2a_session(
@@ -468,6 +507,8 @@ async def get_user_sessions(
 
         # 3. 상세 정보 일괄 조회 (DB 부하 감소)
         user_details_map = {}
+        # 현재 사용자 정보도 포함 (내 아바타/이름 즉시 표시)
+        all_participant_ids.add(current_user_id)
         if all_participant_ids:
             user_details_map = await ChatRepository.get_user_details_by_ids(list(all_participant_ids))
 
@@ -819,6 +860,40 @@ async def get_user_sessions(
                 # [NEW] 다박 일정 정보 - 1박 이상이면 시간 대신 날짜 범위 표시
                 "duration_nights": place_pref.get("duration_nights", 0)
             }
+
+            # 목록 응답에도 참석자 승인/아바타 정보 포함 (모달 첫 렌더 즉시 표시용)
+            participant_ids = session.get("participant_user_ids") or [initiator_id, session.get("target_user_id")]
+            approved_user_ids = set()
+            if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
+                approved_list = place_pref.get("approved_by_list", []) if isinstance(place_pref, dict) else []
+                for uid in approved_list or []:
+                    approved_user_ids.add(str(uid))
+
+                reschedule_requested_by = place_pref.get("rescheduleRequestedBy") if isinstance(place_pref, dict) else None
+                if reschedule_requested_by:
+                    approved_user_ids.add(str(reschedule_requested_by))
+                elif initiator_id:
+                    approved_user_ids.add(str(initiator_id))
+            elif session_status == "completed":
+                for pid in participant_ids:
+                    if pid:
+                        approved_user_ids.add(str(pid))
+
+            attendees = []
+            for pid in participant_ids:
+                if not pid:
+                    continue
+                p_info = user_details_map.get(pid, {})
+                attendees.append({
+                    "id": pid,
+                    "name": ("나" if str(pid) == str(current_user_id) else p_info.get("name", "알 수 없음")),
+                    "avatar": p_info.get("profile_image"),
+                    "isCurrentUser": str(pid) == str(current_user_id),
+                    "is_approved": str(pid) in approved_user_ids
+                })
+
+            details["attendees"] = attendees
+            details["approved_user_ids"] = list(approved_user_ids)
 
             session["title"] = title
             session["summary"] = summary

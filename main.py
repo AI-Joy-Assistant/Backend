@@ -92,7 +92,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         while True:
             # 클라이언트로부터 메시지 수신 (ping/pong 또는 앱 상태 업데이트용)
             data = await websocket.receive_text()
-            # 필요시 처리 (예: 읽음 확인 등)
+            # [NEW] ping/pong heartbeat - 모바일 연결 유지
+            if data == "ping":
+                await websocket.send_text("pong")
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, user_id)
 

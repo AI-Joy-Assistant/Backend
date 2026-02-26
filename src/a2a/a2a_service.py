@@ -174,6 +174,113 @@ def convert_relative_time(time_str: Optional[str], activity: Optional[str] = Non
     return None
 
 class A2AService:
+    @staticmethod
+    async def quick_create_multi_user_session(
+        initiator_user_id: str,
+        participant_user_ids: List[str],
+        title: str,
+        start_date: str,
+        start_time: Optional[str] = None,
+        end_date: Optional[str] = None,
+        end_time: Optional[str] = None,
+        location: Optional[str] = None,
+        is_all_day: bool = False,
+        duration_minutes: int = 60,
+        duration_nights: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        홈 화면 전용 빠른 A2A 생성:
+        - LLM/의도분석/협상 엔진 없이 세션만 즉시 생성
+        - target별 세션을 만들고 동일 thread_id로 그룹화
+        """
+        try:
+            target_user_ids = [
+                str(uid) for uid in (participant_user_ids or [])
+                if str(uid) != str(initiator_user_id)
+            ]
+            if not target_user_ids:
+                return {"status": 400, "error": "참여자(user_ids)가 필요합니다."}
+
+            thread = await A2ARepository.create_thread(
+                initiator_id=initiator_user_id,
+                participant_ids=target_user_ids,
+                title=title,
+            )
+            thread_id = thread["id"]
+
+            formatted_requested_date = convert_relative_date(start_date) or start_date
+            formatted_requested_time = (
+                convert_relative_time(start_time, title) if start_time else None
+            ) or start_time
+            formatted_end_date = end_date or start_date
+
+            all_participants = [str(initiator_user_id)] + target_user_ids
+            session_ids: List[str] = []
+
+            for target_id in target_user_ids:
+                place_pref = {
+                    "summary": title,
+                    "purpose": title,
+                    "activity": title,
+                    "thread_id": thread_id,
+                    "participants": target_user_ids,
+                    "location": location,
+                    "date": start_date,
+                    "time": start_time,
+                    "requestedDate": formatted_requested_date,
+                    "requestedTime": formatted_requested_time,
+                    "proposedDate": formatted_requested_date or start_date,
+                    "proposedTime": formatted_requested_time or start_time,
+                    "proposedEndDate": formatted_end_date,
+                    "proposedEndTime": end_time,
+                    "requestedEndTime": end_time,
+                    "is_all_day": is_all_day,
+                    "duration_minutes": duration_minutes,
+                    "duration_nights": duration_nights,
+                    "approved_by_list": [str(initiator_user_id)],
+                }
+
+                session = await A2ARepository.create_session(
+                    initiator_user_id=initiator_user_id,
+                    target_user_id=target_id,
+                    intent="schedule",
+                    place_pref=place_pref,
+                    time_window={
+                        "date": start_date,
+                        "time": start_time,
+                        "end_date": formatted_end_date,
+                        "end_time": end_time,
+                        "duration_minutes": duration_minutes,
+                    },
+                    participant_user_ids=all_participants,
+                )
+                session_ids.append(session["id"])
+                await A2ARepository.update_session_status(session["id"], "in_progress")
+
+            try:
+                initiator = await AuthRepository.find_user_by_id(initiator_user_id)
+                initiator_name = initiator.get("name", "사용자") if initiator else "사용자"
+                notify_user_ids = {str(initiator_user_id), *[str(tid) for tid in target_user_ids]}
+                for user_id in notify_user_ids:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_request",
+                        "thread_id": thread_id,
+                        "from_user": initiator_name,
+                        "summary": title,
+                        "session_created": True,
+                        "timestamp": datetime.now(KST).isoformat(),
+                    }, user_id)
+            except Exception as ws_err:
+                logger.warning(f"[WS] quick-create 알림 전송 실패: {ws_err}")
+
+            return {
+                "status": 200,
+                "thread_id": thread_id,
+                "session_ids": session_ids,
+            }
+        except Exception as e:
+            logger.error(f"quick_create_multi_user_session 실패: {str(e)}", exc_info=True)
+            return {"status": 500, "error": f"빠른 세션 생성 실패: {str(e)}"}
     
     @staticmethod
     async def start_a2a_session(
@@ -565,6 +672,23 @@ class A2AService:
                         pending_names.append(pending_user.get("name", "알 수 없음"))
                 
                 pending_names_str = ", ".join(pending_names) if pending_names else ""
+                
+                # [NEW] 부분 승인 시 다른 참여자들에게 실시간 알림 (이벤트 카드 즉시 갱신)
+                try:
+                    for pid in active_participants:
+                        if str(pid) != str(user_id):
+                            await ws_manager.send_personal_message({
+                                "type": "a2a_status_changed",
+                                "session_id": session_id,
+                                "new_status": "partial_approved",
+                                "approved_by": str(user_id),
+                                "approved_by_name": user_name,
+                                "remaining_count": remaining_count,
+                                "timestamp": datetime.now(KST).isoformat()
+                            }, str(pid))
+                    logger.info(f"[WS] 부분 승인 알림 전송 완료 - approved_by: {user_name}")
+                except Exception as ws_err:
+                    logger.warning(f"[WS] 부분 승인 알림 전송 실패: {ws_err}")
                 
                 return {
                     "status": 200,
@@ -1058,6 +1182,20 @@ class A2AService:
                     )
             except Exception as noti_err:
                 logger.error(f"일정 확정 알림 로그 생성 중 오류: {noti_err}")
+
+            # [NEW] 전원 승인 완료 시 모든 참여자에게 실시간 알림 (이벤트 카드 즉시 갱신)
+            try:
+                for pid in active_participants:
+                    await ws_manager.send_personal_message({
+                        "type": "a2a_status_changed",
+                        "session_id": session_id,
+                        "new_status": "completed",
+                        "confirmed_details": confirmed_details,
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, str(pid))
+                logger.info(f"[WS] 일정 확정 알림 전송 완료 - session: {session_id}")
+            except Exception as ws_err:
+                logger.warning(f"[WS] 일정 확정 알림 전송 실패: {ws_err}")
 
             return {
                 "status": 200,

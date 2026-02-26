@@ -291,11 +291,11 @@ class ChatService:
                     date_keywords = ["내일", "모레", "오늘", "다음주", "이번주"]
                     time_range_pattern = re.search(r'\d{1,2}\s*시.*부터.*\d{1,2}\s*시.*까지', message) or \
                                          re.search(r'(오전|오후)\s*\d{1,2}\s*시.*부터', message)
-                has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
-                
-                if has_new_date and time_range_pattern:
-                    logger.info(f"[CONTEXT OVERRIDE] 새로운 완전한 일정 요청 감지, date_selected_context 무시: '{message}'")
-                    date_selected_context = None  # 컨텍스트 해제 → 아래 메인 로직으로 진행
+                    has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
+
+                    if has_new_date and time_range_pattern:
+                        logger.info(f"[CONTEXT OVERRIDE] 새로운 완전한 일정 요청 감지, date_selected_context 무시: '{message}'")
+                        date_selected_context = None  # 컨텍스트 해제 → 아래 메인 로직으로 진행
 
             if date_selected_context:
                 # [NEW] 끝나는 시간 대기 모드인지 확인
