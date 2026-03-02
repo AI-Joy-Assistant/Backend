@@ -301,27 +301,25 @@ async def get_a2a_session(
             
             print(f"🔍 [Attendees] approved_user_ids: {approved_user_ids}")
             
-            # 3. 모든 참여자 정보 조회 (나간 사람 제외)
-            for participant_id in participant_ids:
-                # 나간 참여자는 제외
-                if participant_id in left_participants:
-                    print(f"🔍 [Attendees] Skipping left participant: {participant_id}")
-                    continue
-                    
-                if participant_id and participant_id not in added_ids:
-                    try:
-                        participant_info = await AuthRepository.find_user_by_id(participant_id)
-                        if participant_info:
+            # 3. 모든 참여자 정보 조회 (나간 사람 제외) - [PERFORMANCE] 배치 처리로 N+1 문제 해결
+            participants_to_fetch = [pid for pid in participant_ids if pid not in left_participants and pid not in added_ids]
+            if participants_to_fetch:
+                try:
+                    from src.chat.chat_repository import ChatRepository
+                    participant_details = await ChatRepository.get_user_details_by_ids(participants_to_fetch)
+                    for pid in participants_to_fetch:
+                        if pid in participant_details:
+                            info = participant_details[pid]
                             attendees.append({
-                                "id": participant_id,
-                                "name": participant_info.get("name") or "알 수 없음",
-                                "avatar": participant_info.get("profile_image") or "https://picsum.photos/150",
-                                "isCurrentUser": participant_id == current_user_id,
-                                "is_approved": str(participant_id) in approved_user_ids  # NEW
+                                "id": pid,
+                                "name": info.get("name") or "알 수 없음",
+                                "avatar": info.get("profile_image") or "https://picsum.photos/150",
+                                "isCurrentUser": pid == current_user_id,
+                                "is_approved": str(pid) in approved_user_ids  # NEW
                             })
-                            added_ids.add(participant_id)
-                    except Exception as e:
-                        print(f"참여자 조회 실패 ({participant_id}): {e}")
+                            added_ids.add(pid)
+                except Exception as e:
+                    print(f"참여자 조회 실패 (배치): {e}")
         except Exception as e:
             print(f"참여자 정보 조회 오류: {e}")
         
@@ -897,6 +895,7 @@ async def get_user_sessions(
             else:
                 # 날짜/시간이 미정인 경우 (조율 중) 표시
                 active_sessions.append(session)
+
 
         return {
             "sessions": active_sessions
