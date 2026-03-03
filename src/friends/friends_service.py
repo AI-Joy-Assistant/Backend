@@ -4,6 +4,7 @@ from .friends_repository import FriendsRepository
 from .friends_models import AddFriendRequest
 from src.websocket.websocket_manager import manager as ws_manager
 from src.chat.chat_repository import ChatRepository
+from config.database import supabase
 
 KST = timezone(timedelta(hours=9))
 
@@ -170,29 +171,41 @@ class FriendsService:
         """친구 요청 거절"""
         try:
             result = await self.repository.reject_friend_request(request_id, user_id)
+            print(f"🔴 [REJECT] result: {result}")
             
             if result["success"]:
                 # 1. WebSocket 알림 (거절)
+                from_user_id = result.get("from_user_id")
+                print(f"🔴 [REJECT] from_user_id: {from_user_id}")
+                
                 try:
-                    if result.get("from_user_id"):
+                    if from_user_id:
                         await ws_manager.send_personal_message({
                             "type": "friend_rejected",
                             "request_id": request_id,
                             "rejected_by": user_id,
                             "timestamp": datetime.now(KST).isoformat()
-                        }, result["from_user_id"])
-                        
-                        # 2. 로그 기록 (History)
-                        self.repository.supabase.table("chat_log").insert({
-                            "user_id": result["from_user_id"],
+                        }, from_user_id)
+                        print(f"🔴 [REJECT] WS 알림 전송 완료")
+                except Exception as ws_err:
+                    print(f"🔴 [REJECT] WS 전송 실패: {ws_err}")
+
+                # 2. 로그 기록 (History) - WS 실패와 무관하게 항상 기록
+                try:
+                    if from_user_id:
+                        supabase.table("chat_log").insert({
+                            "user_id": from_user_id,
                             "friend_id": user_id,
                             "request_text": None,
                             "response_text": f"친구 요청이 거절되었습니다.",
                             "message_type": "friend_rejected",
                             "created_at": datetime.now(KST).isoformat()
                         }).execute()
-                except Exception as e:
-                    print(f"친구 거절 알림/로그 처리 실패: {e}")
+                        print(f"🔴 [REJECT] chat_log 기록 완료: user_id={from_user_id}")
+                    else:
+                        print(f"🔴 [REJECT] from_user_id 없음! chat_log 기록 안 함")
+                except Exception as log_err:
+                    print(f"🔴 [REJECT] chat_log 기록 실패: {log_err}")
 
                 return {
                     "status": 200,

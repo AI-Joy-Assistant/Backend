@@ -3789,6 +3789,7 @@ class A2AService:
                     
                     # [FIX] duration_nights 확인 - 다박 일정은 종일 이벤트로 처리
                     duration_nights = proposal.get("duration_nights", 0)
+                    is_all_day_event = False
                     
                     if duration_nights > 0:
                         # 다박 일정: 첫째 날 00:00 ~ 마지막 날 23:59
@@ -3810,13 +3811,14 @@ class A2AService:
                                 else:
                                     start_date = datetime.now()
                                 
-                                # 시작 시간: 첫째 날 00:00
+                                # [FIX] 종일 이벤트: 시작일 00:00 ~ 마지막 날+1 00:00 (Google Calendar은 종료일이 exclusive)
                                 start_time = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=KST)
-                                # 종료 시간: 마지막 날(시작일 + duration_nights) 23:59
-                                end_date = start_date + timedelta(days=duration_nights)
-                                end_time = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=KST)
+                                # 종료: 시작일 + duration_nights + 1 (exclusive end for all-day events)
+                                end_date_val = start_date + timedelta(days=duration_nights + 1)
+                                end_time = datetime(end_date_val.year, end_date_val.month, end_date_val.day, 0, 0, 0, tzinfo=KST)
+                                is_all_day_event = True
                                 
-                                logger.info(f"[다박 일정] {duration_nights}박 {duration_nights+1}일 - 시작: {start_time} / 종료: {end_time}")
+                                logger.info(f"[다박 일정] {duration_nights}박 {duration_nights+1}일 종일 이벤트 - 시작: {start_time} / 종료(exclusive): {end_time}")
                         except Exception as date_err:
                             logger.error(f"다박 일정 날짜 파싱 실패: {date_err}")
                     
@@ -3885,7 +3887,8 @@ class A2AService:
                                         end_time=end_time.isoformat(),
                                         location=proposal.get("location"),
                                         description="A2A Agent에 의해 자동 생성된 일정입니다.",
-                                        attendees=[] 
+                                        attendees=[],
+                                        is_all_day=is_all_day_event  # [FIX] 다박이면 종일 이벤트
                                     )
                                     
                                     gc_service = GoogleCalendarService()
@@ -4221,8 +4224,43 @@ class A2AService:
                     target_session_id = curr_origin_session_id if curr_origin_session_id else None
                     target_friend_id = user_id if not target_session_id else None
 
-                    # [DISABLED] 거절 시스템 문구를 채팅방에 남기지 않기 위해 chat_log 저장 생략
-                    
+                    # [FIX] 일정 거절 알림 로그 추가 (요청자에게 알림 표시)
+                    try:
+                        # 거절한 사용자가 아닌 다른 참여자들에게 거절 알림 생성
+                        for pid in all_participants:
+                            if str(pid) != str(user_id):  # 거절한 본인 제외
+                                # place_pref에서 일정 정보 추출
+                                first_pref = first_session.get("place_pref", {})
+                                if isinstance(first_pref, str):
+                                    try:
+                                        import json
+                                        first_pref = json.loads(first_pref)
+                                    except:
+                                        first_pref = {}
+                                
+                                schedule_date = first_pref.get("proposedDate") or first_pref.get("date") or proposal.get("date")
+                                schedule_time = first_pref.get("proposedTime") or first_pref.get("time") or proposal.get("time")
+                                schedule_activity = first_pref.get("activity") or first_pref.get("summary") or proposal.get("activity")
+                                
+                                await ChatRepository.create_chat_log(
+                                    user_id=str(pid),
+                                    request_text=None,
+                                    response_text=f"{user_name}님이 일정을 거절했습니다.",
+                                    friend_id=user_id,
+                                    message_type="schedule_rejection",
+                                    metadata={
+                                        "session_id": all_thread_sessions[0]["id"] if all_thread_sessions else None,
+                                        "rejected_by": user_id,
+                                        "rejected_by_name": user_name,
+                                        "schedule_date": schedule_date,
+                                        "schedule_time": schedule_time,
+                                        "schedule_activity": schedule_activity
+                                    }
+                                )
+                                logger.info(f"[DB] 일정 거절 알림 로그 생성: user={pid}, rejected_by={user_id}")
+                    except Exception as log_err:
+                        logger.warning(f"일정 거절 알림 로그 생성 실패: {log_err}")
+
                 return {"status": 200, "message": "약속에서 나갔습니다."}
 
         except Exception as e:

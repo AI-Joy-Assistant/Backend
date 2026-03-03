@@ -1,10 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import jwt
 import json
 import asyncio
-from config.settings import settings
 from config.settings import settings
 from .a2a_service import A2AService, convert_relative_date, convert_relative_time
 from .a2a_repository import A2ARepository
@@ -43,11 +42,12 @@ def get_current_user_id(request: Request) -> str:
 @router.post("/session/quick-create", response_model=A2AQuickCreateResponse, summary="홈 화면용 빠른 A2A 세션 생성")
 async def quick_create_a2a_session(
     request: A2AQuickCreateRequest,
+    background_tasks: BackgroundTasks,
     current_user_id: str = Depends(get_current_user_id),
 ):
     """
     홈 화면에서 날짜/시간이 이미 확정된 상태로 요청할 때 사용하는 경량 API.
-    - LLM/의도분석/협상 과정을 건너뛰고 세션만 즉시 생성합니다.
+    세션을 즉시 생성하고(빠른 응답), 백그라운드에서 A2A 협상을 시작합니다.
     """
     result = await A2AService.quick_create_multi_user_session(
         initiator_user_id=current_user_id,
@@ -65,6 +65,24 @@ async def quick_create_a2a_session(
 
     if result.get("status") != 200:
         raise HTTPException(status_code=result.get("status", 500), detail=result.get("error", "빠른 세션 생성 실패"))
+
+    # [FIX] 세션 생성 완료 후, 백그라운드에서 A2A 협상 엔진 가동
+    # 첫 번째 세션을 메인으로 사용 (모든 세션 ID 전달)
+    if result.get("session_ids"):
+        first_session_id = result["session_ids"][0]
+        background_tasks.add_task(
+            A2AService._execute_true_a2a_negotiation,
+            session_id=first_session_id,
+            initiator_user_id=current_user_id,
+            participant_user_ids=request.participant_user_ids,
+            summary=request.title,
+            duration_minutes=request.duration_minutes,
+            target_date=request.start_date,
+            target_time=request.start_time,
+            location=request.location,
+            all_session_ids=result["session_ids"],
+            duration_nights=request.duration_nights
+        )
 
     return A2AQuickCreateResponse(
         thread_id=result["thread_id"],
@@ -134,9 +152,19 @@ async def get_a2a_session(
         # 1. 메시지 조회하여 Process 구성
         # thread_id가 있으면 thread의 모든 메시지 조회 (모든 참여자에게 동일한 로그 표시)
         if thread_id:
+            # 디버그: thread에 속한 세션들 확인
+            thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+            print(f"🔍 [SESSION DETAIL] thread_sessions: {len(thread_sessions)}개, session_ids: {[s['id'] for s in thread_sessions]}")
+            
+            # 직접 현재 세션의 메시지도 확인
+            direct_messages = await A2ARepository.get_session_messages(session_id)
+            print(f"🔍 [SESSION DETAIL] direct_messages (session_id={session_id}): {len(direct_messages)}개")
+            
             messages = await A2ARepository.get_thread_messages(thread_id)
         else:
             messages = await A2ARepository.get_session_messages(session_id)
+        
+        print(f"🔍 [SESSION DETAIL] session_id={session_id}, thread_id={thread_id}, messages_count={len(messages)}")
         
         # 발신자 이름 조회를 위한 사용자 정보 캐시
         user_names_cache = {}
@@ -202,6 +230,59 @@ async def get_a2a_session(
                     proposal_info = f" ({proposal.get('date', '')} {proposal.get('time', '')})"
                     description += proposal_info
                 process.append({"step": step_label, "description": description, "created_at": created_at})
+        
+        # [FIX] 메시지가 없을 때 세션 상태 기반 시스템 로그 생성
+        # 항상 세션 생성 시점을 첫 번째 로그로 추가
+        session_created_at = session.get("created_at")
+        status = session.get("status", "")
+        
+        # 세션 생성 로그
+        system_process = []
+        system_process.append({
+            "step": "📋 일정 요청",
+            "description": "일정 조율 요청이 생성되었습니다.",
+            "created_at": session_created_at
+        })
+        
+        # 승인/거절 상태 로그 추가
+        approved_by = place_pref.get("approved_by", []) if isinstance(place_pref, dict) else []
+        if approved_by:
+            # AuthRepository는 이미 파일 상단에서 import됨 (line 21)
+            for uid in approved_by:
+                try:
+                    u = await AuthRepository.find_user_by_id(uid)
+                    u_name = u.get("name", "사용자") if u else "사용자"
+                    system_process.append({
+                        "step": "✅ 승인",
+                        "description": f"{u_name}님이 일정을 승인했습니다.",
+                        "created_at": session_created_at  # 정확한 시간은 없으므로 세션 시간 사용
+                    })
+                except:
+                    pass
+        
+        # 현재 상태 로그
+        if status == "in_progress":
+            system_process.append({
+                "step": "⏳ 대기 중",
+                "description": "다른 참여자의 응답을 기다리고 있습니다.",
+                "created_at": None
+            })
+        elif status == "negotiating":
+            system_process.append({
+                "step": "🤖 AI 협상 중",
+                "description": "AI 에이전트가 최적의 시간을 찾고 있습니다.",
+                "created_at": None
+            })
+        elif status == "pending_approval":
+            system_process.append({
+                "step": "📩 승인 대기",
+                "description": "협상이 완료되었습니다. 참여자 승인을 기다리고 있습니다.",
+                "created_at": None
+            })
+        
+        # 에이전트 메시지가 없을 때만 시스템 로그 사용 (있으면 에이전트 메시지만 표시)
+        if len(process) == 0:
+            process = system_process
         
         # 2. 기본 정보
         place_pref = session.get("place_pref", {}) or {}

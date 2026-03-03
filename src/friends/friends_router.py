@@ -53,6 +53,7 @@ async def reject_friend_request(
     current_user_id: str = Depends(get_current_user_id)
 ):
     """친구 요청을 거절합니다."""
+    print(f"🔴 [REJECT] 친구 요청 거절 호출됨 - request_id={request_id}, user_id={current_user_id}")
     result = await FriendsService().reject_friend_request(request_id, current_user_id)
     
     return JSONResponse(
