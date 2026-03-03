@@ -726,12 +726,19 @@ class A2AService:
                             end_time = parsed['end_time']
                             logger.info(f"📅 [Calendar Parse] ChatService 결과: start={start_time}, end={end_time}")
                 
-                # 시간 정보가 없으면 기본값 (내일 오후 2시)
+                # 시간 정보가 없으면 기본값
                 if not start_time:
-                    start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                    # [✅ FIX] 기본값에서도 duration_minutes 사용
-                    saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
-                    end_time = start_time + timedelta(minutes=saved_duration)
+                    # [FIX] 다박 일정인데 날짜 파싱 실패 시 → 기본 날짜로 종일 이벤트 생성 (중복 방지)
+                    if duration_nights > 0:
+                        start_time = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                        end_time = start_time + timedelta(days=duration_nights + 1)
+                        is_all_day_event = True  # 종일 이벤트 플래그 유지!
+                        logger.info(f"📅 [Calendar Parse] 다박 일정 fallback: 종일 이벤트로 생성 ({duration_nights}박)")
+                    else:
+                        start_time = datetime.now(KST).replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                        # [✅ FIX] 기본값에서도 duration_minutes 사용
+                        saved_duration = place_pref.get("duration_minutes", 60) if place_pref else 60
+                        end_time = start_time + timedelta(minutes=saved_duration)
             
             # 참여자 이름 조회 (활성 참여자 전원)
             initiator = await AuthRepository.find_user_by_id(initiator_user_id)
@@ -1131,7 +1138,20 @@ class A2AService:
             # 상대 날짜/시간 변환
             formatted_date = convert_relative_date(target_date) or target_date
             formatted_time = convert_relative_time(target_time, place_pref.get("activity")) or target_time
-            formatted_end_date = end_date or formatted_date  # 종료 날짜가 없으면 시작 날짜 사용
+            
+            # [FIX] duration_nights > 0이면 종료일 = 시작일 + duration_nights로 올바르게 계산
+            if duration_nights > 0 and formatted_date and not end_date:
+                try:
+                    if re.match(r'^\d{4}-\d{2}-\d{2}$', formatted_date):
+                        start_dt = datetime.strptime(formatted_date, "%Y-%m-%d")
+                        end_dt = start_dt + timedelta(days=duration_nights)
+                        formatted_end_date = end_dt.strftime("%Y-%m-%d")
+                    else:
+                        formatted_end_date = formatted_date
+                except:
+                    formatted_end_date = formatted_date
+            else:
+                formatted_end_date = end_date or formatted_date  # 종료 날짜가 없으면 시작 날짜 사용
             formatted_end_time = end_time or (formatted_time if formatted_time else "")  # 종료 시간
             
             # place_pref에 재조율 정보 추가 (시간 범위 포함)
@@ -1142,7 +1162,7 @@ class A2AService:
             reschedule_details = {
                 "rescheduleReason": reason,
                 "rescheduleRequestedBy": user_id,
-                "rescheduleRequestedAt": datetime.now().isoformat(),
+                "rescheduleRequestedAt": datetime.now(KST).isoformat(),  # [FIX] UTC → KST로 변경
                 "proposedDate": formatted_date,
                 "proposedTime": formatted_time,
                 "proposedEndDate": formatted_end_date,
@@ -1222,6 +1242,8 @@ class A2AService:
 
                 notify_targets = set([initiator_user_id] + participant_user_ids)
                 notify_targets.discard(user_id)  # 요청자 본인은 제외
+                # [FIX] 거절하고 나간 참여자도 알림 대상에서 제외
+                notify_targets -= left_participants_set
 
                 for target_id in notify_targets:
                     await ws_manager.send_personal_message({

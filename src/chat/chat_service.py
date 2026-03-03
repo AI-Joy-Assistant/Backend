@@ -287,10 +287,14 @@ class ChatService:
                 
                 # [FIX] 새로운 완전한 일정 요청인지 감지: 날짜 + 시간 범위가 메시지에 포함되면
                 # 이전 date_selected_context 무시하고 새 요청으로 처리
+                # [FIX] 변수 선언을 if 블록 밖으로 빼서 UnboundLocalError 방지
+                date_keywords = ["내일", "모레", "오늘", "다음주", "이번주"]
+                time_range_pattern = re.search(r'\d{1,2}\s*시.*부터.*\d{1,2}\s*시.*까지', message) or \
+                                     re.search(r'(오전|오후)\s*\d{1,2}\s*시.*부터', message)
+                                     
                 if date_selected_context:
-                    date_keywords = ["내일", "모레", "오늘", "다음주", "이번주"]
-                    time_range_pattern = re.search(r'\d{1,2}\s*시.*부터.*\d{1,2}\s*시.*까지', message) or \
-                                         re.search(r'(오전|오후)\s*\d{1,2}\s*시.*부터', message)
+                    pass # 위로 이동됨
+                    
                 has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
                 
                 if has_new_date and time_range_pattern:

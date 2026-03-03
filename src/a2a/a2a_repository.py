@@ -156,16 +156,23 @@ class A2ARepository:
             
             session_ids = [s['id'] for s in thread_sessions]
             
-            # 모든 세션의 메시지 조회
+            # 모든 세션의 메시지 조회 - [PERFORMANCE] 배치 조회로 N+1 문제 해결
+            try:
+                from config.database import get_async_supabase
+                async_client = await get_async_supabase()
+                response = await async_client.table('a2a_message').select('*').in_('session_id', session_ids).execute()
+                messages_data = response.data if response.data else []
+            except Exception as query_error:
+                print(f"thread 메시지 IN 쿼리 실패: {str(query_error)}")
+                messages_data = []
+
             all_messages = []
             seen_ids = set()  # 중복 제거용
-            for sid in session_ids:
-                messages = await A2ARepository.get_session_messages(sid)
-                for msg in messages:
-                    msg_id = msg.get('id')
-                    if msg_id and msg_id not in seen_ids:
-                        all_messages.append(msg)
-                        seen_ids.add(msg_id)
+            for msg in messages_data:
+                msg_id = msg.get('id')
+                if msg_id and msg_id not in seen_ids:
+                    all_messages.append(msg)
+                    seen_ids.add(msg_id)
             
             # 시간순 정렬
             all_messages.sort(key=lambda x: x.get('created_at', ''))
