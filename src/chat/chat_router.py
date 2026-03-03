@@ -525,7 +525,7 @@ async def get_notifications(
             logger.warning(f"친구 요청 알림 조회 실패: {friend_error}")
         
         # 2. 알림 로그 조회 (일정 거절, 친구 수락/거절, 일정 확정)
-        notification_types = ["schedule_rejection", "friend_accepted", "friend_rejected", "schedule_confirmed"]
+        notification_types = ["schedule_rejection", "friend_accepted", "friend_rejected", "schedule_confirmed", "schedule_reschedule"]
         logs = supabase.table("chat_log").select("*").eq(
             "user_id", current_user_id
         ).in_("message_type", notification_types).order(
@@ -581,6 +581,24 @@ async def get_notifications(
             elif msg_type == "friend_accepted":
                 title = "친구 수락"
                 message = f"{target_user_name}님이 친구 요청을 수락했습니다. 이제 일정을 조율해보세요!"
+            
+            elif msg_type == "schedule_reschedule":
+                # 재조율 요청 알림
+                schedule_date = metadata.get("schedule_date", "")
+                schedule_time = metadata.get("schedule_time", "")
+                schedule_activity = metadata.get("schedule_activity", "")
+                reschedule_by_name = metadata.get("reschedule_by_name", target_user_name)
+                
+                title = "재조율 요청"
+                time_info = f"{schedule_date} {schedule_time}".strip()
+                if schedule_activity:
+                    message = f"{reschedule_by_name}님이 '{schedule_activity}' 일정의 재조율을 요청했습니다."
+                    if time_info:
+                        message += f" ({time_info})"
+                else:
+                    message = f"{reschedule_by_name}님이 일정 재조율을 요청했습니다."
+                    if time_info:
+                        message += f" ({time_info})"
             
             elif msg_type == "schedule_confirmed":
                 # 일정 확정 메시지 구성
