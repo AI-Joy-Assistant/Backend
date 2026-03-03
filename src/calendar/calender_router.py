@@ -556,12 +556,26 @@ async def get_app_calendar_events(
             start_at = row.get('start_at')
             end_at = row.get('end_at')
             
+            # [FIX] is_all_day가 true이면 date 형식 사용 (종일 이벤트 올바르게 표시)
+            is_all_day = row.get('is_all_day', False)
+            
+            if is_all_day and start_at and end_at:
+                # 종일 이벤트: date 형식으로 변환 (YYYY-MM-DD)
+                start_date_str = start_at[:10] if isinstance(start_at, str) else start_at
+                end_date_str = end_at[:10] if isinstance(end_at, str) else end_at
+                start_obj = {"date": start_date_str}
+                end_obj = {"date": end_date_str}
+            else:
+                # 일반 이벤트: dateTime 형식
+                start_obj = {"dateTime": start_at} if start_at else {}
+                end_obj = {"dateTime": end_at} if end_at else {}
+            
             event = {
                 "id": row.get('id'),
                 "summary": row.get('summary'),
                 "location": row.get('location'),
-                "start": {"dateTime": start_at} if start_at else {},
-                "end": {"dateTime": end_at} if end_at else {},
+                "start": start_obj,
+                "end": end_obj,
                 "htmlLink": row.get('html_link'),
                 "status": row.get('status', 'confirmed'),
                 "source": "app",  # 앱 자체 캘린더임을 표시

@@ -415,6 +415,11 @@ async def get_user_sessions(
                 hidden_by = place_pref.get("hidden_by", [])
                 if current_user_id in hidden_by:
                     continue  # 이 세션은 현재 사용자 목록에서 제외
+
+                # [NEW] left_participants 확인 - 현재 사용자가 나간 세션이면 건너뛰기
+                left_participants = place_pref.get("left_participants", [])
+                if str(current_user_id) in [str(lp) for lp in left_participants]:
+                    continue  # 이 세션은 현재 사용자 목록에서 제외
             
             # thread_id가 없으면 세션 ID를 thread_id로 사용 (1:1 세션)
             if not thread_id:
@@ -467,6 +472,8 @@ async def get_user_sessions(
         grouped_sessions.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
         # 3. 상세 정보 일괄 조회 (DB 부하 감소)
+        # [FIX] 현재 사용자 정보도 포함하여 attendees에 본인 아바타 표시
+        all_participant_ids.add(current_user_id)
         user_details_map = {}
         if all_participant_ids:
             user_details_map = await ChatRepository.get_user_details_by_ids(list(all_participant_ids))
@@ -801,6 +808,55 @@ async def get_user_sessions(
                     
                     has_conflict = len(conflicting_sessions) > 0
             
+            # [NEW] 리스트 API에서 직접 attendees 정보 구축 (상세 페이지 즉시 로딩용)
+            # participant_user_ids에서 참여자 ID 가져오기
+            all_p_ids = session.get("participant_user_ids") or []
+            if not all_p_ids:
+                init_id = session.get("initiator_user_id")
+                tgt_id = session.get("target_user_id")
+                if init_id: all_p_ids.append(init_id)
+                if tgt_id and tgt_id != init_id: all_p_ids.append(tgt_id)
+            
+            # 승인 정보 계산
+            approved_user_ids_for_list = set()
+            if session_status in ["pending_approval", "in_progress", "pending", "needs_reschedule", "awaiting_user_choice"]:
+                for uid in place_pref.get("approved_by_list", []):
+                    approved_user_ids_for_list.add(str(uid))
+                reschedule_by = place_pref.get("rescheduleRequestedBy")
+                if reschedule_by:
+                    approved_user_ids_for_list.add(str(reschedule_by))
+                elif initiator_id:
+                    approved_user_ids_for_list.add(str(initiator_id))
+            elif session_status == "completed":
+                for pid in all_p_ids:
+                    if pid not in left_participants:
+                        approved_user_ids_for_list.add(str(pid))
+            
+            list_attendees = []
+            for pid in all_p_ids:
+                user_info = user_details_map.get(pid, {})
+                name = user_info.get("name", "알 수 없음")
+                avatar = user_info.get("profile_image")
+                if pid == current_user_id:
+                    name = "나"
+                is_approved = str(pid) in approved_user_ids_for_list
+                list_attendees.append({
+                    "id": pid,
+                    "name": name,
+                    "avatar": avatar,
+                    "is_approved": is_approved
+                })
+            
+            # 현재 사용자도 참여자 목록에 없으면 추가
+            if current_user_id not in all_p_ids:
+                curr_info = user_details_map.get(current_user_id, {})
+                list_attendees.insert(0, {
+                    "id": current_user_id,
+                    "name": "나",
+                    "avatar": curr_info.get("profile_image"),
+                    "is_approved": str(current_user_id) in approved_user_ids_for_list
+                })
+            
             details = {
                 "proposer": initiator_name,
                 "proposerAvatar": initiator_avatar,
@@ -817,7 +873,17 @@ async def get_user_sessions(
                 "conflicting_sessions": conflicting_sessions,
                 "left_participants": left_participants,  # 프론트엔드 필터링용
                 # [NEW] 다박 일정 정보 - 1박 이상이면 시간 대신 날짜 범위 표시
-                "duration_nights": place_pref.get("duration_nights", 0)
+                "duration_nights": place_pref.get("duration_nights", 0),
+                # [NEW] 참여자 상세 정보 - 상세 페이지 즉시 로딩용
+                "attendees": list_attendees,
+                # [NEW] 합의 시간 정보 (완료/승인 대기 상태일 때)
+                "agreedDate": place_pref.get("agreedDate") or (proposed_date if session_status == "completed" else None),
+                "agreedTime": place_pref.get("agreedTime") or (proposed_time if session_status == "completed" else None),
+                "agreedEndTime": place_pref.get("agreedEndTime") or (place_pref.get("proposedEndTime") if session_status == "completed" else None),
+                # 재조율 정보
+                "rescheduleRequestedBy": place_pref.get("rescheduleRequestedBy"),
+                "rescheduleRequestedAt": place_pref.get("rescheduleRequestedAt"),
+                "rescheduleReason": place_pref.get("rescheduleReason"),
             }
 
             session["title"] = title
@@ -1013,6 +1079,12 @@ async def get_pending_requests(
                 continue
             if status == 'in_progress' and not is_reschedule:
                 continue
+
+            # [FILTER] 내가 나간 세션 (거절 등) 숨김
+            if isinstance(place_pref, dict):
+                left_participants = place_pref.get("left_participants", [])
+                if str(current_user_id) in [str(lp) for lp in left_participants]:
+                    continue
             
             # [FILTER] 내 행동이 필요한지 확인 (My Turn)
             # 내가 이미 승인했거나(보낸 사람), 내가 처리할 차례가 아니면 숨김
@@ -1305,6 +1377,10 @@ async def reschedule_session(
             end_time=end_time,
             duration_nights=duration_nights  # [NEW] 박 수 전달
         )
+        
+        # [FIX] 서비스에서 에러 상태를 반환하면 HTTP 에러로 변환
+        if isinstance(result, dict) and result.get("status") and result["status"] != 200:
+            raise HTTPException(status_code=result["status"], detail=result.get("error", "재조율 실패"))
         
         return result
     except HTTPException:

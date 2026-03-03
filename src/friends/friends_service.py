@@ -249,6 +249,17 @@ class FriendsService:
             result = await self.repository.delete_friend(user_id, friend_id)
             
             if result["success"]:
+                # WebSocket으로 상대방에게 삭제 알림 전송
+                try:
+                    await ws_manager.send_personal_message({
+                        "type": "friend_deleted",
+                        "deleted_by": user_id,
+                        "timestamp": datetime.now(KST).isoformat()
+                    }, friend_id)
+                    print(f"[WS] 친구 삭제 알림 전송: {friend_id}")
+                except Exception as ws_err:
+                    print(f"[WS] 친구 삭제 알림 전송 실패: {ws_err}")
+
                 return {
                     "status": 200,
                     "message": result["message"]

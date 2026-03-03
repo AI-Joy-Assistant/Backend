@@ -895,9 +895,10 @@ class A2AService:
                                 location=location,
                                 start_at=start_time.isoformat(),
                                 end_at=end_time.isoformat(),
-                                html_link=html_link  # None이면 앱에서 직접 표시
+                                html_link=html_link,  # None이면 앱에서 직접 표시
+                                is_all_day=is_all_day_event  # [NEW] 종일 이벤트 플래그
                             )
-                            logger.info(f"✅ 캘린더 일정 DB 저장 완료: {evt_summary} (user: {pid}, google_linked: {bool(access_token)})")
+                            logger.info(f"✅ 캘린더 일정 DB 저장 완료: {evt_summary} (user: {pid}, google_linked: {bool(access_token)}, all_day: {is_all_day_event})")
                                 
                         except Exception as e:
                             logger.error(f"유저 {pid} 캘린더 등록 중 에러: {e}")
@@ -1118,6 +1119,51 @@ class A2AService:
                 if thread_sessions:
                     all_session_ids = [s["id"] for s in thread_sessions]
                     print(f"🔗 [Reschedule] thread_id={thread_id}로 {len(all_session_ids)}개 세션 발견")
+                    
+            # [NEW] 재조율 요청 전, 나를 제외한 모든 참가자가 나갔는지 확인
+            # participant_user_ids (리스트) 또는 initiator/target
+            participants = set()
+            p_ids = session.get("participant_user_ids")
+            if p_ids and isinstance(p_ids, list):
+                participants.update(str(p) for p in p_ids if p)
+            else:
+                participants.add(str(session.get("initiator_user_id")))
+                participants.add(str(session.get("target_user_id")))
+            
+            # [FIX] 모든 thread 세션에서 left_participants 수집 (단일 세션만 보면 누락 가능)
+            left_participants = set(str(lp) for lp in place_pref.get("left_participants", []))
+            if thread_id:
+                thread_sessions = await A2ARepository.get_thread_sessions(thread_id)
+                for ts in (thread_sessions or []):
+                    ts_pref = ts.get("place_pref", {})
+                    if isinstance(ts_pref, str):
+                        try: ts_pref = json.loads(ts_pref)
+                        except: ts_pref = {}
+                    for lp in ts_pref.get("left_participants", []):
+                        left_participants.add(str(lp))
+                    # participants도 thread 세션에서 추가 수집
+                    ts_p_ids = ts.get("participant_user_ids")
+                    if ts_p_ids and isinstance(ts_p_ids, list):
+                        participants.update(str(p) for p in ts_p_ids if p)
+                    if ts.get("initiator_user_id"):
+                        participants.add(str(ts.get("initiator_user_id")))
+                    if ts.get("target_user_id"):
+                        participants.add(str(ts.get("target_user_id")))
+                    
+            # place_pref의 participants도 확인
+            pref_participants = place_pref.get("participants", [])
+            if pref_participants:
+                participants.update(str(p) for p in pref_participants if p)
+            
+            # 전체 참가자(나 제외)
+            other_participants = participants - {user_id}
+            
+            print(f"🔍 [Reschedule Guard] participants={participants}, left={left_participants}, other={other_participants}, user_id={user_id}")
+            
+            # 다른 참가자들이 모두 left_participants에 포함되어 있는지 확인
+            if not other_participants or other_participants.issubset(left_participants):
+                print(f"🚫 [Reschedule Guard] BLOCKED! 모든 참가자가 거절 → 재조율 불가")
+                return {"status": 400, "error": "모든 참가자가 일정을 거절하여 재조율할 수 없습니다."}
             
             # 모든 관련 세션 상태를 'in_progress'로 변경
             for sid in all_session_ids:
@@ -2099,7 +2145,8 @@ class A2AService:
         location: Optional[str],
         start_at: str,
         end_at: str,
-        html_link: Optional[str] = None
+        html_link: Optional[str] = None,
+        is_all_day: bool = False
     ) -> Optional[str]:
         """calendar_event 테이블에 이벤트 저장"""
         try:
@@ -2140,6 +2187,7 @@ class A2AService:
                     "start_at": start_dt.isoformat(),
                     "end_at": end_dt.isoformat(),
                     "html_link": html_link,
+                    "is_all_day": is_all_day,
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq('id', event_id).execute()
                 return event_id
@@ -2154,6 +2202,7 @@ class A2AService:
                     "start_at": start_dt.isoformat(),
                     "end_at": end_dt.isoformat(),
                     "html_link": html_link,
+                    "is_all_day": is_all_day,
                     "time_zone": "Asia/Seoul",
                     "status": "confirmed"
                 }

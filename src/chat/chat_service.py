@@ -291,11 +291,11 @@ class ChatService:
                     date_keywords = ["내일", "모레", "오늘", "다음주", "이번주"]
                     time_range_pattern = re.search(r'\d{1,2}\s*시.*부터.*\d{1,2}\s*시.*까지', message) or \
                                          re.search(r'(오전|오후)\s*\d{1,2}\s*시.*부터', message)
-                has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
+                    has_new_date = any(kw in message for kw in date_keywords) or re.search(r'\d{1,2}월\s*\d{1,2}일', message)
                 
-                if has_new_date and time_range_pattern:
-                    logger.info(f"[CONTEXT OVERRIDE] 새로운 완전한 일정 요청 감지, date_selected_context 무시: '{message}'")
-                    date_selected_context = None  # 컨텍스트 해제 → 아래 메인 로직으로 진행
+                    if has_new_date and time_range_pattern:
+                        logger.info(f"[CONTEXT OVERRIDE] 새로운 완전한 일정 요청 감지, date_selected_context 무시: '{message}'")
+                        date_selected_context = None  # 컨텍스트 해제 → 아래 메인 로직으로 진행
 
             if date_selected_context:
                 # [NEW] 끝나는 시간 대기 모드인지 확인
@@ -919,6 +919,23 @@ class ChatService:
             if schedule_info is None:
                 schedule_info = {}
             
+            # [✅ NEW] 프론트엔드에서 명시적 파라미터가 넘어왔다면, LLM이 실패하거나 누락했어도 schedule_info를 보강합니다.
+            if explicit_title and not schedule_info.get("title"):
+                schedule_info["title"] = explicit_title
+                schedule_info["activity"] = explicit_title
+            if explicit_location and not schedule_info.get("location"):
+                schedule_info["location"] = explicit_location
+            if start_date and not schedule_info.get("str_date"):
+                schedule_info["start_date"] = start_date
+                schedule_info["date"] = start_date
+            if start_time and not schedule_info.get("start_time"):
+                schedule_info["start_time"] = start_time
+                schedule_info["time"] = start_time
+            if end_time and not schedule_info.get("end_time"):
+                schedule_info["end_time"] = end_time
+            if start_date or selected_friend_ids:
+                schedule_info["has_schedule_request"] = True
+            
             # logger.info(f"[병렬화] 일정 추출 + 응답 생성 완료")
             
             friend_names_list = schedule_info.get("friend_names")
@@ -963,6 +980,12 @@ class ChatService:
             # UI에서 친구 선택했으면 missing_fields에서 제거
             if selected_friend_ids:
                 missing = [f for f in missing if f not in ["friend_name", "friend_names"]]
+            
+            # 명시적으로 넘어온 값이 있으면 missing에서 제거
+            if start_date:
+                missing = [f for f in missing if f not in ["date", "start_date"]]
+            if start_time or is_all_day:
+                missing = [f for f in missing if f not in ["time", "start_time"]]
             
             # activity, title, location은 없어도 일정 조율 진행 가능하므로 제거
             missing = [f for f in missing if f not in ["activity", "title", "location"]]
@@ -1447,8 +1470,10 @@ class ChatService:
                                 duration_nights=duration_nights  # ✅ 박 수 전달
                             )
                             logger.info(f"[DEBUG_A2A_TRACE] start_multi_user_session returned: {a2a_result}")
+                            print(f"[DEBUG_A2A_TRACE_PRINT] start_multi_user_session returned: {a2a_result}")
                         except Exception as e:
                             logger.error(f"[DEBUG_A2A_TRACE] start_multi_user_session FAILED: {e}", exc_info=True)
+                            print(f"[DEBUG_A2A_TRACE_PRINT] start_multi_user_session FAILED: {e}")
                             raise e
                         
                         return {
