@@ -822,6 +822,12 @@ async def get_user_sessions(
             session["summary"] = summary
             session["details"] = details
             
+            # [FIX] 서버사이드 필터: 현재 사용자가 left_participants에 포함되어 있으면 응답에서 제외
+            # (거절한 사람의 목록에는 아예 전달하지 않음)
+            left_p = left_participants  # 위에서 이미 추출됨
+            if str(current_user_id) in [str(lp) for lp in left_p]:
+                continue
+            
             final_sessions.append(A2ASessionResponse(**session))
 
 

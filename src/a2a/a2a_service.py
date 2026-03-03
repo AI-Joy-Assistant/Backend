@@ -1242,6 +1242,8 @@ class A2AService:
 
                 notify_targets = set([initiator_user_id] + participant_user_ids)
                 notify_targets.discard(user_id)  # 요청자 본인은 제외
+                # [FIX] 거절하고 나간 참여자도 알림 대상에서 제외
+                notify_targets -= left_participants_set
 
                 for target_id in notify_targets:
                     await ws_manager.send_personal_message({

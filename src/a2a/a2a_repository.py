@@ -158,7 +158,9 @@ class A2ARepository:
             
             # 모든 세션의 메시지 조회 - [PERFORMANCE] 배치 조회로 N+1 문제 해결
             try:
-                response = supabase.table('a2a_message').select('*').in_('session_id', session_ids).execute()
+                from config.database import get_async_supabase
+                async_client = await get_async_supabase()
+                response = await async_client.table('a2a_message').select('*').in_('session_id', session_ids).execute()
                 messages_data = response.data if response.data else []
             except Exception as query_error:
                 print(f"thread 메시지 IN 쿼리 실패: {str(query_error)}")
