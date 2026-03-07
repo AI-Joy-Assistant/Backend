@@ -139,14 +139,13 @@ class FriendsService:
                 
                 # [Notification] 로그 기록 (History)
                 try:
-                    self.repository.supabase.table("chat_log").insert({
-                        "user_id": result["from_user_id"],
-                        "friend_id": user_id,
-                        "request_text": None,
-                        "response_text": f"친구 요청이 수락되었습니다.",
-                        "message_type": "friend_accepted",
-                        "created_at": datetime.now(KST).isoformat()
-                    }).execute()
+                    await ChatRepository.create_chat_log(
+                        user_id=result["from_user_id"],
+                        request_text=None,
+                        response_text="친구 요청이 수락되었습니다.",
+                        friend_id=user_id,
+                        message_type="friend_accepted",
+                    )
                 except Exception as log_err:
                     print(f"친구 수락 로그 기록 실패: {log_err}")
                 
@@ -183,14 +182,13 @@ class FriendsService:
                         }, result["from_user_id"])
                         
                         # 2. 로그 기록 (History)
-                        self.repository.supabase.table("chat_log").insert({
-                            "user_id": result["from_user_id"],
-                            "friend_id": user_id,
-                            "request_text": None,
-                            "response_text": f"친구 요청이 거절되었습니다.",
-                            "message_type": "friend_rejected",
-                            "created_at": datetime.now(KST).isoformat()
-                        }).execute()
+                        await ChatRepository.create_chat_log(
+                            user_id=result["from_user_id"],
+                            request_text=None,
+                            response_text="친구 요청이 거절되었습니다.",
+                            friend_id=user_id,
+                            message_type="friend_rejected",
+                        )
                 except Exception as e:
                     print(f"친구 거절 알림/로그 처리 실패: {e}")
 
