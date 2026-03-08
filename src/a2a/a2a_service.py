@@ -2414,13 +2414,16 @@ class A2AService:
             try:
                 initiator = await AuthRepository.find_user_by_id(initiator_user_id)
                 initiator_name = initiator.get("name", "사용자") if initiator else "사용자"
-                for target_id in target_user_ids:
+                for sess_info in sessions:
+                    target_id = sess_info["target_id"]
                     await ws_manager.send_personal_message({
                         "type": "a2a_request",
+                        "session_id": sess_info["session_id"],  # [FIX] session_id 추가
                         "thread_id": thread_id,
                         "from_user": initiator_name,
+                        "from_user_id": initiator_user_id,  # [FIX] from_user_id 추가
                         "summary": summary or "일정 조율 요청",
-                        "session_created": True,  # 세션 생성 알림임을 표시
+                        "session_created": True,
                         "timestamp": datetime.now(KST).isoformat()
                     }, target_id)
                 logger.info(f"[WS] 세션 생성 즉시 알림 전송: {target_user_ids}")
@@ -2589,11 +2592,14 @@ class A2AService:
             
             # WebSocket으로 모든 대상자에게 실시간 알림 전송
             try:
-                for target_id in target_user_ids:
+                for sess_info in sessions:
+                    target_id = sess_info["target_id"]
                     await ws_manager.send_personal_message({
                         "type": "a2a_request",
+                        "session_id": sess_info["session_id"],  # [FIX] session_id 추가
                         "thread_id": thread_id,
                         "from_user": initiator_name,
+                        "from_user_id": initiator_user_id,  # [FIX] from_user_id 추가
                         "summary": summary or "일정 조율 요청",
                         "proposal": result.get("proposal"),
                         "timestamp": datetime.now(KST).isoformat()
