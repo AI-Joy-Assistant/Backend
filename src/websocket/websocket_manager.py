@@ -35,16 +35,19 @@ class ConnectionManager:
     
     async def send_personal_message(self, message: dict, user_id: str):
         """특정 사용자에게 메시지 전송"""
-        logger.info(f"[WS] 메시지 전송 시도 - user_id: {user_id}, 연결상태: {self.is_user_connected(user_id)}")
-        logger.info(f"[WS] 현재 연결된 사용자들: {list(self.active_connections.keys())}")
+        print(f"🔔🔔🔔 [WS] 메시지 전송 시도 - user_id: {user_id}, type: {message.get('type', '?')}")
+        print(f"🔔🔔🔔 [WS] 현재 연결된 사용자들: {list(self.active_connections.keys())}")
+        print(f"🔔🔔🔔 [WS] 대상 사용자 연결 상태: {self.is_user_connected(user_id)}")
         
         if user_id in self.active_connections:
             for connection in self.active_connections[user_id]:
                 try:
                     await connection.send_json(message)
-                    logger.info(f"[WS] 메시지 전송 성공: {user_id}")
+                    print(f"✅✅✅ [WS] 메시지 전송 성공: {user_id} - type: {message.get('type', '?')}")
                 except Exception as e:
-                    logger.warning(f"[WS] 메시지 전송 실패: {e}")
+                    print(f"❌❌❌ [WS] 메시지 전송 실패: {e}")
+        else:
+            print(f"⚠️⚠️⚠️ [WS] 대상 사용자 {user_id}가 연결되어 있지 않음! 메시지 전송 불가")
     
     async def broadcast_to_users(self, message: dict, user_ids: List[str]):
         """여러 사용자에게 메시지 전송"""
