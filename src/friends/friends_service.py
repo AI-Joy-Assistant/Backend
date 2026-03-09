@@ -43,15 +43,19 @@ class FriendsService:
                 
                 # WebSocket으로 상대방에게 실시간 알림 전송
                 try:
-                    # 요청자 이름 조회
+                    # 요청자 정보 조회 (이름, 이메일, 프로필 사진)
                     from_user = await self.repository.get_user_by_id(current_user_id)
                     from_name = from_user.get('name', '사용자') if from_user else '사용자'
+                    from_email = from_user.get('email', '') if from_user else ''
+                    from_picture = from_user.get('profile_image') if from_user else None
                     
                     await ws_manager.send_personal_message({
                         "type": "friend_request",
                         "request_id": result["data"]["id"],
                         "from_user_id": current_user_id,
                         "from_user_name": from_name,
+                        "from_user_email": from_email,
+                        "from_user_picture": from_picture,
                         "timestamp": datetime.now(KST).isoformat()
                     }, user['id'])
                     print(f"[WS] 친구 요청 알림 전송: {user['id']}")
@@ -124,29 +128,59 @@ class FriendsService:
             result = await self.repository.accept_friend_request(request_id, user_id)
             
             if result["success"]:
-                # WebSocket으로 요청자에게 수락 알림 전송
+                # WebSocket으로 양쪽 모두에게 수락 알림 전송 (즉시 친구목록 업데이트용)
                 try:
-                    if result.get("from_user_id"):
+                    from_user_id = result.get("from_user_id")
+                    if from_user_id:
+                        # 수락자 정보 조회
+                        accepter = await self.repository.get_user_by_id(user_id)
+                        accepter_name = accepter.get('name', '사용자') if accepter else '사용자'
+                        accepter_email = accepter.get('email', '') if accepter else ''
+                        accepter_picture = accepter.get('profile_image') if accepter else None
+                        
+                        # 요청자 정보 조회
+                        requester = await self.repository.get_user_by_id(from_user_id)
+                        requester_name = requester.get('name', '사용자') if requester else '사용자'
+                        requester_email = requester.get('email', '') if requester else ''
+                        requester_picture = requester.get('profile_image') if requester else None
+                        
+                        # 1) 요청자에게: 수락한 사람 정보 포함
                         await ws_manager.send_personal_message({
                             "type": "friend_accepted",
                             "request_id": request_id,
                             "accepted_by": user_id,
+                            "friend_id": user_id,
+                            "friend_name": accepter_name,
+                            "friend_email": accepter_email,
+                            "friend_picture": accepter_picture,
                             "timestamp": datetime.now(KST).isoformat()
-                        }, result["from_user_id"])
-                        print(f"[WS] 친구 수락 알림 전송: {result['from_user_id']}")
+                        }, from_user_id)
+                        print(f"[WS] 친구 수락 알림 전송 (→요청자): {from_user_id}")
+                        
+                        # 2) 수락자 본인에게: 요청자 정보 포함
+                        await ws_manager.send_personal_message({
+                            "type": "friend_accepted",
+                            "request_id": request_id,
+                            "accepted_by": user_id,
+                            "friend_id": from_user_id,
+                            "friend_name": requester_name,
+                            "friend_email": requester_email,
+                            "friend_picture": requester_picture,
+                            "timestamp": datetime.now(KST).isoformat()
+                        }, user_id)
+                        print(f"[WS] 친구 수락 알림 전송 (→수락자): {user_id}")
                 except Exception as ws_err:
                     print(f"[WS] 친구 수락 알림 전송 실패: {ws_err}")
                 
                 # [Notification] 로그 기록 (History)
                 try:
-                    self.repository.supabase.table("chat_log").insert({
-                        "user_id": result["from_user_id"],
-                        "friend_id": user_id,
-                        "request_text": None,
-                        "response_text": f"친구 요청이 수락되었습니다.",
-                        "message_type": "friend_accepted",
-                        "created_at": datetime.now(KST).isoformat()
-                    }).execute()
+                    await ChatRepository.create_chat_log(
+                        user_id=result["from_user_id"],
+                        request_text=None,
+                        response_text="친구 요청이 수락되었습니다.",
+                        friend_id=user_id,
+                        message_type="friend_accepted",
+                    )
                 except Exception as log_err:
                     print(f"친구 수락 로그 기록 실패: {log_err}")
                 
@@ -183,14 +217,13 @@ class FriendsService:
                         }, result["from_user_id"])
                         
                         # 2. 로그 기록 (History)
-                        self.repository.supabase.table("chat_log").insert({
-                            "user_id": result["from_user_id"],
-                            "friend_id": user_id,
-                            "request_text": None,
-                            "response_text": f"친구 요청이 거절되었습니다.",
-                            "message_type": "friend_rejected",
-                            "created_at": datetime.now(KST).isoformat()
-                        }).execute()
+                        await ChatRepository.create_chat_log(
+                            user_id=result["from_user_id"],
+                            request_text=None,
+                            response_text="친구 요청이 거절되었습니다.",
+                            friend_id=user_id,
+                            message_type="friend_rejected",
+                        )
                 except Exception as e:
                     print(f"친구 거절 알림/로그 처리 실패: {e}")
 
